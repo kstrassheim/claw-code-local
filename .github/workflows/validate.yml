@@ -41,6 +41,24 @@ jobs:
         env:
           DOCKER_HOST: ""
 
+      - name: Trust mainpi Registry CA
+        # `docker buildx imagetools create` (used in the mirror step
+        # below) makes direct HTTPS calls from the runner process
+        # itself — it does NOT go through the dind dockerd, so the
+        # /etc/docker/certs.d mount that trusts mainpi.local:30500
+        # for `docker pull/push` is invisible to it. The mainpi-ca
+        # ConfigMap is mounted on the runner pod at
+        # /usr/local/share/ca-certificates/mainpi-ca.crt (Debian
+        # trust-source dir), but no update-ca-certificates has run
+        # yet, so the cert isn't in /etc/ssl/certs/ca-certificates.crt
+        # (the bundle Go reads). Trigger the update so the runner
+        # process trusts the cert before any imagetools call.
+        # Without this: `tls: failed to verify certificate: x509:
+        # certificate signed by unknown authority` against
+        # mainpi.local:30500.
+        run: |
+          sudo update-ca-certificates 2>&1 | tail -5
+
       - name: Require OPENCLAW_REGISTRY_URL
         run: |
           if [[ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]]; then

@@ -29,6 +29,19 @@ jobs:
           echo "OLLAMA_VERSION=${OLLAMA_VERSION}" >> "$GITHUB_ENV"
           echo "OPEN_WEBUI_VERSION=${OPEN_WEBUI_VERSION}" >> "$GITHUB_ENV"
 
+      - name: Trust mainpi Registry CA
+        # `docker buildx imagetools create` (used in the mirror steps
+        # below) makes direct HTTPS calls from the runner process
+        # itself, bypassing dind's /etc/docker/certs.d trust store.
+        # The mainpi-ca ConfigMap is on disk at
+        # /usr/local/share/ca-certificates/mainpi-ca.crt but needs
+        # update-ca-certificates to land in /etc/ssl/certs/ca-certificates.crt
+        # (the bundle the Go-based buildx binary reads). Without this:
+        # `tls: failed to verify certificate: x509: certificate
+        # signed by unknown authority` against mainpi.local:30500.
+        run: |
+          sudo update-ca-certificates 2>&1 | tail -5
+
       - name: Log In To Registry
         run: |
           test -n "${REGISTRY_USERNAME:-}"
