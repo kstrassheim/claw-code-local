@@ -59,6 +59,19 @@ jobs:
         run: |
           sudo update-ca-certificates 2>&1 | tail -5
 
+      - name: Log In To Registry
+        # docker buildx imagetools reads auth from ~/.docker/config.json,
+        # which `docker login` writes to. Without this step, the mirror
+        # step below hits mainpi.local with no auth and gets
+        # `401 Unauthorized` on the destination blob HEAD.
+        # REGISTRY_USERNAME / REGISTRY_PASSWORD are injected into the
+        # runner pod's env via envFrom registry-creds in
+        # shared/runner-values.yaml — not GH secrets.
+        run: |
+          test -n "${REGISTRY_USERNAME:-}" || { echo "::error::REGISTRY_USERNAME missing in runner env (registry-creds Secret)"; exit 1; }
+          test -n "${REGISTRY_PASSWORD:-}" || { echo "::error::REGISTRY_PASSWORD missing in runner env (registry-creds Secret)"; exit 1; }
+          echo "${REGISTRY_PASSWORD}" | docker login "${{ vars.OPENCLAW_REGISTRY_URL }}" --username "${REGISTRY_USERNAME}" --password-stdin
+
       - name: Require OPENCLAW_REGISTRY_URL
         run: |
           if [[ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]]; then
