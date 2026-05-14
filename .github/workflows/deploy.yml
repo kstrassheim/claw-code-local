@@ -147,6 +147,17 @@ jobs:
           . ./VERSIONS
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
+      - name: Require OPENCLAW_REGISTRY_URL
+        # Fail fast with a clear message rather than letting an empty
+        # ${REGISTRY} produce malformed image refs like
+        # "/openclaw/claw-code-local/openclaw-base:tag" downstream.
+        run: |
+          if [ -z "${REGISTRY}" ]; then
+            echo "::error::Repo variable OPENCLAW_REGISTRY_URL is not set. Configure it under Settings → Secrets and variables → Actions → Variables (e.g. mainpi.local:30500)."
+            exit 1
+          fi
+          echo "Using registry: ${REGISTRY}"
+
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
         # Mirrors claw-code's "Ensure openclaw-base is mirrored ..." step.
         # Upstream image lives at ghcr.io/openclaw/openclaw and is tagged

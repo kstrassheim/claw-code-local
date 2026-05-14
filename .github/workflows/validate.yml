@@ -30,6 +30,17 @@ jobs:
           . ./VERSIONS
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
+      - name: Require OPENCLAW_REGISTRY_URL
+        # Fail fast with a clear message rather than letting an empty
+        # vars.OPENCLAW_REGISTRY_URL turn IMAGE_NAME into a leading-slash
+        # reference downstream.
+        run: |
+          if [ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]; then
+            echo "::error::Repo variable OPENCLAW_REGISTRY_URL is not set. Configure it under Settings → Secrets and variables → Actions → Variables (e.g. mainpi.local:30500)."
+            exit 1
+          fi
+          echo "Using registry: ${{ vars.OPENCLAW_REGISTRY_URL }}"
+
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
         # Same logic as deploy.yml — see comment there. Validate runs on
         # PRs and just needs the base image available so the Dockerfile
