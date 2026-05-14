@@ -2,21 +2,56 @@ name: Validate (Pull Request)
 
 on:
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   verify-build:
     name: Verify Image Build
     runs-on: arc-runner-scale-claw-code-local
     env:
+      OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
       REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-      IMAGE_NAME: openclaw/claw-code-local
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Read VERSIONS
+        run: |
+          . ./VERSIONS
+          echo "UPSTREAM_REF=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${OPENCLAW_VERSION}" >> "$GITHUB_ENV"
+          echo "GH_CLI_VERSION=${GH_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "GLAB_VERSION=${GLAB_VERSION}" >> "$GITHUB_ENV"
+          echo "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_VERSION=${TERRAFORM_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
+          echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Require OPENCLAW_REGISTRY_URL
+        run: |
+          if [[ -z "$REGISTRY" ]]; then
+            echo "::error::OPENCLAW_REGISTRY_URL is not set. Cannot proceed."
+            exit 1
+          fi
+          echo "Using registry: ${REGISTRY}"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # Allow insecure registry so buildkit can talk to mainpi.local
+          # without needing its self-signed CA in the system trust store.
+          # The CA cert is mounted at /etc/docker/certs.d/mainpi.local:30500
+          # by the ARC runner pod, but buildx's builder runs as a separate
+          # container so we need the driver to skip TLS verification.
+          driver-opts: |
+            image=moby/buildkit:master
+            opt=registry.mirror.mainpi.local:30500=insecure
+            opt=registry.insecure-tls-mainpi.local:30500=true
 
       - name: Log in to local registry
         # REGISTRY_USERNAME / REGISTRY_PASSWORD come from the runner pod's
@@ -27,54 +62,48 @@ jobs:
           test -n "${REGISTRY_PASSWORD:-}" || { echo "::error::REGISTRY_PASSWORD missing in runner env (registry-creds Secret)"; exit 1; }
           echo "${REGISTRY_PASSWORD}" | docker login "${{ vars.OPENCLAW_REGISTRY_URL }}" --username "${REGISTRY_USERNAME}" --password-stdin
 
-      - name: Read VERSIONS file
+      - name: Clone Upstream OpenClaw
         run: |
-          . ./VERSIONS
-          echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
-
-      - name: Require OPENCLAW_REGISTRY_URL
-        # Fail fast with a clear message rather than letting an empty
-        # vars.OPENCLAW_REGISTRY_URL turn IMAGE_NAME into a leading-slash
-        # reference downstream.
-        run: |
-          if [ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]; then
-            echo "::error::Repo variable OPENCLAW_REGISTRY_URL is not set. Configure it under Settings → Secrets and variables → Actions → Variables (e.g. mainpi.local:30500)."
-            exit 1
-          fi
-          echo "Using registry: ${{ vars.OPENCLAW_REGISTRY_URL }}"
+          git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
+          cd _openclaw_src
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "${UPSTREAM_REF}"
 
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
+        # Multi-arch mirror via buildx imagetools so the registry retains
+        # the full manifest list (arm64 + amd64) instead of the runner's
+        # single arch. ghcr.io/openclaw/openclaw is a public package so
+        # no login needed. Skip the import when the tag already exists.
         run: |
-          SRC_TAG="${OPENCLAW_UPSTREAM#v}"
-          SOURCE_IMAGE="ghcr.io/openclaw/openclaw:${SRC_TAG}"
-          TARGET_IMAGE="${{ env.REGISTRY }}/openclaw/openclaw-base:${OPENCLAW_UPSTREAM}"
-          if docker manifest inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
-            echo "$TARGET_IMAGE already present — skipping import"
+          SRC_TAG="${UPSTREAM_REF#v}"
+          SRC="ghcr.io/openclaw/openclaw:${SRC_TAG}"
+          DST="${REGISTRY}/openclaw/openclaw-base:${UPSTREAM_REF}"
+          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
+            echo ">> ${DST} already mirrored, skipping"
           else
-            docker pull "$SOURCE_IMAGE"
-            docker tag  "$SOURCE_IMAGE" "$TARGET_IMAGE"
-            docker push "$TARGET_IMAGE"
+            docker buildx imagetools create --tag "${DST}" "${SRC}"
           fi
-          echo "BASE_IMAGE=${TARGET_IMAGE}" >> "$GITHUB_ENV"
 
-      - name: Build Docker image (no push, test only)
-        uses: docker/build-push-action@v6
-        with:
-          context: ./builder
-          platforms: linux/arm64
-          push: false
-          load: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
-          build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE }}
-            GH_CLI_VERSION=2.92.0
-            GITHUB_MCP_SERVER_VERSION=1.0.3
-            TERRAFORM_VERSION=1.13.0
-            TERRAFORM_MCP_VERSION=0.5.2
-            CODE_SERVER_VERSION=4.118.0
-            AWS_CLI_VERSION=2.34.45
-            GCLOUD_VERSION=567.0.0
-            ALIYUN_CLI_VERSION=3.3.14
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build Upstream Image (no push, test only)
+        run: |
+          docker build \
+            -t "openclaw-base:${UPSTREAM_REF}" \
+            _openclaw_src
+
+      - name: Extend Image with Python Packages (no push, test only)
+        run: |
+          docker build \
+            --build-arg "BASE_IMAGE=${REGISTRY}/openclaw/openclaw-base:${UPSTREAM_REF}" \
+            --build-arg "EPHE_FETCH_NONCE=${IMAGE_TAG}" \
+            --build-arg "GH_CLI_VERSION=${GH_CLI_VERSION}" \
+            --build-arg "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" \
+            --build-arg "GLAB_VERSION=${GLAB_VERSION}" \
+            --build-arg "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" \
+            --build-arg "TERRAFORM_VERSION=${TERRAFORM_VERSION}" \
+            --build-arg "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" \
+            --build-arg "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" \
+            --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
+            --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
+            --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            -t "${REGISTRY}/openclaw/claw-code-local:pr-${{ github.event.pull_request.number }}" \
+            builder/
