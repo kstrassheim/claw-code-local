@@ -1,0 +1,186 @@
+---
+# Single source of truth for the openclaw runtime config.
+# Two providers are declared (mistral + minimax). The minimax block is
+# stripped at pod startup by the `render-config` init container in
+# 020-deployment.yaml when MINIMAX_API_KEY is empty/unset.
+#
+# imageModel routing: vision content goes to MiniMax M2.7 first; on
+# failure (auth error if key missing, or model-doesn't-support-vision)
+# openclaw fails over to Mistral Large 3, then Medium 3.5.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config-template
+  namespace: openclaw
+data:
+  openclaw.json: |
+    {
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "minimax/MiniMax-M2.7",
+            "fallbacks": ["mistral/mistral-large-latest"]
+          },
+          "imageModel": {
+            "primary": "mistral/mistral-large-3-25-12",
+            "fallbacks": ["mistral/mistral-medium-3-5-26-04"]
+          },
+          "compaction": {
+            "mode": "safeguard"
+          },
+          "blockStreamingDefault": "on",
+          "bootstrapMaxChars": 30000,
+          "bootstrapTotalMaxChars": 120000
+        }
+      },
+      "models": {
+        "providers": {
+          "mistral": {
+            "baseUrl": "https://api.mistral.ai/v1",
+            "apiKey": "${MISTRAL_API_KEY}",
+            "api": "openai-completions",
+            "models": [
+              {"id": "mistral-large-latest", "name": "Mistral Large", "contextWindow": 131072},
+              {"id": "mistral-small-latest", "name": "Mistral Small", "contextWindow": 131072},
+              {"id": "magistral-medium-latest", "name": "Magistral Medium", "contextWindow": 131072},
+              {"id": "codestral-latest", "name": "Codestral", "contextWindow": 81920},
+              {"id": "mistral-large-3-25-12", "name": "Mistral Large 3 (Vision)", "contextWindow": 131072},
+              {"id": "mistral-medium-3-5-26-04", "name": "Mistral Medium 3.5 (Vision)", "contextWindow": 131072}
+            ]
+          },
+          "minimax": {
+            "baseUrl": "https://api.minimax.io/anthropic",
+            "apiKey": "${MINIMAX_API_KEY}",
+            "api": "anthropic-messages",
+            "models": [
+              {"id": "MiniMax-M2.7", "name": "MiniMax M2.7", "contextWindow": 16384, "params": {"num_ctx": 65536}},
+              {"id": "MiniMax-M2.7-highspeed", "name": "MiniMax M2.7 HighSpeed", "contextWindow": 16384, "params": {"num_ctx": 65536}}
+            ]
+          }
+        }
+      },
+      "commands": {
+        "native": "auto",
+        "nativeSkills": "auto",
+        "restart": true,
+        "ownerDisplay": "raw"
+      },
+      "channels": {
+        "telegram": {"enabled": true}
+      },
+      "gateway": {
+        "port": 18789,
+        "mode": "local",
+        "bind": "lan",
+        "trustedProxies": ["10.0.0.0/8"],
+        "controlUi": {"allowedOrigins": ["*"]}
+      }
+    }
+---
+# Placeholder — populated at pod start by the render-config init container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-config
+  namespace: openclaw
+data:
+  openclaw.json: "{}"
+---
+# Script the init container runs. Lives in its own ConfigMap so changes
+# don't force the openclaw-config ConfigMap to be recreated.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-render-scripts
+  namespace: openclaw
+data:
+  render-config.sh: |
+    #!/bin/sh
+    set -eu
+
+    # Treat the placeholder strings (from sealed-secret stubs) the same
+    # as "unset" so we don't silently activate a provider with garbage.
+    is_set() {
+      v="${1:-}"
+      [ -n "$v" ] && [ "$v" != "REPLACE_WITH_MISTRAL_KEY" ] && [ "$v" != "REPLACE_WITH_MINIMAX_KEY" ] && [ "$v" != "null" ]
+    }
+
+    MISTRAL_OK=
+    MINIMAX_OK=
+    is_set "${MISTRAL_API_KEY:-}" && MISTRAL_OK=1 || true
+    is_set "${MINIMAX_API_KEY:-}" && MINIMAX_OK=1 || true
+
+    if [ -z "$MISTRAL_OK" ] && [ -z "$MINIMAX_OK" ]; then
+      echo "ERROR: neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set. At least one must be present."
+      exit 1
+    fi
+
+    # Strip providers whose API key env var is missing/empty.
+    MISTRAL_OK="${MISTRAL_OK:-}" MINIMAX_OK="${MINIMAX_OK:-}" node -e '
+      const fs = require("fs");
+      const c = JSON.parse(fs.readFileSync("/template/openclaw.json", "utf8"));
+      if (!process.env.MISTRAL_OK) {
+        console.log("MISTRAL_API_KEY not set — stripping Mistral and imageModel");
+        delete c.models?.providers?.mistral;
+        if (c.agents?.defaults?.model) c.agents.defaults.model.fallbacks = [];
+        if (c.agents?.defaults) delete c.agents.defaults.imageModel;
+      }
+      if (!process.env.MINIMAX_OK) {
+        console.log("MINIMAX_API_KEY not set — stripping MiniMax, switching primary to Mistral");
+        delete c.models?.providers?.minimax;
+        if (c.agents?.defaults?.model) {
+          c.agents.defaults.model.primary = "mistral/mistral-large-latest";
+          c.agents.defaults.model.fallbacks = [];
+        }
+        if (c.agents?.defaults?.imageModel) {
+          c.agents.defaults.imageModel.primary = "mistral/mistral-large-3-25-12";
+          c.agents.defaults.imageModel.fallbacks = ["mistral/mistral-medium-3-5-26-04"];
+        }
+      }
+      fs.writeFileSync("/tmp/openclaw.json", JSON.stringify(c, null, 2));
+    '
+
+    PERSISTENT_DIR=/home/node/.openclaw
+    PERSISTENT_FILE=$PERSISTENT_DIR/openclaw.json
+    mkdir -p "$PERSISTENT_DIR"
+
+    # Deep-merge with persistent runtime state if a persistent file exists.
+    if [ -f "$PERSISTENT_FILE" ] && command -v node >/dev/null 2>&1; then
+      echo "Carrying forward runtime state from $PERSISTENT_FILE"
+      node -e '
+        const fs = require("fs");
+        const inj = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        let pst = {};
+        try { pst = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); } catch {}
+        for (const k of ["meta", "channels", "commands", "gateway"]) {
+          if (pst[k] == null) continue;
+          if (k === "commands") {
+            inj.commands = {...(inj.commands || {})};
+            if (pst.commands.ownerAllowFrom != null) inj.commands.ownerAllowFrom = pst.commands.ownerAllowFrom;
+            continue;
+          }
+          if (k === "gateway") {
+            inj.gateway = {...(inj.gateway || {})};
+            if (pst.gateway.auth != null) inj.gateway.auth = pst.gateway.auth;
+            continue;
+          }
+          inj[k] = pst[k];
+        }
+        fs.writeFileSync(process.argv[3], JSON.stringify(inj, null, 2));
+      ' /tmp/openclaw.json "$PERSISTENT_FILE" /tmp/merged.json
+      mv /tmp/merged.json /tmp/openclaw.json
+    elif [ -f "$PERSISTENT_FILE" ]; then
+      echo "WARN: node unavailable for runtime-state carry-over — pairings will reset"
+    else
+      echo "No existing openclaw.json on the PVC — writing rendered config as-is"
+    fi
+
+    cp /tmp/openclaw.json "$PERSISTENT_FILE"
+    chmod 0600 "$PERSISTENT_FILE"
+    echo "Wrote $PERSISTENT_FILE ($(wc -c < "$PERSISTENT_FILE") bytes)"
+
+    kubectl create configmap openclaw-config \
+      -n openclaw \
+      --from-file=openclaw.json=/tmp/openclaw.json \
+      --dry-run=client -o yaml \
+    | kubectl apply -f -
