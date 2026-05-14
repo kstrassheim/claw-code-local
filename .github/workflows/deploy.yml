@@ -136,7 +136,8 @@ jobs:
         with:
           driver-opts: |
             opt=registry.mirror.mainpi.local:30500=insecure
-            opt=registry.insecure-tls-mainpi.local:30500=true
+          env:
+            DOCKER_TLS_VERIFY: "0"
 
       - name: Log in to local registry
         # REGISTRY_USERNAME / REGISTRY_PASSWORD are injected into the
