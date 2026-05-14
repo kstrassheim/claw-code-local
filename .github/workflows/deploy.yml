@@ -3,34 +3,178 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Upstream openclaw git ref to build (tag/branch/commit). Defaults to OPENCLAW_UPSTREAM in root VERSIONS file. When set, the resulting image is also tagged with this ref.'
+        required: false
+        default: ''
 
-env:
-  REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-  IMAGE_NAME: openclaw/claw-code-local
+permissions:
+  contents: write
 
 jobs:
-  check-llm-secrets:
-    name: At least one LLM API key configured
+  mirror-images:
+    name: Mirror Third-Party Images
     runs-on: arc-runner-scale-claw-code-local
+    env:
+      REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
     steps:
-      - id: check
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve Versions
         run: |
-          if [[ -n "$MISTRAL_API_KEY" ]] || [[ -n "$MINIMAX_API_KEY" ]]; then
-            echo "At least one LLM API key is configured"
-            exit 0
+          . ./VERSIONS
+          echo "OLLAMA_VERSION=${OLLAMA_VERSION}" >> "$GITHUB_ENV"
+          echo "OPEN_WEBUI_VERSION=${OPEN_WEBUI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Log In To Registry
+        run: |
+          test -n "${REGISTRY_USERNAME:-}"
+          test -n "${REGISTRY_PASSWORD:-}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Mirror ollama/ollama
+        run: |
+          SRC="docker.io/ollama/ollama:${OLLAMA_VERSION}"
+          DST="${REGISTRY}/ollama/ollama:${OLLAMA_VERSION}"
+          DST_LATEST="${REGISTRY}/ollama/ollama:latest"
+
+          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
+            echo ">> ${DST} already mirrored, skipping"
           else
-            echo "ERROR: Neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set."
-            echo "This run will fail until at least one LLM API key is added to repository secrets."
-            exit 1
+            docker buildx imagetools create --tag "${DST}" "${SRC}"
           fi
+
+          docker buildx imagetools create --tag "${DST_LATEST}" "${SRC}"
+
+      - name: Mirror open-webui
+        run: |
+          SRC="ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION}"
+          DST="${REGISTRY}/open-webui/open-webui:${OPEN_WEBUI_VERSION}"
+          DST_LATEST="${REGISTRY}/open-webui/open-webui:latest"
+
+          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
+            echo ">> ${DST} already mirrored, skipping"
+          else
+            docker buildx imagetools create --tag "${DST}" "${SRC}"
+          fi
+
+          docker buildx imagetools create --tag "${DST_LATEST}" "${SRC}"
+
+  build-and-push-image:
+    name: Build Image
+    needs: mirror-images
+    runs-on: arc-runner-scale-claw-code-local
+    env:
+      REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
+      OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve Versions
+        id: resolve
+        run: |
+          . ./VERSIONS
+          if [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            UPSTREAM_REF="${{ github.event.inputs.git_ref }}"
+            IMAGE_TAG="${{ github.event.inputs.git_ref }}"
+          else
+            UPSTREAM_REF="$OPENCLAW_UPSTREAM"
+            IMAGE_TAG="$OPENCLAW_VERSION"
+          fi
+          echo "UPSTREAM_REF=${UPSTREAM_REF}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "CLAWHUB_VERSION=${CLAWHUB_VERSION}" >> "$GITHUB_ENV"
+          echo "GH_CLI_VERSION=${GH_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "GLAB_VERSION=${GLAB_VERSION}" >> "$GITHUB_ENV"
+          echo "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_VERSION=${TERRAFORM_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
+          echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Log In To Registry
+        run: |
+          test -n "${REGISTRY_USERNAME:-}"
+          test -n "${REGISTRY_PASSWORD:-}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Skip If Image Already Built
+        id: skip
+        run: |
+          if docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo ">> ${IMAGE_NAME}:${IMAGE_TAG} already in registry, skipping build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone Upstream OpenClaw
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
+          cd _openclaw_src
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "${UPSTREAM_REF}"
+
+      - name: Build Upstream Image
+        if: steps.skip.outputs.skip != 'true'
         env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker pull "${IMAGE_NAME}:buildcache-base" 2>/dev/null || true
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --cache-from "${IMAGE_NAME}:buildcache-base" \
+            -t "openclaw-base:${UPSTREAM_REF}" \
+            -t "${IMAGE_NAME}:buildcache-base" \
+            _openclaw_src
+          docker push "${IMAGE_NAME}:buildcache-base" || true
+
+      - name: Extend Image with Python Packages
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker pull "${IMAGE_NAME}:buildcache-final" 2>/dev/null || true
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg "BASE_IMAGE=openclaw-base:${UPSTREAM_REF}" \
+            --build-arg "EPHE_FETCH_NONCE=${IMAGE_TAG}" \
+            --build-arg "GH_CLI_VERSION=${GH_CLI_VERSION}" \
+            --build-arg "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" \
+            --build-arg "GLAB_VERSION=${GLAB_VERSION}" \
+            --build-arg "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" \
+            --build-arg "TERRAFORM_VERSION=${TERRAFORM_VERSION}" \
+            --build-arg "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" \
+            --build-arg "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" \
+            --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
+            --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
+            --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            --cache-from "${IMAGE_NAME}:buildcache-final" \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+            -t "${IMAGE_NAME}:latest" \
+            -t "${IMAGE_NAME}:buildcache-final" \
+            builder/
+
+      - name: Push Image
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+          docker push "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:buildcache-final" || true
 
   publish-secrets:
     name: Publish Sealed Secrets
     runs-on: arc-runner-scale-claw-code-local
-    needs: check-llm-secrets
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -85,6 +229,7 @@ jobs:
           ALIBABA_CLOUD_ACCESS_KEY_ID:     ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
           ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
           ALIBABA_CLOUD_REGION_ID:         ${{ vars.ALIBABA_CLOUD_REGION_ID }}
+          ARGOCD_AUTH_TOKEN:     ${{ secrets.ARGOCD_AUTH_TOKEN }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace openclaw \
@@ -101,13 +246,15 @@ jobs:
             --from-literal=GITLAB_LOCAL_URL="$GITLAB_LOCAL_URL" \
             --from-literal=OPENCLAW_REGISTRY_URL="$OPENCLAW_REGISTRY_URL" \
             --from-literal=PROXY_URL="$PROXY_URL" \
-            --from-literal=OPENCLAW_UPSTREAM="kstrassheim/openclaw" \
+            --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
             --from-literal=GOOGLE_APPLICATION_CREDENTIALS="/etc/openclaw/secrets/gcp-service-account.json" \
             --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
             --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
             --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID="$ALIBABA_CLOUD_ACCESS_KEY_ID" \
             --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET="$ALIBABA_CLOUD_ACCESS_KEY_SECRET" \
             --from-literal=ALIBABA_CLOUD_REGION_ID="$ALIBABA_CLOUD_REGION_ID" \
+            --from-literal=ARGOCD_AUTH_TOKEN="$ARGOCD_AUTH_TOKEN" \
+            --from-literal=ARGOCD_SERVER="${{ vars.ARGOCD_SERVER }}" \
             -o yaml \
           | kubeseal --cert /tmp/ss-cert.pem --format yaml \
               > k8s/openclaw-secrets-sealed.yaml
@@ -117,101 +264,23 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/openclaw-secrets-sealed.yaml
-          git diff --cached --quiet || {
-            git commit -m "chore: rotate sealed secrets"
-            git pull --rebase origin main
-            git push
-          }
-
-  build-and-push-image:
-    name: Build and Push Image
-    runs-on: arc-runner-scale-claw-code-local
-    needs: [check-llm-secrets, publish-secrets]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            opt=registry.mirror.mainpi.local:30500=insecure
-          env:
-            DOCKER_TLS_VERIFY: "0"
-
-      - name: Log in to local registry
-        # REGISTRY_USERNAME / REGISTRY_PASSWORD are injected into the
-        # runner pod's env from the `registry-creds` Secret via envFrom
-        # in shared/runner-values.yaml (k8s-deployment repo). They are
-        # NOT GitHub repo secrets — the runner is already authorized to
-        # push, no per-repo wiring needed.
-        run: |
-          test -n "${REGISTRY_USERNAME:-}" || { echo "::error::REGISTRY_USERNAME missing in runner env (registry-creds Secret)"; exit 1; }
-          test -n "${REGISTRY_PASSWORD:-}" || { echo "::error::REGISTRY_PASSWORD missing in runner env (registry-creds Secret)"; exit 1; }
-          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
-
-      - name: Read VERSIONS file
-        run: |
-          . ./VERSIONS
-          echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
-
-      - name: Require OPENCLAW_REGISTRY_URL
-        # Fail fast with a clear message rather than letting an empty
-        # ${REGISTRY} produce malformed image refs like
-        # "/openclaw/claw-code-local/openclaw-base:tag" downstream.
-        run: |
-          if [ -z "${REGISTRY}" ]; then
-            echo "::error::Repo variable OPENCLAW_REGISTRY_URL is not set. Configure it under Settings → Secrets and variables → Actions → Variables (e.g. mainpi.local:30500)."
-            exit 1
+          if git diff --cached --quiet; then
+            echo "no sealed-secret changes"
+            exit 0
           fi
-          echo "Using registry: ${REGISTRY}"
-
-      - name: Ensure openclaw-base is mirrored from GHCR into local registry
-        # Mirrors claw-code's "Ensure openclaw-base is mirrored ..." step.
-        # Upstream image lives at ghcr.io/openclaw/openclaw and is tagged
-        # WITHOUT the v-prefix (2026.5.7), so we strip it on read. The local
-        # registry retag keeps the v-prefix for human-readable parity.
-        # Skip the pull when the target tag is already present, so re-runs
-        # of the same SHA don't burn registry bandwidth.
-        run: |
-          SRC_TAG="${OPENCLAW_UPSTREAM#v}"
-          SOURCE_IMAGE="ghcr.io/openclaw/openclaw:${SRC_TAG}"
-          TARGET_IMAGE="${REGISTRY}/openclaw/openclaw-base:${OPENCLAW_UPSTREAM}"
-          if docker manifest inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
-            echo "$TARGET_IMAGE already present — skipping import"
-          else
-            docker pull "$SOURCE_IMAGE"
-            docker tag  "$SOURCE_IMAGE" "$TARGET_IMAGE"
-            docker push "$TARGET_IMAGE"
+          git commit -m "chore: rotate sealed secrets"
+          if ! git pull --rebase origin main; then
+            git rebase --abort
+            git reset --hard origin/main
+            echo "race: origin already has fresh sealed secrets, exiting 0"
+            exit 0
           fi
-          echo "BASE_IMAGE=${TARGET_IMAGE}" >> "$GITHUB_ENV"
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./builder
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE }}
-            GH_CLI_VERSION=2.92.0
-            GITHUB_MCP_SERVER_VERSION=1.0.3
-            TERRAFORM_VERSION=1.13.0
-            TERRAFORM_MCP_VERSION=0.5.2
-            CODE_SERVER_VERSION=4.118.0
-            AWS_CLI_VERSION=2.34.45
-            GCLOUD_VERSION=567.0.0
-            ALIYUN_CLI_VERSION=3.3.14
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          git push
 
   argocd-sync:
     name: ArgoCD Sync
     runs-on: arc-runner-scale-claw-code-local
-    needs: [check-llm-secrets, publish-secrets, build-and-push-image]
+    needs: [publish-secrets, build-and-push-image]
     steps:
       - name: ArgoCD login
         run: |
@@ -226,8 +295,10 @@ jobs:
 
       - name: Sync main app
         run: |
-          argocd app set claw-code-local -p openclaw.image.repository="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
-          argocd app set claw-code-local -p openclaw.image.tag="${{ github.sha }}"
+          argocd app set claw-code-local \
+            -p openclaw.image.repository="${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local"
+          argocd app set claw-code-local \
+            -p openclaw.image.tag="${{ github.sha }}"
           argocd app sync claw-code-local --force
           argocd app wait claw-code-local --timeout 600
 
