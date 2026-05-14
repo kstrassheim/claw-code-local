@@ -9,7 +9,8 @@ jobs:
     name: Verify Image Build
     runs-on: arc-runner-scale-claw-code-local
     env:
-      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
+      REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
+      IMAGE_NAME: openclaw/claw-code-local
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -42,13 +43,10 @@ jobs:
           echo "Using registry: ${{ vars.OPENCLAW_REGISTRY_URL }}"
 
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
-        # Same logic as deploy.yml — see comment there. Validate runs on
-        # PRs and just needs the base image available so the Dockerfile
-        # FROM resolves; no separate build step is needed beyond that.
         run: |
           SRC_TAG="${OPENCLAW_UPSTREAM#v}"
           SOURCE_IMAGE="ghcr.io/openclaw/openclaw:${SRC_TAG}"
-          TARGET_IMAGE="${{ env.IMAGE_NAME }}/openclaw-base:${OPENCLAW_UPSTREAM}"
+          TARGET_IMAGE="${{ env.REGISTRY }}/openclaw/openclaw-base:${OPENCLAW_UPSTREAM}"
           if docker manifest inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
             echo "$TARGET_IMAGE already present — skipping import"
           else
@@ -66,7 +64,7 @@ jobs:
           push: false
           load: true
           tags: |
-            ${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
           build-args: |
             BASE_IMAGE=${{ env.BASE_IMAGE }}
             GH_CLI_VERSION=2.92.0
