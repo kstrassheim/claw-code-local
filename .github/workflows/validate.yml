@@ -54,11 +54,14 @@ jobs:
         run: |
           if [[ -n "$OPENCLAW_REGISTRY_URL" ]]; then
             echo "IMAGE_TAG=$OPENCLAW_REGISTRY_URL/openclaw/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
+            echo "BASE_IMAGE=$OPENCLAW_REGISTRY_URL/openclaw/openclaw-base:$OPENCLAW_UPSTREAM" >> $GITHUB_ENV
           else
             echo "IMAGE_TAG=ghcr.io/kstrassheim/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
+            echo "BASE_IMAGE=ghcr.io/kstrassheim/openclaw:$OPENCLAW_UPSTREAM" >> $GITHUB_ENV
           fi
         env:
           OPENCLAW_REGISTRY_URL: ${{ vars.OPENCLAW_REGISTRY_URL }}
+          OPENCLAW_UPSTREAM: ${{ env.OPENCLAW_UPSTREAM }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
 
       - name: Build Docker image (no push, test only)
@@ -71,7 +74,7 @@ jobs:
           tags: |
             ${{ env.IMAGE_TAG }}
           build-args: |
-            OPENCLAW_UPSTREAM=${{ env.OPENCLAW_UPSTREAM || 'kstrassheim/openclaw' }}
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
             GH_CLI_VERSION=${{ env.GH_CLI_VERSION || '2.92.0' }}
             GITHUB_MCP_SERVER_VERSION=${{ env.GITHUB_MCP_SERVER_VERSION || '1.0.3' }}
             TERRAFORM_VERSION=${{ env.TERRAFORM_VERSION || '1.13.0' }}
