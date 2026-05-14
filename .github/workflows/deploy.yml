@@ -1,0 +1,294 @@
+name: Build and Deploy (Push to main)
+
+# Runs on every merge to main. Four sequential jobs:
+#   1. check-llm-secrets      — fail-fast if neither LLM API key is set
+#   2. publish-secrets        — seal GH secrets → SealedSecret manifests
+#   3. build-and-push-image   — build the openclaw image, push to local registry
+#   4. argocd-sync            — ArgoCD sync to apply k8s/ manifests
+#
+# Each job depends on the previous one succeeding (`needs:`), so a broken
+# step short-circuits the rest before it can do damage.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'builder/**'
+      - 'k8s/**'
+      - 'VERSIONS'
+      - 'argocd/**'
+      - '.github/workflows/deploy.yml'
+
+env:
+  # Local container registry URL (e.g. mainpi.local:30500).
+  # Set in repo Settings → Secrets → ACTIONS_REGISTRY_URL.
+  REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
+  IMAGE_NAME: openclaw/claw-code-local
+
+permissions:
+  contents: read
+
+jobs:
+  check-llm-secrets:
+    name: At least one LLM API key configured
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check MISTRAL_API_KEY or MINIMAX_API_KEY
+        env:
+          MISTRAL: ${{ secrets.MISTRAL_API_KEY }}
+          MINIMAX: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          if [ -z "$MISTRAL" ] && [ -z "$MINIMAX" ]; then
+            echo "::error::Neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set. openclaw needs at least one."
+            exit 1
+          fi
+          echo "OK — at least one LLM API key is configured."
+
+  publish-secrets:
+    name: Publish Sealed Secrets
+    needs: check-llm-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install kubectl and kubeseal
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          mkdir -p "$HOME/.local/bin"
+
+          KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)"
+          curl -sLo "$HOME/.local/bin/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          chmod +x "$HOME/.local/bin/kubectl"
+
+          KUBESEAL_VERSION="0.27.3"
+          curl -sLo /tmp/kubeseal.tar.gz \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-${ARCH}.tar.gz"
+          tar -xzf /tmp/kubeseal.tar.gz -C "$HOME/.local/bin" kubeseal
+          chmod +x "$HOME/.local/bin/kubeseal"
+
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch SealedSecrets certificate
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
+        run: |
+          echo "$KUBECONFIG_DATA" | base64 -d > /tmp/kubeconfig
+          kubeseal --kubeconfig /tmp/kubeconfig --fetch-cert \
+            --controller-namespace kube-system \
+            --controller-name sealed-secrets \
+            > /tmp/ss-cert.pem
+
+      - name: Seal openclaw-secrets
+        env:
+          MISTRAL_API_KEY:     ${{ secrets.MISTRAL_API_KEY }}
+          MINIMAX_API_KEY:     ${{ secrets.MINIMAX_API_KEY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN:       ${{ secrets.OPENCLAW_GITHUB_TOKEN }}
+          OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TAVILY_API_KEY:     ${{ secrets.TAVILY_API_KEY }}
+          GMAIL_EMAIL:        ${{ secrets.GMAIL_EMAIL }}
+          GMAIL_CREDENTIALS:  ${{ secrets.GMAIL_CREDENTIALS }}
+          GMAIL_REFRESH_TOKEN: ${{ secrets.GMAIL_REFRESH_TOKEN }}
+          ENTRA_TENANT_ID:    ${{ secrets.ENTRA_TENANT_ID }}
+          ENTRA_USERNAME:     ${{ secrets.ENTRA_USERNAME }}
+          ENTRA_PASSWORD:     ${{ secrets.ENTRA_PASSWORD }}
+          ENTRA_TOTP_SEED:    ${{ secrets.ENTRA_TOTP_SEED }}
+          KUBECONFIG_DATA:   ${{ secrets.KUBECONFIG_DATA }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          kubectl create secret generic openclaw-secrets \
+            --namespace openclaw \
+            --dry-run=client \
+            --from-literal=MISTRAL_API_KEY="$MISTRAL_API_KEY" \
+            --from-literal=MINIMAX_API_KEY="$MINIMAX_API_KEY" \
+            --from-literal=GEMINI_API_KEY="$GEMINI_API_KEY" \
+            --from-literal=GITHUB_TOKEN="$GITHUB_TOKEN" \
+            --from-literal=OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN" \
+            --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+            --from-literal=TAVILY_API_KEY="$TAVILY_API_KEY" \
+            --from-literal=GMAIL_EMAIL="$GMAIL_EMAIL" \
+            --from-literal=GMAIL_CREDENTIALS="$GMAIL_CREDENTIALS" \
+            --from-literal=GMAIL_REFRESH_TOKEN="$GMAIL_REFRESH_TOKEN" \
+            --from-literal=ENTRA_TENANT_ID="$ENTRA_TENANT_ID" \
+            --from-literal=ENTRA_USERNAME="$ENTRA_USERNAME" \
+            --from-literal=ENTRA_PASSWORD="$ENTRA_PASSWORD" \
+            --from-literal=ENTRA_TOTP_SEED="$ENTRA_TOTP_SEED" \
+            --from-literal=KUBECONFIG_DATA="$KUBECONFIG_DATA" \
+            --from-literal=ARGOCD_AUTH_TOKEN="$ARGOCD_AUTH_TOKEN" \
+            --from-literal=ARGOCD_SERVER="argocd-server.argocd.svc.cluster.local" \
+            -o yaml \
+          | kubeseal --kubeconfig /tmp/kubeconfig --cert /tmp/ss-cert.pem --format yaml \
+              > k8s/openclaw-secrets-sealed.yaml
+
+      - name: Commit SealedSecrets
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/openclaw-secrets-sealed.yaml
+          git diff --cached --quiet || git commit -m "chore: rotate sealed secrets"
+          git pull --rebase origin main
+          git push || echo "race: another run committed first, exiting 0"
+
+  build-and-push-image:
+    name: Build and Push Docker Image
+    needs: publish-secrets
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+      OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read version pins from VERSIONS
+        id: version
+        run: |
+          echo "OPENCLAW_UPSTREAM=$(grep '^OPENCLAW_UPSTREAM=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "GH_CLI_VERSION=$(grep '^GH_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "GITHUB_MCP_SERVER_VERSION=$(grep '^GITHUB_MCP_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "TERRAFORM_VERSION=$(grep '^TERRAFORM_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "TERRAFORM_MCP_VERSION=$(grep '^TERRAFORM_MCP_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "CODE_SERVER_VERSION=$(grep '^CODE_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "AWS_CLI_VERSION=$(grep '^AWS_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "GCLOUD_VERSION=$(grep '^GCLOUD_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "ALIYUN_CLI_VERSION=$(grep '^ALIYUN_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
+          echo "short_sha=${IMAGE_TAG:0:8}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to local registry
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          echo "$REGISTRY_PASSWORD" | \
+            docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Skip if image already built
+        id: skip
+        run: |
+          if docker manifest inspect "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo ">> ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} already in registry, skipping build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import openclaw-base from GHCR
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          BASE_TAG: ${{ steps.version.outputs.OPENCLAW_UPSTREAM }}
+        run: |
+          SRC_TAG="${BASE_TAG#v}"
+          if docker manifest inspect "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}" >/dev/null 2>&1; then
+            echo ">> openclaw/openclaw-base:${BASE_TAG} already in registry"
+          else
+            docker pull "ghcr.io/openclaw/openclaw:${SRC_TAG}"
+            docker tag "ghcr.io/openclaw/openclaw:${SRC_TAG}" "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}"
+            docker push "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}"
+          fi
+
+      - name: Clone upstream openclaw
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
+          cd _openclaw_src
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "${{ steps.version.outputs.OPENCLAW_UPSTREAM }}"
+
+      - name: Build base layer
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker pull "${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" 2>/dev/null || true
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --cache-from "${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" \
+            -t "openclaw-base-local:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" \
+            -t "${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" \
+            _openclaw_src
+          docker push "${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}"
+
+      - name: Extend image with Python packages
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            --build-arg "BASE_IMAGE=${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" \
+            --build-arg "GH_CLI_VERSION=${{ steps.version.outputs.GH_CLI_VERSION }}" \
+            --build-arg "GITHUB_MCP_SERVER_VERSION=${{ steps.version.outputs.GITHUB_MCP_SERVER_VERSION }}" \
+            --build-arg "TERRAFORM_VERSION=${{ steps.version.outputs.TERRAFORM_VERSION }}" \
+            --build-arg "TERRAFORM_MCP_VERSION=${{ steps.version.outputs.TERRAFORM_MCP_VERSION }}" \
+            --build-arg "CODE_SERVER_VERSION=${{ steps.version.outputs.CODE_SERVER_VERSION }}" \
+            --build-arg "AWS_CLI_VERSION=${{ steps.version.outputs.AWS_CLI_VERSION }}" \
+            --build-arg "GCLOUD_VERSION=${{ steps.version.outputs.GCLOUD_VERSION }}" \
+            --build-arg "ALIYUN_CLI_VERSION=${{ steps.version.outputs.ALIYUN_CLI_VERSION }}" \
+            --cache-from "${REGISTRY}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" \
+            -t "${REGISTRY}/${IMAGE_NAME}:latest" \
+            builder/
+
+      - name: Push image
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          docker push "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker push "${REGISTRY}/${IMAGE_NAME}:latest"
+
+  argocd-sync:
+    name: ArgoCD Sync
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install argocd CLI
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          curl -sLo /tmp/argocd.tar.gz \
+            "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-${ARCH}.tar.gz"
+          tar -xzf /tmp/argocd.tar.gz -C /tmp argocd
+          mv /tmp/argocd /tmp/argocd-bin
+          chmod +x /tmp/argocd-bin/argocd
+          echo "/tmp/argocd-bin" >> $GITHUB_PATH
+          # Suppress the welcome banner that would otherwise appear before
+          # every argocd CLI invocation in CI logs.
+          touch /tmp/argocd-no-banner
+          echo "ARGOCD_OPTS=--grpc-web" >> $GITHUB_ENV
+
+      - name: ArgoCD login
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          ARGOCD_SERVER: ${{ vars.ARGOCD_SERVER }}
+        run: |
+          argocd login "$ARGOCD_SERVER" \
+            --token "$ARGOCD_AUTH_TOKEN" \
+            --grpc-web \
+            --insecure \
+            --skip-test-login
+
+      - name: Sync claw-code-local-hooks application
+        run: |
+          argocd app sync claw-code-local-hooks \
+            --force \
+            --skip-validation=false
+          argocd app wait claw-code-local-hooks \
+            --timeout 300 \
+            --sync
+
+      - name: Sync claw-code-local application
+        run: |
+          argocd app sync claw-code-local \
+            --force \
+            --skip-validation=false
+          argocd app wait claw-code-local \
+            --timeout 600 \
+            --sync
