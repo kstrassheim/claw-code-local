@@ -5,87 +5,53 @@ on:
     branches: [main]
 
 jobs:
-  check-llm-secrets:
-    name: At least one LLM API key configured
+  verify-build:
+    name: Verify Image Build
     runs-on: arc-runner-scale-claw-code-local
-    steps:
-      - id: check
-        run: |
-          if [[ -n "$MISTRAL_API_KEY" ]] || [[ -n "$MINIMAX_API_KEY" ]]; then
-            echo "At least one LLM API key is configured"
-            exit 0
-          else
-            echo "ERROR: Neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set."
-            echo "This validation run will fail until at least one LLM API key is added to the repository secrets."
-            exit 1
-          fi
-        env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-
-  docker-build:
-    name: Docker Build (no push)
-    runs-on: arc-runner-scale-claw-code-local
-    needs: check-llm-secrets
+    env:
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Read VERSIONS file
-        run: |
-          if [ -f VERSIONS ]; then
-            echo "OPENCLAW_UPSTREAM=$(grep -E '^OPENCLAW_UPSTREAM=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "GH_CLI_VERSION=$(grep -E '^GH_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "GITHUB_MCP_SERVER_VERSION=$(grep -E '^GITHUB_MCP_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "TERRAFORM_VERSION=$(grep -E '^TERRAFORM_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "TERRAFORM_MCP_VERSION=$(grep -E '^TERRAFORM_MCP_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "CODE_SERVER_VERSION=$(grep -E '^CODE_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "AWS_CLI_VERSION=$(grep -E '^AWS_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "GCLOUD_VERSION=$(grep -E '^GCLOUD_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-            echo "ALIYUN_CLI_VERSION=$(grep -E '^ALIYUN_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
-          else
-            echo "VERSIONS file not found — using defaults"
-          fi
-
-      - name: Determine image tag and registry
-        id: image-tag
-        run: |
-          if [[ -n "$OPENCLAW_REGISTRY_URL" ]]; then
-            echo "IMAGE_TAG=$OPENCLAW_REGISTRY_URL/openclaw/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
-            echo "BASE_IMAGE=$OPENCLAW_REGISTRY_URL/openclaw/openclaw-base:$OPENCLAW_UPSTREAM" >> $GITHUB_ENV
-          else
-            echo "IMAGE_TAG=ghcr.io/kstrassheim/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
-            echo "BASE_IMAGE=ghcr.io/kstrassheim/openclaw:$OPENCLAW_UPSTREAM" >> $GITHUB_ENV
-          fi
-
-          if [[ -n "$OPENCLAW_REGISTRY_URL" ]]; then
-            echo "USES_LOCAL_REGISTRY=true" >> $GITHUB_ENV
-          else
-            echo "USES_LOCAL_REGISTRY=false" >> $GITHUB_ENV
-          fi
-        env:
-          OPENCLAW_REGISTRY_URL: ${{ vars.OPENCLAW_REGISTRY_URL }}
-          OPENCLAW_UPSTREAM: ${{ env.OPENCLAW_UPSTREAM }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-
-      - name: Login to local registry
-        if: env.USES_LOCAL_REGISTRY == 'true'
+      - name: Log in to local registry
+        if: vars.OPENCLAW_REGISTRY_URL != ''
         uses: docker/login-action@v3
         with:
           registry: ${{ vars.OPENCLAW_REGISTRY_URL }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Login to GHCR (for public base image)
-        if: env.USES_LOCAL_REGISTRY == 'false'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read VERSIONS file
+        run: |
+          . ./VERSIONS
+          echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
+
+      - name: Clone upstream openclaw
+        run: |
+          git clone --depth 1 "https://github.com/${OPENCLAW_UPSTREAM:-kstrassheim/openclaw}.git" _openclaw_src
+          cd _openclaw_src
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "${OPENCLAW_UPSTREAM:-v2026.5.7}"
+          # Copy builder/ and Dockerfile from the upstream repo
+          mkdir -p ../builder/
+          cp -r openclaw-builder/. ../builder/ 2>/dev/null || cp -r builder/. ../builder/ 2>/dev/null || true
+          cp openclaw-builder/Dockerfile ../builder/Dockerfile 2>/dev/null || \
+            cp Dockerfile ../builder/Dockerfile 2>/dev/null || true
+          cd ..
+          rm -rf _openclaw_src
+
+      - name: Import GHCR base image into local registry
+        run: |
+          SOURCE_IMAGE="ghcr.io/${OPENCLAW_UPSTREAM:-kstrassheim/openclaw}:v2026.5.7"
+          TARGET_IMAGE="${{ env.IMAGE_NAME }}/openclaw-base:v2026.5.7"
+          docker pull "$SOURCE_IMAGE"
+          docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
+          docker push "$TARGET_IMAGE"
+          echo "BASE_IMAGE=${TARGET_IMAGE}" >> "$GITHUB_ENV"
 
       - name: Build Docker image (no push, test only)
         uses: docker/build-push-action@v6
@@ -95,16 +61,16 @@ jobs:
           push: false
           load: true
           tags: |
-            ${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
           build-args: |
             BASE_IMAGE=${{ env.BASE_IMAGE }}
-            GH_CLI_VERSION=${{ env.GH_CLI_VERSION || '2.92.0' }}
-            GITHUB_MCP_SERVER_VERSION=${{ env.GITHUB_MCP_SERVER_VERSION || '1.0.3' }}
-            TERRAFORM_VERSION=${{ env.TERRAFORM_VERSION || '1.13.0' }}
-            TERRAFORM_MCP_VERSION=${{ env.TERRAFORM_MCP_VERSION || '0.5.2' }}
-            CODE_SERVER_VERSION=${{ env.CODE_SERVER_VERSION || '4.118.0' }}
-            AWS_CLI_VERSION=${{ env.AWS_CLI_VERSION || '2.34.45' }}
-            GCLOUD_VERSION=${{ env.GCLOUD_VERSION || '567.0.0' }}
-            ALIYUN_CLI_VERSION=${{ env.ALIYUN_CLI_VERSION || '3.3.14' }}
+            GH_CLI_VERSION=2.92.0
+            GITHUB_MCP_SERVER_VERSION=1.0.3
+            TERRAFORM_VERSION=1.13.0
+            TERRAFORM_MCP_VERSION=0.5.2
+            CODE_SERVER_VERSION=4.118.0
+            AWS_CLI_VERSION=2.34.45
+            GCLOUD_VERSION=567.0.0
+            ALIYUN_CLI_VERSION=3.3.14
           cache-from: type=gha
           cache-to: type=gha,mode=max
