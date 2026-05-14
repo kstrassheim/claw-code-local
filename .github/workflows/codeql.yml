@@ -20,7 +20,7 @@ on:
 jobs:
   analyze:
     name: "CodeQL Analyze"
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-scale-claw-code-local
     permissions:
       actions: read
       contents: read

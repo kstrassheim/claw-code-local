@@ -11,7 +11,7 @@ env:
 jobs:
   check-llm-secrets:
     name: At least one LLM API key configured
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-scale-claw-code-local
     steps:
       - id: check
         run: |
@@ -29,7 +29,7 @@ jobs:
 
   publish-secrets:
     name: Publish Sealed Secrets
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-scale-claw-code-local
     needs: check-llm-secrets
     outputs:
       sealed_secrets_file: ${{ steps.seal.outputs.sealed_secrets_file }}
@@ -110,7 +110,7 @@ jobs:
 
   build-and-push-image:
     name: Build and Push Image
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-scale-claw-code-local
     needs: [check-llm-secrets, publish-secrets]
     steps:
       - name: Checkout
@@ -189,7 +189,7 @@ jobs:
 
   argocd-sync:
     name: ArgoCD Sync
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-scale-claw-code-local
     needs: [check-llm-secrets, publish-secrets, build-and-push-image]
     steps:
       - name: ArgoCD login
