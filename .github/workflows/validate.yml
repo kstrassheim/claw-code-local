@@ -1,98 +1,80 @@
 name: Validate (Pull Request)
 
-# Runs on every PR to main. Two independent validation jobs in parallel:
-#   - check-llm-secrets : fail the PR if neither LLM API key secret is set
-#   - docker-build      : build the image locally without pushing
-# None of these jobs change anything in the cluster.
-
 on:
   pull_request:
-    branches:
-      - main
-
-env:
-  # Local container registry URL. Set in repo Settings → Variables → OPENCLAW_REGISTRY_URL.
-  REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-  IMAGE_NAME: openclaw/claw-code-local
-
-permissions:
-  contents: read
+    branches: [main]
 
 jobs:
   check-llm-secrets:
     name: At least one LLM API key configured
     runs-on: ubuntu-latest
     steps:
-      - name: Check MISTRAL_API_KEY or MINIMAX_API_KEY
-        env:
-          MISTRAL: ${{ secrets.MISTRAL_API_KEY }}
-          MINIMAX: ${{ secrets.MINIMAX_API_KEY }}
+      - id: check
         run: |
-          if [ -z "$MISTRAL" ] && [ -z "$MINIMAX" ]; then
-            echo "::error::Neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set. openclaw needs at least one."
+          if [[ -n "$MISTRAL_API_KEY" ]] || [[ -n "$MINIMAX_API_KEY" ]]; then
+            echo "At least one LLM API key is configured"
+            exit 0
+          else
+            echo "ERROR: Neither MISTRAL_API_KEY nor MINIMAX_API_KEY is set."
+            echo "This validation run will fail until at least one LLM API key is added to the repository secrets."
             exit 1
           fi
-          echo "OK — at least one LLM API key is configured."
+        env:
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
 
   docker-build:
     name: Docker Build (no push)
     runs-on: ubuntu-latest
-
+    needs: check-llm-secrets
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Log in to local registry
-        env:
-          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          echo "$REGISTRY_PASSWORD" | \
-            docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin || true
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Read version pins from VERSIONS
-        id: version
-        run: |
-          set -euo pipefail
-          for key in OPENCLAW_UPSTREAM GH_CLI_VERSION GITHUB_MCP_SERVER_VERSION \
-                     TERRAFORM_VERSION TERRAFORM_MCP_VERSION CODE_SERVER_VERSION \
-                     AWS_CLI_VERSION GCLOUD_VERSION ALIYUN_CLI_VERSION; do
-            echo "${key}=$(grep "^${key}=" VERSIONS | cut -d= -f2)" >> $GITHUB_OUTPUT
-          done
+      - name: Login to local registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.OPENCLAW_REGISTRY_URL }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Import openclaw-base from GHCR
-        env:
-          BASE_TAG: ${{ steps.version.outputs.OPENCLAW_UPSTREAM }}
+      - name: Read VERSIONS file
         run: |
-          SRC_TAG="${BASE_TAG#v}"
-          if docker manifest inspect "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}" >/dev/null 2>&1; then
-            echo ">> openclaw/openclaw-base:${BASE_TAG} already in registry"
+          if [ -f VERSIONS ]; then
+            echo "OPENCLAW_UPSTREAM=$(grep -E '^OPENCLAW_UPSTREAM=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "GH_CLI_VERSION=$(grep -E '^GH_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "GITHUB_MCP_SERVER_VERSION=$(grep -E '^GITHUB_MCP_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "TERRAFORM_VERSION=$(grep -E '^TERRAFORM_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "TERRAFORM_MCP_VERSION=$(grep -E '^TERRAFORM_MCP_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "CODE_SERVER_VERSION=$(grep -E '^CODE_SERVER_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "AWS_CLI_VERSION=$(grep -E '^AWS_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "GCLOUD_VERSION=$(grep -E '^GCLOUD_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
+            echo "ALIYUN_CLI_VERSION=$(grep -E '^ALIYUN_CLI_VERSION=' VERSIONS | cut -d= -f2)" >> $GITHUB_ENV
           else
-            docker pull "ghcr.io/openclaw/openclaw:${SRC_TAG}" 2>/dev/null || true
-            docker tag "ghcr.io/openclaw/openclaw:${SRC_TAG}" "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}" 2>/dev/null || true
-            docker push "${REGISTRY}/openclaw/openclaw-base:${BASE_TAG}" 2>/dev/null || true
+            echo "VERSIONS file not found — using defaults"
           fi
 
-      - name: Build Docker image (no push)
+      - name: Build Docker image (no push, test only)
         uses: docker/build-push-action@v6
         with:
           context: ./builder
-          push: false
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
-          build-args: |
-            BASE_IMAGE=${{ env.REGISTRY }}/openclaw/openclaw-base:${{ steps.version.outputs.OPENCLAW_UPSTREAM }}
-            GH_CLI_VERSION=${{ steps.version.outputs.GH_CLI_VERSION }}
-            GITHUB_MCP_SERVER_VERSION=${{ steps.version.outputs.GITHUB_MCP_SERVER_VERSION }}
-            TERRAFORM_VERSION=${{ steps.version.outputs.TERRAFORM_VERSION }}
-            TERRAFORM_MCP_VERSION=${{ steps.version.outputs.TERRAFORM_MCP_VERSION }}
-            CODE_SERVER_VERSION=${{ steps.version.outputs.CODE_SERVER_VERSION }}
-            AWS_CLI_VERSION=${{ steps.version.outputs.AWS_CLI_VERSION }}
-            GCLOUD_VERSION=${{ steps.version.outputs.GCLOUD_VERSION }}
-            ALIYUN_CLI_VERSION=${{ steps.version.outputs.ALIYUN_CLI_VERSION }}
           platforms: linux/arm64
+          push: false
+          load: true
+          tags: |
+            ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local:pr-${{ github.event.pull_request.number }}
+          build-args: |
+            OPENCLAW_UPSTREAM=${{ env.OPENCLAW_UPSTREAM || 'kstrassheim/openclaw' }}
+            GH_CLI_VERSION=${{ env.GH_CLI_VERSION || '2.92.0' }}
+            GITHUB_MCP_SERVER_VERSION=${{ env.GITHUB_MCP_SERVER_VERSION || '1.0.3' }}
+            TERRAFORM_VERSION=${{ env.TERRAFORM_VERSION || '1.13.0' }}
+            TERRAFORM_MCP_VERSION=${{ env.TERRAFORM_MCP_VERSION || '0.5.2' }}
+            CODE_SERVER_VERSION=${{ env.CODE_SERVER_VERSION || '4.118.0' }}
+            AWS_CLI_VERSION=${{ env.AWS_CLI_VERSION || '2.34.45' }}
+            GCLOUD_VERSION=${{ env.GCLOUD_VERSION || '567.0.0' }}
+            ALIYUN_CLI_VERSION=${{ env.ALIYUN_CLI_VERSION || '3.3.14' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
