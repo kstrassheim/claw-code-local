@@ -50,6 +50,17 @@ jobs:
             echo "VERSIONS file not found — using defaults"
           fi
 
+      - name: Set image tag
+        run: |
+          if [[ -n "$OPENCLAW_REGISTRY_URL" ]]; then
+            echo "IMAGE_TAG=$OPENCLAW_REGISTRY_URL/openclaw/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=ghcr.io/kstrassheim/claw-code-local:pr-$PR_NUMBER" >> $GITHUB_ENV
+          fi
+        env:
+          OPENCLAW_REGISTRY_URL: ${{ vars.OPENCLAW_REGISTRY_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
       - name: Build Docker image (no push, test only)
         uses: docker/build-push-action@v6
         with:
@@ -58,7 +69,7 @@ jobs:
           push: false
           load: true
           tags: |
-            ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local:pr-${{ github.event.pull_request.number }}
+            ${{ env.IMAGE_TAG }}
           build-args: |
             OPENCLAW_UPSTREAM=${{ env.OPENCLAW_UPSTREAM || 'kstrassheim/openclaw' }}
             GH_CLI_VERSION=${{ env.GH_CLI_VERSION || '2.92.0' }}
