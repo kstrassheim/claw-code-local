@@ -37,8 +37,8 @@ jobs:
         with:
           driver-opts: |
             opt=registry.mirror.mainpi.local:30500=insecure
-          env:
-            DOCKER_TLS_VERIFY: "0"
+        env:
+          DOCKER_TLS_VERIFY: "0"
 
       - name: Require OPENCLAW_REGISTRY_URL
         run: |
