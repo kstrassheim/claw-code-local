@@ -1,0 +1,42 @@
+name: "CodeQL"
+
+on:
+  push:
+    branches:
+      - main
+      - feature/issue-*
+  pull_request:
+    branches:
+      - main
+    # No `paths:` filter — CodeQL is a required status check on `main`,
+    # so the workflow must produce a check-run for every PR, even ones
+    # that only touch docs / YAML / non-code files. Without this, the
+    # path-filtered workflow simply doesn't run and the required check
+    # sits in "waiting for results" forever, blocking the merge. The
+    # extra ~1 min of CI per PR is the cost of using a required check.
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday at 06:00 UTC
+
+jobs:
+  analyze:
+    name: "CodeQL Analyze"
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript
+          queries: security-extended
+
+      - name: Perform Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:javascript"

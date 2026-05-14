@@ -1,0 +1,28 @@
+---
+# AppProject for the claw-code-local ArgoCD Applications.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: claw-code-local
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Local K8s deployment of claw-code via ArgoCD.
+  sourceRepos:
+    - https://github.com/kstrassheim/claw-code-local.git
+    - https://github.com/kstrassheim/claw-code-local
+  destinations:
+    - namespace: openclaw
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+  # Cluster-scoped resources allowed for this project.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: ""
+      kind: PersistentVolume
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

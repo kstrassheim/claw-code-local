@@ -1,0 +1,122 @@
+name: PR Verify
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  verify-build:
+    name: Verify Image Build
+    runs-on: arc-runner-scale-claw-code-local
+    env:
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
+      OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve Versions
+        run: |
+          . ./VERSIONS
+          echo "UPSTREAM_REF=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${OPENCLAW_VERSION}" >> "$GITHUB_ENV"
+          echo "GH_CLI_VERSION=${GH_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "GLAB_VERSION=${GLAB_VERSION}" >> "$GITHUB_ENV"
+          echo "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_VERSION=${TERRAFORM_VERSION}" >> "$GITHUB_ENV"
+          echo "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
+          echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        # DOCKER_HOST is set by the dind sidecar to a TLS socket.
+        # That causes docker CLI to look for /home/runner/.docker/ca.pem
+        # which doesn't exist. Clear it so docker falls back to the
+        # default plain unix socket — buildx handles the rest.
+        uses: docker/setup-buildx-action@v3
+        env:
+          DOCKER_HOST: ""
+
+      - name: Trust mainpi Registry CA
+        # `docker buildx imagetools create` (used in the mirror step
+        # below) makes direct HTTPS calls from the runner process
+        # itself — it does NOT go through the dind dockerd, so the
+        # /etc/docker/certs.d mount that trusts mainpi.local:30500
+        # for `docker pull/push` is invisible to it. The mainpi-ca
+        # ConfigMap is mounted on the runner pod at
+        # /usr/local/share/ca-certificates/mainpi-ca.crt (Debian
+        # trust-source dir), but no update-ca-certificates has run
+        # yet, so the cert isn't in /etc/ssl/certs/ca-certificates.crt
+        # (the bundle Go reads). Trigger the update so the runner
+        # process trusts the cert before any imagetools call.
+        # Without this: `tls: failed to verify certificate: x509:
+        # certificate signed by unknown authority` against
+        # mainpi.local:30500.
+        run: |
+          sudo update-ca-certificates 2>&1 | tail -5
+
+      - name: Log In To Registry
+        # docker buildx imagetools reads auth from ~/.docker/config.json,
+        # which `docker login` writes to. Without this step, the mirror
+        # step below hits mainpi.local with no auth and gets
+        # `401 Unauthorized` on the destination blob HEAD.
+        # REGISTRY_USERNAME / REGISTRY_PASSWORD are injected into the
+        # runner pod's env via envFrom registry-creds in
+        # shared/runner-values.yaml — not GH secrets.
+        run: |
+          test -n "${REGISTRY_USERNAME:-}" || { echo "::error::REGISTRY_USERNAME missing in runner env (registry-creds Secret)"; exit 1; }
+          test -n "${REGISTRY_PASSWORD:-}" || { echo "::error::REGISTRY_PASSWORD missing in runner env (registry-creds Secret)"; exit 1; }
+          echo "${REGISTRY_PASSWORD}" | docker login "${{ vars.OPENCLAW_REGISTRY_URL }}" --username "${REGISTRY_USERNAME}" --password-stdin
+
+      - name: Require OPENCLAW_REGISTRY_URL
+        run: |
+          if [[ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]]; then
+            echo "::error::OPENCLAW_REGISTRY_URL is not set. Cannot proceed."
+            exit 1
+          fi
+
+      - name: Clone Upstream OpenClaw
+        run: |
+          git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
+          cd _openclaw_src
+          git fetch --tags --force
+          git -c advice.detachedHead=false checkout "${UPSTREAM_REF}"
+
+      - name: Ensure openclaw-base is mirrored from GHCR into local registry
+        run: |
+          SRC_TAG="${UPSTREAM_REF#v}"
+          SRC="ghcr.io/openclaw/openclaw:${SRC_TAG}"
+          DST="${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/openclaw-base:${UPSTREAM_REF}"
+          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
+            echo ">> ${DST} already mirrored, skipping"
+          else
+            docker buildx imagetools create --tag "${DST}" "${SRC}"
+          fi
+
+      - name: Build Upstream Image
+        run: |
+          docker build \
+            -t "openclaw-base:${UPSTREAM_REF}" \
+            _openclaw_src
+
+      - name: Extend Image with Python Packages
+        run: |
+          docker build \
+            --build-arg "BASE_IMAGE=${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/openclaw-base:${UPSTREAM_REF}" \
+            --build-arg "EPHE_FETCH_NONCE=${IMAGE_TAG}" \
+            --build-arg "GH_CLI_VERSION=${GH_CLI_VERSION}" \
+            --build-arg "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" \
+            --build-arg "GLAB_VERSION=${GLAB_VERSION}" \
+            --build-arg "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" \
+            --build-arg "TERRAFORM_VERSION=${TERRAFORM_VERSION}" \
+            --build-arg "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" \
+            --build-arg "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" \
+            --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
+            --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
+            --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+            builder/

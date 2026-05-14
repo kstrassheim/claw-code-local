@@ -1,0 +1,26 @@
+---
+# Application watching argocd/hooks/ for deploy-time scripts (pre-sync,
+# post-sync, etc.). Runs Sync waves so hooks execute in the right order
+# relative to the main k8s/ Application.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: claw-code-local-hooks
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: claw-code-local
+  source:
+    repoURL: https://github.com/kstrassheim/claw-code-local.git
+    targetRevision: main
+    path: argocd/hooks
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

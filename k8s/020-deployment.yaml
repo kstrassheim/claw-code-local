@@ -1,0 +1,197 @@
+---
+# ServiceAccount + Role + RoleBinding so the render-config init container
+# can patch the openclaw-config ConfigMap at pod start. Scoped tightly:
+# only the openclaw-config ConfigMap in this namespace, get/patch/update.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openclaw
+  namespace: openclaw
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openclaw-config-writer
+  namespace: openclaw
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["openclaw-config"]
+    verbs: ["get", "patch", "update", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openclaw-config-writer
+  namespace: openclaw
+subjects:
+  - kind: ServiceAccount
+    name: openclaw
+    namespace: openclaw
+roleRef:
+  kind: Role
+  name: openclaw-config-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw
+  namespace: openclaw
+  labels:
+    app: openclaw
+    environment: dev
+    project: claw-code-local
+spec:
+  replicas: 1
+  # `Recreate` (not the default RollingUpdate): terminate the old pod first,
+  # then start the new one. With replicas=1 and a RWO openclaw-workspace
+  # PVC, RollingUpdate deadlocks — the new pod can't mount the volume
+  # while the old pod still holds it, and maxUnavailable=0 keeps the old
+  # one alive until the new one is Ready. Brief downtime on each deploy
+  # in exchange for a deploy that actually finishes.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openclaw
+  template:
+    metadata:
+      labels:
+        app: openclaw
+      annotations:
+        # Single-file ConfigMap subPath mounts are NOT live-updated when the
+        # ConfigMap changes. Hash the assembled TOOLS.md so any edit to
+        # k8s/tools/ changes the pod template and triggers a rollout via
+        # ArgoCD's normal sync + the post-sync rollout step in deploy.sh.
+        checksum/tools-md: ""
+    spec:
+      serviceAccountName: openclaw
+      # PVC mounts default to root:root. The openclaw container runs as
+      # uid 1000 (node user) and writes config + identity + tasks into
+      # /home/node/.openclaw — so the mounted volume must be group-writable
+      # by gid 1000.
+      # - fsGroup chgrp's the mount root to gid 1000.
+      # - fsGroupChangePolicy=Always makes that recursive on every mount,
+      #   so existing subdirs (e.g. `workspace/` from earlier deploys with
+      #   the wrong mountPath) don't stay stuck at root:root.
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: Always
+      initContainers:
+        # Belt-and-suspenders on top of fsGroupChangePolicy: explicitly
+        # chmod the existing files so group=node has rw on dirs and rw
+        # on files. fsGroup only manages group ownership; if a file was
+        # created without g+w from the previous (root-owned) mount,
+        # node still can't write to it after the regroup. Runs as root
+        # in a busybox-style shell from the openclaw image; idempotent.
+        - name: fix-perms
+          image: ${OPENCLAW_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              chown -R 1000:1000 /home/node/.openclaw
+              chmod -R u+rwX,g+rwX /home/node/.openclaw
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/node/.openclaw
+        # Reads the canonical template from /template, decides whether
+        # MiniMax is reachable based on $MINIMAX_API_KEY, strips it with
+        # node if not, and writes the rendered result back into the live
+        # openclaw-config ConfigMap.
+        - name: render-config
+          image: ${OPENCLAW_IMAGE}
+          imagePullPolicy: Always
+          command: ["/bin/sh", "/scripts/render-config.sh"]
+          env:
+            - name: MISTRAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: MISTRAL_API_KEY
+                  optional: true
+            - name: MINIMAX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: MINIMAX_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: config-template
+              mountPath: /template
+            - name: render-scripts
+              mountPath: /scripts
+            - name: workspace
+              mountPath: /home/node/.openclaw
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      containers:
+        - name: openclaw
+          image: ${OPENCLAW_IMAGE}
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 18789
+              name: web
+            - containerPort: 18790
+              name: bridge
+          envFrom:
+            - configMapRef:
+                name: openclaw-tools-md
+            - configMapRef:
+                name: openclaw-config
+            - secretRef:
+                name: openclaw-secrets
+          env:
+            - name: OPENCLAW_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: openclaw-config-template
+                  key: OPENCLAW_IMAGE
+                  optional: true
+          volumeMounts:
+            # Mount the PVC at the WHOLE openclaw state directory, not just
+            # the `workspace/` subdir. Previously openclaw.json, identity/,
+            # tasks/, plugin-skills/, logs/ all lived on the container's
+            # ephemeral filesystem and were wiped on every pod restart —
+            # which made Telegram re-pair on every restart because the
+            # commands.ownerAllowFrom config (and the auth token under
+            # identity/) didn't persist.
+            - name: workspace
+              mountPath: /home/node/.openclaw
+            - name: tools-md
+              mountPath: /home/node/.openclaw/workspace/TOOLS.md
+              subPath: TOOLS.md
+          resources:
+            requests:
+              cpu: 600m
+              memory: 1500Mi
+            limits:
+              cpu: 1700m
+              memory: 5632Mi
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: openclaw-workspace
+        - name: tools-md
+          configMap:
+            name: openclaw-tools-md
+        - name: config-template
+          configMap:
+            name: openclaw-config-template
+        - name: render-scripts
+          configMap:
+            name: openclaw-render-scripts
+            defaultMode: 0755

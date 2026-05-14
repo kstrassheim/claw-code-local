@@ -1,0 +1,31 @@
+---
+# Bootstrap Application. Applying this single manifest tells ArgoCD to
+# watch argocd/apps/ and create the child Applications below.
+#
+# The registry URL below is injected by the build pipeline from the
+# LOCAL_REGISTRY_URL environment variable — do not hardcode local
+# hostnames or internal URLs in this public repository.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: claw-code-local-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: claw-code-local
+  source:
+    repoURL: https://github.com/kstrassheim/claw-code-local.git
+    targetRevision: main
+    path: argocd/apps
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
