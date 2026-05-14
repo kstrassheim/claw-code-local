@@ -3,6 +3,13 @@ name: Deploy
 on:
   push:
     branches: [main]
+    # publish-secrets re-seals openclaw-secrets-sealed.yaml on every run
+    # (kubeseal injects a random nonce, so the bytes always differ even
+    # when plaintext is identical). Without this filter, the resulting
+    # commit re-triggers the workflow → infinite loop. Excluding the
+    # sealed file from the trigger breaks the loop deterministically.
+    paths-ignore:
+      - 'k8s/openclaw-secrets-sealed.yaml'
   workflow_dispatch:
     inputs:
       git_ref:
@@ -14,71 +21,8 @@ permissions:
   contents: write
 
 jobs:
-  mirror-images:
-    name: Mirror Third-Party Images
-    runs-on: arc-runner-scale-claw-code-local
-    env:
-      REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Resolve Versions
-        run: |
-          . ./VERSIONS
-          echo "OLLAMA_VERSION=${OLLAMA_VERSION}" >> "$GITHUB_ENV"
-          echo "OPEN_WEBUI_VERSION=${OPEN_WEBUI_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Trust mainpi Registry CA
-        # `docker buildx imagetools create` (used in the mirror steps
-        # below) makes direct HTTPS calls from the runner process
-        # itself, bypassing dind's /etc/docker/certs.d trust store.
-        # The mainpi-ca ConfigMap is on disk at
-        # /usr/local/share/ca-certificates/mainpi-ca.crt but needs
-        # update-ca-certificates to land in /etc/ssl/certs/ca-certificates.crt
-        # (the bundle the Go-based buildx binary reads). Without this:
-        # `tls: failed to verify certificate: x509: certificate
-        # signed by unknown authority` against mainpi.local:30500.
-        run: |
-          sudo update-ca-certificates 2>&1 | tail -5
-
-      - name: Log In To Registry
-        run: |
-          test -n "${REGISTRY_USERNAME:-}"
-          test -n "${REGISTRY_PASSWORD:-}"
-          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
-
-      - name: Mirror ollama/ollama
-        run: |
-          SRC="docker.io/ollama/ollama:${OLLAMA_VERSION}"
-          DST="${REGISTRY}/ollama/ollama:${OLLAMA_VERSION}"
-          DST_LATEST="${REGISTRY}/ollama/ollama:latest"
-
-          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
-            echo ">> ${DST} already mirrored, skipping"
-          else
-            docker buildx imagetools create --tag "${DST}" "${SRC}"
-          fi
-
-          docker buildx imagetools create --tag "${DST_LATEST}" "${SRC}"
-
-      - name: Mirror open-webui
-        run: |
-          SRC="ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION}"
-          DST="${REGISTRY}/open-webui/open-webui:${OPEN_WEBUI_VERSION}"
-          DST_LATEST="${REGISTRY}/open-webui/open-webui:latest"
-
-          if docker manifest inspect "${DST}" >/dev/null 2>&1; then
-            echo ">> ${DST} already mirrored, skipping"
-          else
-            docker buildx imagetools create --tag "${DST}" "${SRC}"
-          fi
-
-          docker buildx imagetools create --tag "${DST_LATEST}" "${SRC}"
-
   build-and-push-image:
     name: Build Image
-    needs: mirror-images
     runs-on: arc-runner-scale-claw-code-local
     env:
       REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
@@ -191,6 +135,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        # Default GITHUB_TOKEN — pushes made with it don't trigger
+        # further workflows (GitHub anti-recursion). Pairs with the
+        # paths-ignore on the workflow trigger to keep the publish loop
+        # bounded. BOT_GITHUB_TOKEN is still used below to seal the
+        # bot's real PAT into the k8s secret.
 
       - name: Install kubectl and kubeseal
         run: |
@@ -210,39 +159,48 @@ jobs:
 
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Write kubeconfig
-        env:
-          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG_DATA }}
-        run: |
-          echo "$KUBECONFIG_DATA" | base64 -d > /tmp/kubeconfig
-
       - name: Fetch SealedSecrets certificate
+        # In-cluster runner has pod-network reach to the controller's
+        # Service in kube-system; /v1/cert.pem is unauthenticated by
+        # design, so no kubeconfig / KUBECONFIG_DATA secret is needed.
         run: |
-          kubeseal --kubeconfig /tmp/kubeconfig --fetch-cert \
+          kubeseal --fetch-cert \
             --controller-namespace kube-system \
             --controller-name sealed-secrets \
             > /tmp/ss-cert.pem
+          test -s /tmp/ss-cert.pem
+
+      - name: Resolve Versions
+        # OPENCLAW_UPSTREAM is read from VERSIONS into the seal step
+        # below so the runtime pod knows which upstream tag to track.
+        run: |
+          . ./VERSIONS
+          echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
       - name: Seal openclaw-secrets
+        # secrets.GITHUB_TOKEN is reserved by GitHub Actions (returns the
+        # ephemeral, repo-scoped workflow token, NOT a usable bot PAT).
+        # Read the real bot PAT from BOT_GITHUB_TOKEN and seal it under
+        # the k8s-side key name `GITHUB_TOKEN` that openclaw expects.
         env:
-          MISTRAL_API_KEY:        ${{ secrets.MISTRAL_API_KEY }}
-          MINIMAX_API_KEY:        ${{ secrets.MINIMAX_API_KEY }}
-          GITHUB_TOKEN:          ${{ secrets.GITHUB_TOKEN }}
-          ENTRA_TENANT_ID:       ${{ secrets.ENTRA_TENANT_ID }}
-          ENTRA_USERNAME:        ${{ secrets.ENTRA_USERNAME }}
-          ENTRA_PASSWORD:        ${{ secrets.ENTRA_PASSWORD }}
-          ENTRA_TOTP_SEED:      ${{ secrets.ENTRA_TOTP_SEED }}
-          GITLAB_TOKEN:          ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_LOCAL_TOKEN:    ${{ secrets.GITLAB_LOCAL_TOKEN }}
-          GITLAB_LOCAL_URL:      ${{ vars.GITLAB_LOCAL_URL }}
-          OPENCLAW_REGISTRY_URL: ${{ vars.OPENCLAW_REGISTRY_URL }}
-          PROXY_URL:             ${{ vars.PROXY_URL }}
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          MISTRAL_API_KEY:                 ${{ secrets.MISTRAL_API_KEY }}
+          MINIMAX_API_KEY:                 ${{ secrets.MINIMAX_API_KEY }}
+          GITHUB_TOKEN:                    ${{ secrets.BOT_GITHUB_TOKEN }}
+          ENTRA_TENANT_ID:                 ${{ secrets.ENTRA_TENANT_ID }}
+          ENTRA_USERNAME:                  ${{ secrets.ENTRA_USERNAME }}
+          ENTRA_PASSWORD:                  ${{ secrets.ENTRA_PASSWORD }}
+          ENTRA_TOTP_SEED:                 ${{ secrets.ENTRA_TOTP_SEED }}
+          GITLAB_TOKEN:                    ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_LOCAL_TOKEN:              ${{ secrets.GITLAB_LOCAL_TOKEN }}
+          GITLAB_LOCAL_URL:                ${{ vars.GITLAB_LOCAL_URL }}
+          OPENCLAW_REGISTRY_URL:           ${{ vars.OPENCLAW_REGISTRY_URL }}
+          PROXY_URL:                       ${{ vars.PROXY_URL }}
+          AWS_ACCESS_KEY_ID:               ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY:           ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           ALIBABA_CLOUD_ACCESS_KEY_ID:     ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
           ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
           ALIBABA_CLOUD_REGION_ID:         ${{ vars.ALIBABA_CLOUD_REGION_ID }}
-          ARGOCD_AUTH_TOKEN:     ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          ARGOCD_AUTH_TOKEN:               ${{ secrets.ARGOCD_AUTH_TOKEN }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace openclaw \
@@ -273,8 +231,15 @@ jobs:
               > k8s/openclaw-secrets-sealed.yaml
 
       - name: Commit SealedSecrets
+        # kubeseal injects a random nonce per call so the bytes change
+        # every run even when the plaintext is identical. Skip the
+        # commit (and the follow-up push that would loop the workflow)
+        # whenever the diff is byte-equal to whatever is on main —
+        # otherwise every push to main triggers Deploy, which triggers
+        # this re-seal, which pushes to main, ad infinitum.
         run: |
-          git config user.name "github-actions[bot]"
+          set -eu
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/openclaw-secrets-sealed.yaml
           if git diff --cached --quiet; then
@@ -288,7 +253,7 @@ jobs:
             echo "race: origin already has fresh sealed secrets, exiting 0"
             exit 0
           fi
-          git push
+          git push origin main
 
   argocd-sync:
     name: ArgoCD Sync
