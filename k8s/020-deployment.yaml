@@ -67,6 +67,22 @@ spec:
         checksum/tools-md: ""
     spec:
       serviceAccountName: openclaw
+      # Pin to datapi. The openclaw-workspace PVC uses the cluster-default
+      # `local-path` StorageClass, which provisions a hostPath PV on the
+      # node where this pod first schedules. Without an explicit pin, the
+      # pod could land on mainpi (the only untainted node) and create the
+      # workspace there — then the pod is stuck on mainpi forever because
+      # the PV's nodeAffinity is set on first provision and can't move.
+      # datapi is mostly idle behind a `data=true:NoSchedule` taint, so
+      # we tolerate it and force-schedule there. Same pin used by
+      # k8s-openclaw and the arc-runner-scale-claw-code-local runner pods.
+      nodeSelector:
+        kubernetes.io/hostname: datapi
+      tolerations:
+        - key: data
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
       # PVC mounts default to root:root. The openclaw container runs as
       # uid 1000 (node user) and writes config + identity + tasks into
       # /home/node/.openclaw — so the mounted volume must be group-writable
