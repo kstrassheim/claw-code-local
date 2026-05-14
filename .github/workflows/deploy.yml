@@ -145,30 +145,26 @@ jobs:
       - name: Read VERSIONS file
         run: |
           . ./VERSIONS
-          echo "OPENCLAW_UPSTREAM_REPO=${OPENCLAW_UPSTREAM_REPO}" >> "$GITHUB_ENV"
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
-      - name: Clone upstream openclaw
+      - name: Ensure openclaw-base is mirrored from GHCR into local registry
+        # Mirrors claw-code's "Ensure openclaw-base is mirrored ..." step.
+        # Upstream image lives at ghcr.io/openclaw/openclaw and is tagged
+        # WITHOUT the v-prefix (2026.5.7), so we strip it on read. The local
+        # registry retag keeps the v-prefix for human-readable parity.
+        # Skip the pull when the target tag is already present, so re-runs
+        # of the same SHA don't burn registry bandwidth.
         run: |
-          git clone --depth 1 "https://github.com/${OPENCLAW_UPSTREAM_REPO}.git" _openclaw_src
-          cd _openclaw_src
-          git fetch --tags --force
-          git -c advice.detachedHead=false checkout "${OPENCLAW_UPSTREAM}"
-          # Copy builder/ and Dockerfile from the upstream repo
-          mkdir -p ../builder/
-          cp -r openclaw-builder/. ../builder/ 2>/dev/null || cp -r builder/. ../builder/ 2>/dev/null || true
-          cp openclaw-builder/Dockerfile ../builder/Dockerfile 2>/dev/null || \
-            cp Dockerfile ../builder/Dockerfile 2>/dev/null || true
-          cd ..
-          rm -rf _openclaw_src
-
-      - name: Import GHCR base image into local registry
-        run: |
-          SOURCE_IMAGE="ghcr.io/${OPENCLAW_UPSTREAM_REPO}:${OPENCLAW_UPSTREAM}"
+          SRC_TAG="${OPENCLAW_UPSTREAM#v}"
+          SOURCE_IMAGE="ghcr.io/openclaw/openclaw:${SRC_TAG}"
           TARGET_IMAGE="${REGISTRY}/openclaw/openclaw-base:${OPENCLAW_UPSTREAM}"
-          docker pull "$SOURCE_IMAGE"
-          docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
-          docker push "$TARGET_IMAGE"
+          if docker manifest inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+            echo "$TARGET_IMAGE already present — skipping import"
+          else
+            docker pull "$SOURCE_IMAGE"
+            docker tag  "$SOURCE_IMAGE" "$TARGET_IMAGE"
+            docker push "$TARGET_IMAGE"
+          fi
           echo "BASE_IMAGE=${TARGET_IMAGE}" >> "$GITHUB_ENV"
 
       - name: Build and push image

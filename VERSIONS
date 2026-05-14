@@ -2,13 +2,10 @@
 # Read by .github/workflows/validate.yml and deploy.yml.
 # Bump a value here and a PR / merge will rebuild the image with it.
 
-# Upstream openclaw source. Two separate values:
-#   OPENCLAW_UPSTREAM_REPO — <owner>/<repo> on GitHub (for git clone and
-#                            the ghcr.io/<repo> base-image lookup).
-#   OPENCLAW_UPSTREAM      — git ref (tag/branch/sha) to check out, and
-#                            also the tag of the pre-built base image
-#                            on ghcr.io.
-OPENCLAW_UPSTREAM_REPO=kstrassheim/openclaw
+# Upstream openclaw base image (FROM in builder/Dockerfile).
+# Tag matches https://github.com/openclaw/openclaw releases. The deploy /
+# validate workflows pull ghcr.io/openclaw/openclaw:<this minus v-prefix>
+# and re-tag it locally as openclaw-base:<this with v-prefix>.
 OPENCLAW_UPSTREAM=v2026.5.7
 
 # Image tag prefix for local registry (set by deploy.yml from github.sha)
