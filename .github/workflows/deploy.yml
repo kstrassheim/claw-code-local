@@ -145,14 +145,15 @@ jobs:
       - name: Read VERSIONS file
         run: |
           . ./VERSIONS
+          echo "OPENCLAW_UPSTREAM_REPO=${OPENCLAW_UPSTREAM_REPO}" >> "$GITHUB_ENV"
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
       - name: Clone upstream openclaw
         run: |
-          git clone --depth 1 "https://github.com/${OPENCLAW_UPSTREAM:-kstrassheim/openclaw}.git" _openclaw_src
+          git clone --depth 1 "https://github.com/${OPENCLAW_UPSTREAM_REPO}.git" _openclaw_src
           cd _openclaw_src
           git fetch --tags --force
-          git -c advice.detachedHead=false checkout "${OPENCLAW_UPSTREAM:-v2026.5.7}"
+          git -c advice.detachedHead=false checkout "${OPENCLAW_UPSTREAM}"
           # Copy builder/ and Dockerfile from the upstream repo
           mkdir -p ../builder/
           cp -r openclaw-builder/. ../builder/ 2>/dev/null || cp -r builder/. ../builder/ 2>/dev/null || true
@@ -163,8 +164,8 @@ jobs:
 
       - name: Import GHCR base image into local registry
         run: |
-          SOURCE_IMAGE="ghcr.io/${OPENCLAW_UPSTREAM:-kstrassheim/openclaw}:v2026.5.7"
-          TARGET_IMAGE="${REGISTRY}/openclaw/openclaw-base:v2026.5.7"
+          SOURCE_IMAGE="ghcr.io/${OPENCLAW_UPSTREAM_REPO}:${OPENCLAW_UPSTREAM}"
+          TARGET_IMAGE="${REGISTRY}/openclaw/openclaw-base:${OPENCLAW_UPSTREAM}"
           docker pull "$SOURCE_IMAGE"
           docker tag "$SOURCE_IMAGE" "$TARGET_IMAGE"
           docker push "$TARGET_IMAGE"
