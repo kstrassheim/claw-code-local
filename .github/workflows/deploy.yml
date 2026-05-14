@@ -133,6 +133,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            opt=registry.mirror.mainpi.local:30500=insecure
+            opt=registry.insecure-tls-mainpi.local:30500=true
 
       - name: Log in to local registry
         # REGISTRY_USERNAME / REGISTRY_PASSWORD are injected into the
