@@ -33,15 +33,13 @@ jobs:
           echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        # Bare setup — no driver-opts, no env tweaks. The mainpi-ca
-        # ConfigMap is mounted into the dind sidecar at
-        # /etc/docker/certs.d/mainpi.local:30500/ca.crt by
-        # shared/runner-values.yaml (k8s-deployment), so the registry
-        # is trusted via the normal docker CA mechanism. No "insecure"
-        # registry config needed. DOCKER_TLS_VERIFY must NOT be set —
-        # docker CLI treats any non-empty value (including "0") as
-        # "TLS verify on", which would trigger the cert-path lookup.
+        # DOCKER_HOST is set by the dind sidecar to a TLS socket.
+        # That causes docker CLI to look for /home/runner/.docker/ca.pem
+        # which doesn't exist. Clear it so docker falls back to the
+        # default plain unix socket — buildx handles the rest.
         uses: docker/setup-buildx-action@v3
+        env:
+          DOCKER_HOST: ""
 
       - name: Require OPENCLAW_REGISTRY_URL
         run: |
