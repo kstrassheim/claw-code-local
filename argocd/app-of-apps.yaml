@@ -16,7 +16,7 @@ spec:
   project: claw-code-local
   source:
     repoURL: https://github.com/kstrassheim/claw-code-local.git
-    targetRevision: feature/issue-1
+    targetRevision: main
     path: argocd/apps
     directory:
       recurse: false
