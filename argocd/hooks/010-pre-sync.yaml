@@ -1,0 +1,78 @@
+---
+# Pre-sync hook: assembles k8s/tools/*.md → openclaw-tools-md ConfigMap
+# BEFORE ArgoCD applies the k8s/ manifests. This ensures the ConfigMap
+# is in place when the openclaw pod starts (envFrom picks it up).
+#
+# The checksum/tools-md annotation is also patched here so any change
+# to k8s/tools/ triggers a pod rollout when ArgoCD next syncs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claw-code-local-pre-sync
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+  generateName: claw-code-local-pre-sync-
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: assemble-tools-md
+          image: bitnami/kubectl:latest
+          env:
+            - name: NAMESPACE
+              value: openclaw
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -euo pipefail
+
+              echo "[pre-sync] Assembling TOOLS.md from k8s/tools/ ..."
+
+              mkdir -p /tmp/tools-md
+
+              cat \
+                k8s/tools/TOOLS.md \
+                k8s/tools/TOOLS-gitflow.md \
+                k8s/tools/TOOLS-github.md \
+                k8s/tools/TOOLS-gitlab.md \
+                k8s/tools/TOOLS-gmail.md \
+                k8s/tools/TOOLS-entra.md \
+                k8s/tools/TOOLS-aws.md \
+                k8s/tools/TOOLS-gcp.md \
+                k8s/tools/TOOLS-alicloud.md \
+                k8s/tools/TOOLS-k8s.md \
+                k8s/tools/TOOLS-argocd.md \
+                k8s/tools/TOOLS-terraform.md \
+                k8s/tools/TOOLS-vscode.md \
+                k8s/tools/TOOLS-debug.md \
+                > /tmp/tools-md/TOOLS.md
+
+              echo "Assembled TOOLS.md: $(wc -c < /tmp/tools-md/TOOLS.md) bytes ($(wc -l < /tmp/tools-md/TOOLS.md) lines)."
+
+              CHECKSUM=$(sha256sum /tmp/tools-md/TOOLS.md | awk '{print $1}')
+              echo "checksum/tools-md: $CHECKSUM"
+
+              # Patch the checksum annotation on the deployment pod template.
+              # The annotation change causes ArgoCD's diff to detect a pod
+              # template change on the next sync even if the ConfigMap content
+              # hasn't changed — forcing a rollout after the ConfigMap is created.
+              kubectl patch deployment openclaw \
+                -n "$NAMESPACE" \
+                --type='merge' \
+                -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/tools-md\":\"$CHECKSUM\"}}}}}" \
+                2>/dev/null || echo "WARN: deployment patch failed (may not exist yet — ArgoCD will create it)"
+
+              kubectl create configmap openclaw-tools-md \
+                -n "$NAMESPACE" \
+                --from-file=TOOLS.md=/tmp/tools-md/TOOLS.md \
+                --dry-run=client -o yaml \
+              | kubectl apply -f -
+
+              echo "[pre-sync] openclaw-tools-md ConfigMap ready."
+          workingDir: /
