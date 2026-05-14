@@ -59,6 +59,12 @@ spec:
     metadata:
       labels:
         app: openclaw
+      annotations:
+        # Single-file ConfigMap subPath mounts are NOT live-updated when the
+        # ConfigMap changes. Hash the assembled TOOLS.md so any edit to
+        # k8s/tools/ changes the pod template and triggers a rollout via
+        # ArgoCD's normal sync + the post-sync rollout step in deploy.sh.
+        checksum/tools-md: ""
     spec:
       serviceAccountName: openclaw
       # PVC mounts default to root:root. The openclaw container runs as
