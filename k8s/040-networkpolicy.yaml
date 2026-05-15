@@ -1,14 +1,6 @@
-# apiVersion: networking.k8s.io/v1
-# kind: NetworkPolicy
-# metadata:
-#   name: default-deny-all
-#   namespace: openclaw
-# spec:
-#   podSelector: {}
-#   policyTypes:
-#     - Ingress
-#     - Egress
-# ---
+---
+# All-pods DNS egress to kube-system (resolves cluster service names
+# and external hostnames via CoreDNS).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -26,5 +18,31 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+  policyTypes:
+    - Egress
+---
+# openclaw needs:
+# - TCP/443  outbound HTTPS to model providers (Mistral, MiniMax),
+#            Telegram Bot API, GitHub, etc.
+# - TCP/6443 outbound to the K8s API server (the render-config init
+#            container calls `kubectl create cm | kubectl apply`).
+# No destination restriction — the egress targets are public APIs
+# (and the in-cluster API server on 443) and pinning them by CIDR
+# would just add maintenance for no benefit.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-egress-dns-internet
+  namespace: claw-code-local
+spec:
+  podSelector:
+    matchLabels:
+      app: openclaw
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
   policyTypes:
     - Egress
