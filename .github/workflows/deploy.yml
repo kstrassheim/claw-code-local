@@ -24,6 +24,7 @@ jobs:
   build-and-push-image:
     name: Build Image
     runs-on: arc-runner-scale-claw-code-local
+    needs: [publish-secrets]
     env:
       REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
       IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
@@ -254,36 +255,3 @@ jobs:
             exit 0
           fi
           git push origin main
-
-  argocd-sync:
-    name: ArgoCD Sync
-    runs-on: arc-runner-scale-claw-code-local
-    needs: [publish-secrets, build-and-push-image]
-    steps:
-      - name: ArgoCD login
-        run: |
-          argocd login "${{ vars.ARGOCD_SERVER }}" --insecure --grpc-web \
-            --username argocd-bot \
-            --password '${{ secrets.ARGOCD_AUTH_TOKEN }}'
-
-      - name: Sync hooks app (PreSync — TOOLS.md generation)
-        run: |
-          argocd app sync claw-code-local-hooks --force
-          argocd app wait claw-code-local-hooks --timeout 300
-
-      - name: Sync main app
-        run: |
-          argocd app set claw-code-local \
-            -p openclaw.image.repository="${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local"
-          argocd app set claw-code-local \
-            -p openclaw.image.tag="${{ github.sha }}"
-          argocd app sync claw-code-local --force
-          argocd app wait claw-code-local --timeout 600
-
-      - name: ArgoCD app status
-        run: |
-          echo "=== claw-code-local-hooks ==="
-          argocd app get claw-code-local-hooks
-          echo ""
-          echo "=== claw-code-local ==="
-          argocd app get claw-code-local

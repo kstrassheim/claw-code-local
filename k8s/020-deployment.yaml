@@ -102,7 +102,7 @@ spec:
         # node still can't write to it after the regroup. Runs as root
         # in a busybox-style shell from the openclaw image; idempotent.
         - name: fix-perms
-          image: ${OPENCLAW_IMAGE}
+          image: claw-code-local
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -120,7 +120,7 @@ spec:
         # node if not, and writes the rendered result back into the live
         # openclaw-config ConfigMap.
         - name: render-config
-          image: ${OPENCLAW_IMAGE}
+          image: claw-code-local
           imagePullPolicy: Always
           command: ["/bin/sh", "/scripts/render-config.sh"]
           env:
@@ -152,7 +152,7 @@ spec:
               memory: 256Mi
       containers:
         - name: openclaw
-          image: ${OPENCLAW_IMAGE}
+          image: claw-code-local
           imagePullPolicy: Always
           ports:
             - containerPort: 18789
