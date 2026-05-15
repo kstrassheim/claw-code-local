@@ -14,7 +14,7 @@ spec:
     path: k8s
   destination:
     server: https://kubernetes.default.svc
-    namespace: openclaw
+    namespace: claw-code-local
   syncPolicy:
     automated:
       prune: true

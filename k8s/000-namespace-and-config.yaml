@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: openclaw
+  name: claw-code-local
   labels:
     environment: dev
     project: claw-code-local

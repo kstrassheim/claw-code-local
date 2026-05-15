@@ -25,7 +25,7 @@ spec:
           image: bitnami/kubectl:latest
           env:
             - name: NAMESPACE
-              value: openclaw
+              value: claw-code-local
           command:
             - /bin/sh
             - -c

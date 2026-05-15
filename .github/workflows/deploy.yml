@@ -205,7 +205,7 @@ jobs:
           TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           kubectl create secret generic openclaw-secrets \
-            --namespace openclaw \
+            --namespace claw-code-local \
             --dry-run=client \
             --from-literal=MISTRAL_API_KEY="$MISTRAL_API_KEY" \
             --from-literal=MINIMAX_API_KEY="$MINIMAX_API_KEY" \
