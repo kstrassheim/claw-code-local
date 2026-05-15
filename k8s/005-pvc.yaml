@@ -2,18 +2,15 @@
 # Persistent workspace for the openclaw container, mounted at
 # /home/node/.openclaw/workspace inside the container.
 #
-# Uses the cluster default StorageClass (`local-path`, k3s-bundled
-# rancher.io/local-path-provisioner). The provisioner creates a
-# per-PVC directory on whichever node the consuming pod is scheduled
-# on — combined with the deployment's nodeSelector pinning to datapi,
-# this means the workspace always lives on datapi's local disk under
-# /opt/local-path-provisioner/.
+# Uses the `local-path-data` StorageClass deployed by k8s-data-management
+# (sister provisioner restricted to datapi, base path /data/pv). Volumes
+# land at /data/pv/<pvc-name>/ via a custom setup script that symlinks
+# the auto-generated provisioner dirname to a clean alias. For this
+# PVC the on-disk path is /data/pv/openclaw-workspace/ on datapi.
 #
-# Reclaim policy on `local-path` is Delete: if this PVC is ever
-# deleted (e.g. by removing the claw-code-local ArgoCD Application with
-# prune: true), the workspace dir on datapi is wiped. Day-to-day
-# GitOps doesn't touch PVCs, so this is fine in normal operation —
-# just don't manually `kubectl delete pvc openclaw-workspace`.
+# Reclaim policy on local-path-data is Retain — deleting this PVC
+# leaves the workspace dir intact on datapi so the next deploy can
+# pick up state. Cleanup is manual when intended.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -22,6 +19,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: local-path-data
   resources:
     requests:
       # 50Gi — roomy without being wasteful for a coding workspace
