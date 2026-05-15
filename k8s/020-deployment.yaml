@@ -112,6 +112,12 @@ spec:
             - /bin/sh
             - -c
             - |
+              # Pre-create workspace/ before the kubelet's subPath mount of
+              # TOOLS.md auto-creates it as root:root 0755 (the parent dir
+              # of a subPath is created by kubelet running as root, and is
+              # then NOT touched by fsGroup, leaving the in-pod uid 1000
+              # unable to write AGENTS.md and friends into it).
+              mkdir -p /home/node/.openclaw/workspace
               chown -R 1000:1000 /home/node/.openclaw
               chmod -R u+rwX,g+rwX /home/node/.openclaw
           volumeMounts:
