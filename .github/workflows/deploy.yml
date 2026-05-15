@@ -202,6 +202,7 @@ jobs:
           ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
           ALIBABA_CLOUD_REGION_ID:         ${{ vars.ALIBABA_CLOUD_REGION_ID }}
           ARGOCD_AUTH_TOKEN:               ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace openclaw \
@@ -227,6 +228,7 @@ jobs:
             --from-literal=ALIBABA_CLOUD_REGION_ID="$ALIBABA_CLOUD_REGION_ID" \
             --from-literal=ARGOCD_AUTH_TOKEN="$ARGOCD_AUTH_TOKEN" \
             --from-literal=ARGOCD_SERVER="${{ vars.ARGOCD_SERVER }}" \
+            --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
             -o yaml \
           | kubeseal --cert /tmp/ss-cert.pem --format yaml \
               > k8s/openclaw-secrets-sealed.yaml
