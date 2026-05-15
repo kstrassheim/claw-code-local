@@ -67,6 +67,8 @@ spec:
         checksum/tools-md: ""
     spec:
       serviceAccountName: openclaw
+      imagePullSecrets:
+        - name: registry-pull-secret
       # Pin to datapi. The openclaw-workspace PVC uses the cluster-default
       # `local-path` StorageClass, which provisions a hostPath PV on the
       # node where this pod first schedules. Without an explicit pin, the
