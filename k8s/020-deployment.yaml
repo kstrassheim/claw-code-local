@@ -194,6 +194,13 @@ spec:
             - name: tools-md
               mountPath: /home/node/.openclaw/workspace/TOOLS.md
               subPath: TOOLS.md
+            # issue-watcher chat skill — drives the kubectl toggle
+            # commands. ConfigMap source is in 050-issue-watcher.yaml,
+            # so git owns the SKILL.md text and changes flow through
+            # ArgoCD. Pod restart required to pick up subPath updates.
+            - name: skill-issue-watcher
+              mountPath: /home/node/.openclaw/plugin-skills/issue-watcher/SKILL.md
+              subPath: SKILL.md
           resources:
             requests:
               cpu: 600m
@@ -212,6 +219,9 @@ spec:
         - name: tools-md
           configMap:
             name: openclaw-tools-md
+        - name: skill-issue-watcher
+          configMap:
+            name: openclaw-skill-issue-watcher
         - name: config-template
           configMap:
             name: openclaw-config-template
