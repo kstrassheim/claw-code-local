@@ -2,7 +2,6 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: claw-code-local
-
 resources:
   - 000-namespace-and-config.yaml
   - 005-pvc.yaml
@@ -12,7 +11,6 @@ resources:
   - 040-networkpolicy.yaml
   - 050-issue-watcher.yaml
   - openclaw-secrets-sealed.yaml
-
 # Pin the openclaw image here so the deployment manifest stays static and
 # Argo CD picks up new builds when this tag is bumped. Tag tracks
 # OPENCLAW_VERSION in /VERSIONS — the deploy workflow rewrites this entry
@@ -20,4 +18,4 @@ resources:
 images:
   - name: claw-code-local
     newName: mainpi.local:30500/openclaw/claw-code-local
-    newTag: v2026.5.7.15
+    newTag: v2026.5.12.17
