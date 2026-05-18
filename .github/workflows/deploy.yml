@@ -3,13 +3,13 @@ name: Deploy
 on:
   push:
     branches: [main]
-    # publish-secrets re-seals openclaw-secrets-sealed.yaml on every run
-    # (kubeseal injects a random nonce, so the bytes always differ even
-    # when plaintext is identical). Without this filter, the resulting
-    # commit re-triggers the workflow → infinite loop. Excluding the
-    # sealed file from the trigger breaks the loop deterministically.
-    paths-ignore:
-      - 'k8s/openclaw-secrets-sealed.yaml'
+    # publish-secrets pushes its re-seal commit through actions/checkout's
+    # default GITHUB_TOKEN, which GitHub does not re-trigger workflows for
+    # (built-in anti-recursion). That alone bounds the publish loop, so
+    # we don't need a paths filter. An earlier paths-ignore on the sealed
+    # file also silently dropped empty merges / commits that touched no
+    # paths — including the empty PR used to manually rotate secrets —
+    # so the filter is gone.
   workflow_dispatch:
     inputs:
       git_ref:
@@ -137,10 +137,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         # Default GITHUB_TOKEN — pushes made with it don't trigger
-        # further workflows (GitHub anti-recursion). Pairs with the
-        # paths-ignore on the workflow trigger to keep the publish loop
-        # bounded. BOT_GITHUB_TOKEN is still used below to seal the
-        # bot's real PAT into the k8s secret.
+        # further workflows (GitHub anti-recursion), which is what
+        # bounds the publish loop. BOT_GITHUB_TOKEN is still used below
+        # to seal the bot's real PAT into the k8s secret.
 
       - name: Install kubectl and kubeseal
         run: |
