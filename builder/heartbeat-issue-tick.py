@@ -1,48 +1,47 @@
 #!/usr/bin/env python3
 """
-heartbeat-issue-tick: deterministic concurrency gate for the heartbeat
-issue-watcher loop.
+heartbeat-issue-tick: emit a JSON spawn plan for the issue-watcher CronJob.
 
-Invoked from HEARTBEAT.md on every heartbeat tick. Lists each repo the
-bot is a collaborator on, fetches open issues assigned to @me, and
-decides which ones the agent should spawn a subagent for.
+Lists every repo the bot is a collaborator on, then for each repo lists
+open issues assigned to @me and the in-flight K8s Jobs that are already
+fixing them. The K8s control plane is the concurrency ledger — Jobs
+labeled `app=issue-fixer, issueRepo=<slug>` count toward the per-repo
+cap (default 2). Jobs that have completed (succeeded/failed) or aged
+past TTL no longer count.
 
-Concurrency rule (hard-bounded here, not in HEARTBEAT.md prose):
-  - At most MAX_PER_REPO subagents per repo
-  - Each subagent's slot is held for TTL_SECONDS, after which the slot
-    is freed even if the subagent is still running (stuck-job guard)
-
-The state is a lock-file directory in /tmp (cleared on every pod
-restart, which is correct — restarts kill in-flight subagents anyway).
-A lock is created here at "to_spawn" decision time, so even if the
-agent never actually starts the subagent the slot is held for TTL.
-That's the conservative side of the race; the alternative (LLM creates
-the lock after spawn) would let a model that ignores the plan exceed
-the limit.
-
-Output: a single JSON document on stdout. HEARTBEAT.md tells the agent
-to read it and spawn subagents only for entries under `to_spawn`.
+The script is **read-only**. It just decides which (repo, issue) pairs
+the spawner script may launch a Job for. The spawner enforces the same
+limit again at create-time as a belt-and-suspenders check.
 
 Env:
-  GITHUB_TOKEN         — bot's PAT (already wired)
-  HEARTBEAT_MAX_PER_REPO (default 2)
-  HEARTBEAT_TTL_SECONDS  (default 3600)
-  HEARTBEAT_LOCK_DIR     (default /tmp/openclaw-issue-locks)
+  GITHUB_TOKEN              — bot's PAT (already wired)
+  HEARTBEAT_MAX_PER_REPO    (default 2)
+  HEARTBEAT_TTL_SECONDS     (default 3600 — both K8s activeDeadline
+                             and the upper bound on "we still count
+                             this Job as alive even without status")
 """
 
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 MAX_PER_REPO = int(os.environ.get("HEARTBEAT_MAX_PER_REPO", "2"))
 TTL_SECONDS = int(os.environ.get("HEARTBEAT_TTL_SECONDS", "3600"))
-LOCK_DIR = os.environ.get("HEARTBEAT_LOCK_DIR", "/tmp/openclaw-issue-locks")
-TIMEOUT = 15
+
+K8S_SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+K8S_API = "https://kubernetes.default.svc"
+HTTP_TIMEOUT = 15
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read().strip()
 
 
 def gh_get(url: str, params: dict | None = None) -> list | dict:
@@ -51,13 +50,13 @@ def gh_get(url: str, params: dict | None = None) -> list | dict:
     req = urllib.request.Request(
         url,
         headers={
-            "Authorization": f"Bearer {TOKEN}",
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "openclaw-heartbeat-tick",
+            "User-Agent": "openclaw-issue-watcher",
         },
     )
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
         return json.loads(r.read())
 
 
@@ -81,115 +80,123 @@ def list_assigned_open_issues(repo: str) -> list[dict]:
         f"https://api.github.com/repos/{repo}/issues",
         {"assignee": "@me", "state": "open", "per_page": 50},
     )
-    # GitHub's /issues endpoint returns PRs too; filter them out — the
-    # bot's PR-handling lives in a different skill.
+    # /issues returns PRs too; strip them — PR review is a separate skill.
     return [i for i in raw if "pull_request" not in i]
 
 
 def repo_slug(repo: str) -> str:
-    return repo.replace("/", "__")
+    # K8s label values: [a-z0-9.-_], so map "owner/name" to "owner.name".
+    return repo.replace("/", ".").lower()
 
 
-def list_active_locks(repo: str) -> list[dict]:
-    """Locks newer than TTL_SECONDS hold a slot; older ones are released."""
-    d = os.path.join(LOCK_DIR, repo_slug(repo))
-    if not os.path.isdir(d):
-        return []
-    now = time.time()
-    active: list[dict] = []
-    for name in os.listdir(d):
-        path = os.path.join(d, name)
-        try:
-            mtime = os.path.getmtime(path)
-        except FileNotFoundError:
-            continue
-        if now - mtime > TTL_SECONDS:
-            # Stale; remove so the slot is freed for new work.
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-            continue
-        active.append(
-            {
-                "issueNumber": int(name.removesuffix(".lock")) if name.endswith(".lock") else None,
-                "ageSeconds": int(now - mtime),
-            }
-        )
-    return active
+def k8s_get_jobs(namespace: str, label_selector: str) -> list[dict]:
+    # In-cluster auth: SA token + CA bundle live under /var/run/secrets.
+    # No third-party deps — just urllib over TLS with the kubelet's CA.
+    token = _read(f"{K8S_SA_DIR}/token")
+    ctx = ssl.create_default_context(cafile=f"{K8S_SA_DIR}/ca.crt")
+    url = (
+        f"{K8S_API}/apis/batch/v1/namespaces/{namespace}/jobs"
+        f"?labelSelector={urllib.parse.quote(label_selector)}"
+    )
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT, context=ctx) as r:
+        body = json.loads(r.read())
+    return body.get("items", [])
 
 
-def take_lock(repo: str, issue_number: int) -> bool:
-    """Atomic lock acquisition via O_CREAT|O_EXCL — returns False if taken."""
-    d = os.path.join(LOCK_DIR, repo_slug(repo))
-    os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, f"{issue_number}.lock")
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+def is_active(job: dict, now_epoch: float) -> bool:
+    """A Job counts as alive if K8s hasn't recorded completion AND it's
+    still inside the TTL window. Cleaning up stuck Jobs is K8s's job via
+    activeDeadlineSeconds; we double-check here so a CronJob tick can't
+    keep slots permanently held by a controller-side hiccup."""
+    status = job.get("status") or {}
+    if status.get("completionTime"):
         return False
-    os.write(fd, f"{int(time.time())}\n".encode())
-    os.close(fd)
+    if any(c.get("type") == "Failed" and c.get("status") == "True"
+           for c in status.get("conditions") or []):
+        return False
+    start = status.get("startTime") or job["metadata"].get("creationTimestamp")
+    if start:
+        # ISO 8601 from K8s, e.g. "2026-05-18T08:00:00Z"
+        import datetime
+        ts = datetime.datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc
+        ).timestamp()
+        if now_epoch - ts > TTL_SECONDS:
+            return False
     return True
 
 
 def main() -> int:
-    if not TOKEN:
-        json.dump({"error": "GITHUB_TOKEN not set; cannot list repos or issues"}, sys.stdout)
+    if not GITHUB_TOKEN:
+        json.dump({"error": "GITHUB_TOKEN not set"}, sys.stdout)
+        return 1
+    try:
+        namespace = _read(f"{K8S_SA_DIR}/namespace")
+    except FileNotFoundError:
+        json.dump({"error": "not running in a pod (no service-account dir)"}, sys.stdout)
         return 1
 
     started = time.time()
     try:
         repos = list_collaborator_repos()
     except urllib.error.HTTPError as e:
-        json.dump({"error": f"list collaborator repos failed: {e.code} {e.reason}"}, sys.stdout)
+        json.dump({"error": f"list collaborator repos: {e.code} {e.reason}"}, sys.stdout)
         return 2
 
     plan: dict = {
         "generatedAt": int(started),
+        "namespace": namespace,
         "ttlSeconds": TTL_SECONDS,
         "maxPerRepo": MAX_PER_REPO,
-        "lockDir": LOCK_DIR,
         "repos": [],
     }
 
     for repo in repos:
-        active = list_active_locks(repo)
-        active_issue_numbers = {a["issueNumber"] for a in active if a["issueNumber"] is not None}
-        slots = max(0, MAX_PER_REPO - len(active))
+        slug = repo_slug(repo)
+        try:
+            active_jobs = k8s_get_jobs(
+                namespace, f"app=issue-fixer,issueRepo={slug}"
+            )
+        except urllib.error.HTTPError as e:
+            plan["repos"].append(
+                {"repo": repo, "error": f"k8s list jobs: {e.code} {e.reason}"}
+            )
+            continue
+
+        live = [j for j in active_jobs if is_active(j, started)]
+        live_issue_numbers = {
+            int(j["metadata"]["labels"].get("issueNumber", "0"))
+            for j in live
+            if j["metadata"].get("labels", {}).get("issueNumber")
+        }
+        slots = max(0, MAX_PER_REPO - len(live))
 
         try:
             issues = list_assigned_open_issues(repo)
         except urllib.error.HTTPError as e:
-            plan["repos"].append(
-                {"repo": repo, "error": f"list issues failed: {e.code} {e.reason}"}
-            )
+            plan["repos"].append({"repo": repo, "error": f"list issues: {e.code} {e.reason}"})
             continue
 
-        # Skip issues already covered by a live lock; we don't want a
-        # second subagent racing on the same issue.
-        candidates = [i for i in issues if i["number"] not in active_issue_numbers]
-
-        to_spawn: list[dict] = []
-        for issue in candidates[:slots]:
-            if not take_lock(repo, issue["number"]):
-                # Another tick already grabbed this (cross-process race).
-                continue
-            to_spawn.append(
-                {
-                    "issueNumber": issue["number"],
-                    "title": issue["title"],
-                    "url": issue["html_url"],
-                    "labels": [l["name"] for l in issue.get("labels", [])],
-                    "lockPath": os.path.join(LOCK_DIR, repo_slug(repo), f"{issue['number']}.lock"),
-                }
-            )
+        candidates = [i for i in issues if i["number"] not in live_issue_numbers]
+        to_spawn = [
+            {
+                "issueNumber": i["number"],
+                "title": i["title"],
+                "url": i["html_url"],
+                "labels": [l["name"] for l in i.get("labels", [])],
+            }
+            for i in candidates[:slots]
+        ]
 
         plan["repos"].append(
             {
                 "repo": repo,
-                "activeSlotsUsed": len(active),
-                "activeIssueNumbers": sorted(active_issue_numbers),
+                "slug": slug,
+                "activeJobs": len(live),
+                "activeIssueNumbers": sorted(live_issue_numbers),
                 "openAssignedCount": len(issues),
                 "candidateCount": len(candidates),
                 "toSpawn": to_spawn,

@@ -88,31 +88,6 @@ data:
       }
     }
 ---
-# HEARTBEAT.md mounted via subPath into the workspace. Always overwritten
-# from this ConfigMap on every pod start (the workspace file is shadowed
-# by the kubelet-managed subPath mount), so manual edits do not persist
-# across restarts — change the schedule via git / ArgoCD.
-#
-# The agent invokes /usr/local/bin/heartbeat-issue-tick (baked into the
-# image) on every tick, then spawns subagents only for entries in the
-# `toSpawn` array. The script enforces the max-2-per-repo + 1h-TTL
-# concurrency gate by holding lock files in /tmp/openclaw-issue-locks/.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: openclaw-heartbeat-template
-  namespace: claw-code-local
-data:
-  HEARTBEAT.md: |
-    # Heartbeat task list — currently disabled.
-    #
-    # The previous content drove the agent to spawn issue-fix subagents
-    # on every tick via /usr/local/bin/heartbeat-issue-tick. It has
-    # been parked while the issue-watcher is being re-architected as a
-    # K8s CronJob (out-of-process, deterministic spawn, no per-tick LLM
-    # cost). Until that lands, leave this empty so each heartbeat is a
-    # no-op (the bot just answers HEARTBEAT_OK and stops).
----
 # Placeholder — populated at pod start by the render-config init container.
 apiVersion: v1
 kind: ConfigMap

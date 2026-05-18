@@ -130,6 +130,43 @@ jobs:
           docker push "${IMAGE_NAME}:latest"
           docker push "${IMAGE_NAME}:buildcache-final" || true
 
+      - name: Install yq
+        run: |
+          ARCH=$(dpkg --print-architecture)
+          mkdir -p "$HOME/.local/bin"
+          curl -sLo "$HOME/.local/bin/yq" \
+            "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+          chmod +x "$HOME/.local/bin/yq"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Pin Image Tag In Kustomization
+        # Bump k8s/kustomization.yaml so ArgoCD picks up the new tag.
+        # Without this step, OPENCLAW_VERSION bumps in /VERSIONS would
+        # rebuild + push the image but never reach the cluster.
+        run: |
+          yq -i \
+            "(.images[] | select(.name == \"claw-code-local\") | .newTag) = \"${IMAGE_TAG}\"" \
+            k8s/kustomization.yaml
+
+      - name: Commit Pinned Tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/kustomization.yaml
+          if git diff --cached --quiet; then
+            echo "no kustomization tag change"
+            exit 0
+          fi
+          git commit -m "chore: pin claw-code-local image to ${IMAGE_TAG}"
+          # Race-tolerant: another concurrent run (e.g., the sealed
+          # secrets job) may have pushed in the meantime.
+          if ! git pull --rebase origin main; then
+            git rebase --abort
+            echo "race: rebase failed, exiting 0 (next push will reapply)"
+            exit 0
+          fi
+          git push
+
   publish-secrets:
     name: Publish Sealed Secrets
     runs-on: arc-runner-scale-claw-code-local

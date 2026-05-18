@@ -1,0 +1,136 @@
+---
+# Issue-watcher CronJob — polls GitHub for issues assigned to the bot
+# every 5 minutes and `kubectl create job`s an `openclaw agent --local`
+# Job per (repo, issue), bounded to 2 concurrent Jobs per repo.
+#
+# Architecture, top-down:
+#   - This CronJob runs `cron-issue-spawn` (baked into the image).
+#   - cron-issue-spawn calls `heartbeat-issue-tick` (also baked in),
+#     which queries the GitHub API + the K8s Jobs API (via the SA
+#     mounted below) and emits a JSON spawn-plan.
+#   - For each toSpawn entry, the spawner POSTs a Job manifest. Each
+#     spawned Job runs `openclaw agent --local --message "Fix issue
+#     <url>"` with envFrom: openclaw-secrets and an emptyDir workspace.
+#   - The agent in each Job clones the target repo, branches, codes,
+#     commits, pushes, opens a PR back to the source, and exits.
+#   - Concurrency is enforced by labeling Jobs `app=issue-fixer,
+#     issueRepo=<slug>` and counting them on each tick. K8s itself is
+#     the ledger — no /tmp lock files or shared volumes needed.
+#
+# Toggle from chat: `kubectl -n claw-code-local patch cronjob
+# issue-watcher -p '{"spec":{"suspend":true}}'` (RBAC granted in the
+# Role below; the bot can run this via its existing kubectl access).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: issue-watcher
+  namespace: claw-code-local
+---
+# Scoped only to claw-code-local. No cluster-wide access; only the
+# Jobs API in this single namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: issue-watcher
+  namespace: claw-code-local
+rules:
+  # Read: heartbeat-issue-tick counts in-flight fixer Jobs per repo.
+  # Create: cron-issue-spawn creates new fixer Jobs.
+  # Delete: not granted — Jobs self-clean via ttlSecondsAfterFinished;
+  # operators can clean up manually if needed.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create"]
+  # Spawned Jobs run pods. The fixer Pod also needs to read its own
+  # spec for the agent's debugging output; if you want to suppress that
+  # later, you can drop `pods` from this Role with no functional impact.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: issue-watcher
+  namespace: claw-code-local
+subjects:
+  - kind: ServiceAccount
+    name: issue-watcher
+    namespace: claw-code-local
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: issue-watcher
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: issue-watcher
+  namespace: claw-code-local
+  labels:
+    app: issue-watcher
+spec:
+  schedule: "*/5 * * * *"
+  # Forbid: a tick takes seconds; never overlap. Skip if the previous
+  # one is still running (shouldn't happen, but it caps the blast radius
+  # if it ever does).
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 120
+  # `suspend: true` here would also disable the watcher; we leave it
+  # off so the watcher runs by default once this manifest lands. Toggle
+  # at runtime with `kubectl patch cronjob issue-watcher`.
+  suspend: false
+  jobTemplate:
+    metadata:
+      labels:
+        app: issue-watcher
+    spec:
+      backoffLimit: 0
+      ttlSecondsAfterFinished: 300
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            app: issue-watcher
+        spec:
+          serviceAccountName: issue-watcher
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: registry-pull-secret
+          containers:
+            - name: watcher
+              image: claw-code-local  # transformed by kustomize images: pin
+              imagePullPolicy: IfNotPresent
+              command: ["/usr/local/bin/cron-issue-spawn"]
+              env:
+                # cron-issue-spawn reads $POD_NAME to look up its own
+                # container image at runtime — the spawned fixer Job
+                # uses the same tag, so the agent runtime being tested
+                # by the watcher IS the one that fixes issues. The
+                # downward API can't return a `containers[].image`
+                # JSONPath result directly, hence the indirection.
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                # 1h budget per fixer Job. cron-issue-spawn translates
+                # this to both the agent's --timeout flag and the
+                # Job's activeDeadlineSeconds.
+                - name: JOB_AGENT_TIMEOUT_SECONDS
+                  value: "3600"
+              envFrom:
+                # GITHUB_TOKEN is the only secret the watcher itself
+                # needs (for the GitHub API calls). It does NOT need
+                # the model API keys — those are injected separately
+                # into each spawned fixer Job.
+                - secretRef:
+                    name: openclaw-secrets
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi

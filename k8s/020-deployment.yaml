@@ -194,13 +194,6 @@ spec:
             - name: tools-md
               mountPath: /home/node/.openclaw/workspace/TOOLS.md
               subPath: TOOLS.md
-            # HEARTBEAT.md is subPath-mounted from a ConfigMap, so the
-            # kubelet overlays whatever's on the PVC at this path with
-            # the rendered ConfigMap value. The model can attempt edits
-            # but they don't persist; the source of truth is git.
-            - name: heartbeat-md
-              mountPath: /home/node/.openclaw/workspace/HEARTBEAT.md
-              subPath: HEARTBEAT.md
           resources:
             requests:
               cpu: 600m
@@ -219,9 +212,6 @@ spec:
         - name: tools-md
           configMap:
             name: openclaw-tools-md
-        - name: heartbeat-md
-          configMap:
-            name: openclaw-heartbeat-template
         - name: config-template
           configMap:
             name: openclaw-config-template

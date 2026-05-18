@@ -10,6 +10,7 @@ resources:
   - 020-deployment.yaml
   - 030-service.yaml
   - 040-networkpolicy.yaml
+  - 050-issue-watcher.yaml
   - openclaw-secrets-sealed.yaml
 
 # Pin the openclaw image here so the deployment manifest stays static and
