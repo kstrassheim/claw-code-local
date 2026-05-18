@@ -88,6 +88,92 @@ data:
       }
     }
 ---
+# HEARTBEAT.md mounted via subPath into the workspace. Always overwritten
+# from this ConfigMap on every pod start (the workspace file is shadowed
+# by the kubelet-managed subPath mount), so manual edits do not persist
+# across restarts — change the schedule via git / ArgoCD.
+#
+# The agent invokes /usr/local/bin/heartbeat-issue-tick (baked into the
+# image) on every tick, then spawns subagents only for entries in the
+# `toSpawn` array. The script enforces the max-2-per-repo + 1h-TTL
+# concurrency gate by holding lock files in /tmp/openclaw-issue-locks/.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openclaw-heartbeat-template
+  namespace: claw-code-local
+data:
+  HEARTBEAT.md: |
+    # Heartbeat task — auto-handle issues assigned to me
+
+    On every tick, do exactly the following. Skip silently if nothing is
+    to be spawned. Do not improvise extra work outside this list.
+
+    ## 1. Get the spawn plan
+
+    Run:
+
+    ```
+    /usr/local/bin/heartbeat-issue-tick
+    ```
+
+    It emits a single JSON document on stdout. Parse it. The shape is:
+
+    ```json
+    {
+      "generatedAt": <unix-ts>,
+      "ttlSeconds": 3600,
+      "maxPerRepo": 2,
+      "lockDir": "/tmp/openclaw-issue-locks",
+      "repos": [
+        {
+          "repo": "owner/name",
+          "activeSlotsUsed": 0|1|2,
+          "activeIssueNumbers": [...],
+          "openAssignedCount": <n>,
+          "candidateCount": <n>,
+          "toSpawn": [
+            {
+              "issueNumber": <n>,
+              "title": "...",
+              "url": "https://github.com/...",
+              "labels": [...],
+              "lockPath": "/tmp/openclaw-issue-locks/<slug>/<n>.lock"
+            }
+          ],
+          "deferredDueToLimit": <n>
+        },
+        ...
+      ]
+    }
+    ```
+
+    ## 2. Spawn subagents — only for entries under `toSpawn`
+
+    For each `(repo, issue)` pair in any `repos[].toSpawn`:
+
+    - Start a TaskFlow subagent named `issue-fix-<repo>-<issueNumber>`.
+    - Goal: "Fix GitHub issue <issue.url> in repo <repo>. Open a PR
+      back to the source repo when the change is ready. Do not spawn
+      further subagents."
+    - Timeout: **1 hour wall-clock** (3600 seconds). On timeout, the
+      subagent should stop cleanly even if the work is unfinished.
+
+    ## 3. Do not spawn anything else
+
+    Entries in `repos[]` with `toSpawn: []` are intentional —
+    `activeSlotsUsed` is already at `maxPerRepo` (2) or the open-issue
+    set is empty. Skip them. Do not try to override the cap by
+    spawning manually; the lock files in `lockDir` are authoritative.
+
+    ## 4. Brief summary on completion
+
+    After spawning, post ONE short line per repo where you spawned
+    anything (e.g. `kstrassheim/claw-code: spawned issue-fix-42`).
+    Do not post anything for repos where nothing was spawned. If the
+    whole plan was empty, finish with `NO_REPLY` so Telegram stays
+    quiet.
+---
 # Placeholder — populated at pod start by the render-config init container.
 apiVersion: v1
 kind: ConfigMap
