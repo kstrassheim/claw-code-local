@@ -144,7 +144,18 @@ for r in plan['repos']:
                         }],
                         'volumes': [
                             {'name': 'workspace', 'emptyDir': {}},
-                            {'name': 'config', 'configMap': {'name': 'openclaw-config'}},
+                            # Source from the declarative template, NOT
+                            # the runtime-rendered openclaw-config CM.
+                            # ArgoCD's selfHeal continuously reverts the
+                            # rendered CM back to its declared `{}`
+                            # placeholder, so a fixer Pod mounting it
+                            # sees an empty config and the embedded
+                            # agent defaults to a harness that isn't
+                            # registered (\"codex\"). The template ships
+                            # both providers and a per-fixer agent run
+                            # picks one based on the env-injected API
+                            # keys.
+                            {'name': 'config', 'configMap': {'name': 'openclaw-config-template'}},
                         ],
                     }
                 }
