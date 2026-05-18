@@ -210,7 +210,6 @@ Secret `openclaw-secrets`.
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS CLI / MCP. |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud CLI / MCP. |
 | `ENTRA_TENANT_ID`, `ENTRA_USERNAME`, `ENTRA_PASSWORD`, `ENTRA_TOTP_SEED` | Azure / Entra ID sign-in for the TOTP helper. |
-| `ARGOCD_AUTH_TOKEN` | Argo CD MCP authentication. |
 
 **Variables** (non-secret, repo Variables)
 
@@ -220,7 +219,6 @@ Secret `openclaw-secrets`.
 | `GITLAB_LOCAL_URL` | Self-hosted GitLab URL the agent should target. |
 | `PROXY_URL` | Outbound HTTP proxy if any. |
 | `ALIBABA_CLOUD_REGION_ID` | Default Alibaba Cloud region. |
-| `ARGOCD_SERVER` | Argo CD API endpoint for the MCP and the deploy workflow. |
 
 Missing optional secrets are tolerated: openclaw config strips Mistral
 or MiniMax when its key is empty, and individual MCP servers fail
