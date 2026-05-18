@@ -32,6 +32,7 @@ if [ -z "$OPENCLAW_POD" ]; then
       | awk '{print $1}')
 fi
 test -n "$OPENCLAW_POD" || { echo "ERROR: no Running openclaw pod found in $NAMESPACE" >&2; exit 1; }
+export OPENCLAW_POD
 echo "openclaw pod: $OPENCLAW_POD"
 
 PLAN=$(/usr/local/bin/heartbeat-issue-tick)
