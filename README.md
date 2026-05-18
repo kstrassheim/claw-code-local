@@ -38,8 +38,11 @@ the agent's "what can I do" answer matches the deployment exactly.
 
 ```
 builder/        Dockerfile and per-MCP source for the openclaw image
+  heartbeat-issue-tick.py   Issue-watcher planner (see below)
+  cron-issue-spawn.sh       Issue-watcher Job-spawner (see below)
 k8s/            Kustomize bundle deployed by Argo CD
   tools/        TOOLS-*.md fragments concatenated into TOOLS.md
+  050-issue-watcher.yaml    Issue-watcher CronJob, RBAC, chat skill
 argocd/         Argo CD AppProject + Applications + PreSync hook
 .github/
   workflows/    image build, sealed-secret rotation, validation, CodeQL
@@ -72,18 +75,108 @@ VERSIONS        Pinned upstream versions (openclaw + every CLI baked in)
   against the cluster's Sealed Secrets controller cert, and commits
   the encrypted YAML back to `main`.
 - `build-and-push-image` resolves the upstream openclaw tag from
-  `VERSIONS`, layers in the extra CLIs / MCP servers, and pushes the
-  result to a private registry.
+  `VERSIONS`, layers in the extra CLIs / MCP servers, pushes the
+  result to a private registry, and commits a pinning update to
+  `k8s/kustomization.yaml`'s `newTag:` so Argo CD picks up the new
+  tag on the next reconcile.
 - Argo CD watches `k8s/` (Kustomize) and auto-syncs. The PreSync hook
   in [`argocd/hooks/`](argocd/hooks/) regenerates the `openclaw-tools-md`
   ConfigMap from `k8s/tools/` and rolls the pod when the assembled
   TOOLS.md changes.
 
 The destination namespace is `claw-code-local`. The Kustomize
-`images:` override pins the openclaw image tag, so bumping
-`OPENCLAW_VERSION` in [`VERSIONS`](VERSIONS) and the matching
-`newTag:` in [`k8s/kustomization.yaml`](k8s/kustomization.yaml) is the
-canonical way to roll a new version.
+`images:` override pins the openclaw image tag; the build workflow's
+"Pin Image Tag" step keeps `newTag:` in
+[`k8s/kustomization.yaml`](k8s/kustomization.yaml) in sync with
+`OPENCLAW_VERSION`, so bumping `VERSIONS` is enough to roll a new
+version end-to-end.
+
+## Autonomous issue watcher
+
+The cluster runs a `*/5 * * * *` CronJob in `claw-code-local` that
+auto-fixes any GitHub issue assigned to the bot account — no LLM
+calls on idle ticks, no per-tick chat traffic. The architecture is
+deliberately split so concurrency lives in the K8s control plane,
+not the agent's prompt:
+
+```
+       CronJob issue-watcher
+       (every 5 min)
+              |
+       cron-issue-spawn (bash)
+              |
+       heartbeat-issue-tick (python)
+       |                       |
+GET /issues?filter=assigned    GET batch/v1/jobs?label=app=issue-fixer
+       \                       /
+        \                     /
+         decide toSpawn list  ←  cap at 2 active Jobs per repo
+                  |
+       for each toSpawn entry:
+       kubectl create job fix-<repo>-<#>-<ts>
+                  |
+       Job runs `openclaw agent --local --timeout 3600 …`
+                  |
+       clone → branch → code → commit → push → open PR → exit
+```
+
+- **Concurrency ledger**: K8s Jobs themselves. Each fixer Job is
+  labeled `app=issue-fixer, issueRepo=<slug>, issueNumber=<n>`; the
+  planner counts active ones per repo and only spawns within the
+  per-repo cap (default 2). Jobs older than 1h with no completion
+  are treated as dead — slots free up automatically.
+- **TTL**: each spawned Job sets `activeDeadlineSeconds: 3700` (1h
+  agent budget + 100s grace) and `ttlSecondsAfterFinished: 600`, so
+  finished Jobs disappear ten minutes after they exit.
+- **Coding agent**: each fixer pod runs `openclaw agent --local`
+  with the same image, secrets, and rendered openclaw config the
+  main bot uses. The default model (MiniMax M2.7) and tool registry
+  (gh-issues skill, github-mcp-server, gh, git, etc.) are identical.
+- **Workspace isolation**: each fixer Pod gets a fresh `emptyDir`
+  for its `~/.openclaw` — no contention with the main bot's PVC and
+  no cross-pollution between concurrent fixers.
+
+The watcher is wired up in
+[`k8s/050-issue-watcher.yaml`](k8s/050-issue-watcher.yaml): the
+CronJob, its service account, the namespace-scoped Role granting
+`jobs/create,list` for spawning fixers, and a separate
+`issue-watcher-control` Role granting the main bot the
+`cronjobs/patch` and `jobs/delete` it needs for the chat skill below.
+
+### Controlling it from chat
+
+The same manifest ships an `issue-watcher` skill (mounted at
+`~/.openclaw/workspace/skills/issue-watcher/SKILL.md` via subPath
+ConfigMap). The bot picks the skill up at session start and
+recognises plain-text triggers:
+
+| You type | What runs |
+|---|---|
+| `watcher status` | `kubectl get cronjob issue-watcher -o jsonpath=…` |
+| `watcher start` | `kubectl patch cronjob issue-watcher … suspend:false` |
+| `watcher stop` | `kubectl patch … suspend:true` AND `kubectl delete jobs -l app=issue-fixer` |
+| `watcher list` | `kubectl get jobs -l app=issue-fixer` |
+| `watcher kill` | only deletes in-flight fixers; CronJob stays scheduled |
+
+`watcher stop` deliberately kills in-flight fixer pods too — partial
+work is discarded, because the user's intent on "stop" is "stop
+coding work right now", not "finish what's in progress".
+
+`spec.suspend` is *deliberately absent* from the CronJob manifest
+(K8s defaults it to `false`). With Argo CD's ServerSideApply mode
+that leaves the field unmanaged, so `kubectl patch … suspend:true`
+from the chat skill survives reconciliation instead of being
+self-healed back to running.
+
+### Disabling permanently
+
+Suspend the CronJob and don't unsuspend it; or set `replicas` of the
+CronJob's parent Application to 0 in
+[`argocd/apps/claw-code-local.yaml`](argocd/apps/) (heavy-handed —
+also deactivates the bot). Removing the manifest entirely is the
+cleanest path if you don't want the watcher at all: delete
+`050-issue-watcher.yaml` from `k8s/kustomization.yaml` and Argo CD
+will prune the CronJob + its RBAC.
 
 ## Prerequisites
 
@@ -152,11 +245,15 @@ For a fresh cluster, applied once out-of-band:
 Everything pinned lives in [`VERSIONS`](VERSIONS). Common cases:
 
 - New openclaw release: bump `OPENCLAW_UPSTREAM` and
-  `OPENCLAW_VERSION`, and update `newTag:` in
-  [`k8s/kustomization.yaml`](k8s/kustomization.yaml) to match.
+  `OPENCLAW_VERSION`. The build workflow's "Pin Image Tag" step
+  updates `k8s/kustomization.yaml` automatically — no manual edit.
 - New CLI version (gh, glab, terraform, aws, gcloud, aliyun,
   code-server): bump the corresponding entry; the workflow rebuilds
   the image and pushes a fresh tag.
+
+Bumping `OPENCLAW_VERSION` is also how you ship updates to the
+issue-watcher wrapper scripts under `builder/` — they're baked into
+the image, so a new tag is needed for them to land.
 
 `workflow_dispatch` accepts an optional `git_ref` input to build any
 upstream openclaw tag/branch/commit without editing `VERSIONS`.
