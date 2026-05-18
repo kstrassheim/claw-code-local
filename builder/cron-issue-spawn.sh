@@ -91,6 +91,19 @@ for r in plan['repos']:
                     'spec': {
                         'restartPolicy': 'Never',
                         'serviceAccountName': 'issue-watcher',
+                        # Same node placement as the main openclaw pod:
+                        # datapi has the image cached + the data taint
+                        # we tolerate. Running fixer pods on mainpi
+                        # would force a fresh pull every spawn.
+                        'nodeSelector': {'kubernetes.io/hostname': 'datapi'},
+                        'tolerations': [{
+                            'key': 'data', 'operator': 'Equal',
+                            'value': 'true', 'effect': 'NoSchedule',
+                        }],
+                        # Required: the cluster pulls claw-code-local from
+                        # mainpi.local:30500 which needs basic auth. The
+                        # main Deployment carries the same imagePullSecret.
+                        'imagePullSecrets': [{'name': 'registry-pull-secret'}],
                         'containers': [{
                             'name': 'agent',
                             'image': IMAGE,
