@@ -60,28 +60,32 @@ def gh_get(url: str, params: dict | None = None) -> list | dict:
         return json.loads(r.read())
 
 
-def list_collaborator_repos() -> list[str]:
-    repos: list[str] = []
+def list_all_assigned_open_issues() -> dict[str, list[dict]]:
+    """Return {repo_full_name: [issue, ...]} for all open issues assigned
+    to the authenticated user across every repo they can see.
+
+    Uses the cross-repo `GET /issues?filter=assigned` endpoint rather than
+    per-repo `/repos/{owner}/{repo}/issues?assignee=...` — that param
+    returns 422 unless given a literal login (no `@me` shortcut), and
+    one call here replaces N round-trips.
+    """
+    by_repo: dict[str, list[dict]] = {}
     page = 1
     while True:
         batch = gh_get(
-            "https://api.github.com/user/repos",
-            {"affiliation": "collaborator", "per_page": 100, "page": page},
+            "https://api.github.com/issues",
+            {"filter": "assigned", "state": "open", "per_page": 100, "page": page},
         )
-        repos.extend(r["full_name"] for r in batch)
+        for i in batch:
+            if "pull_request" in i:
+                continue  # /issues returns PRs too; strip them.
+            # repository_url like https://api.github.com/repos/owner/name
+            repo = i["repository_url"].rsplit("/repos/", 1)[1]
+            by_repo.setdefault(repo, []).append(i)
         if len(batch) < 100:
             break
         page += 1
-    return sorted(set(repos))
-
-
-def list_assigned_open_issues(repo: str) -> list[dict]:
-    raw = gh_get(
-        f"https://api.github.com/repos/{repo}/issues",
-        {"assignee": "@me", "state": "open", "per_page": 50},
-    )
-    # /issues returns PRs too; strip them — PR review is a separate skill.
-    return [i for i in raw if "pull_request" not in i]
+    return by_repo
 
 
 def repo_slug(repo: str) -> str:
@@ -141,9 +145,9 @@ def main() -> int:
 
     started = time.time()
     try:
-        repos = list_collaborator_repos()
+        issues_by_repo = list_all_assigned_open_issues()
     except urllib.error.HTTPError as e:
-        json.dump({"error": f"list collaborator repos: {e.code} {e.reason}"}, sys.stdout)
+        json.dump({"error": f"list assigned issues: {e.code} {e.reason}"}, sys.stdout)
         return 2
 
     plan: dict = {
@@ -154,7 +158,11 @@ def main() -> int:
         "repos": [],
     }
 
-    for repo in repos:
+    # Only consider repos where the bot actually has assigned issues —
+    # if /issues?filter=assigned returned nothing for a repo, there is
+    # nothing for the watcher to do there even if it has collaborator
+    # access. Skips iterating over collab repos with empty queues.
+    for repo, issues in sorted(issues_by_repo.items()):
         slug = repo_slug(repo)
         try:
             active_jobs = k8s_get_jobs(
@@ -173,12 +181,6 @@ def main() -> int:
             if j["metadata"].get("labels", {}).get("issueNumber")
         }
         slots = max(0, MAX_PER_REPO - len(live))
-
-        try:
-            issues = list_assigned_open_issues(repo)
-        except urllib.error.HTTPError as e:
-            plan["repos"].append({"repo": repo, "error": f"list issues: {e.code} {e.reason}"})
-            continue
 
         candidates = [i for i in issues if i["number"] not in live_issue_numbers]
         to_spawn = [
