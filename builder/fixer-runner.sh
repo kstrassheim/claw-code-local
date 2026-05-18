@@ -84,9 +84,16 @@ trap 'rm -rf "$LOCK_DIR"' EXIT
 
   # Hand off to the embedded agent. cwd is already $PROJECT_DIR.
   echo "[agent] starting openclaw agent --local"
+  # Fresh session-id per attempt so context doesn't accumulate across
+  # retries (a wedged previous run can leave 60+ messages in the
+  # session file, which then trips the context-overflow precheck on
+  # every subsequent attempt). Timestamp suffix keeps each fixer
+  # invocation isolated; old session files age out via openclaw's
+  # own retention.
+  SESSION_ID="issue-${REPO//\//-}-${ISSUE_NUM}-$(date +%s)"
   openclaw agent --local \
     --timeout 3500 \
-    --session-id "issue-${REPO//\//-}-${ISSUE_NUM}" \
+    --session-id "$SESSION_ID" \
     --message "You are in a fresh checkout of $REPO at $(pwd) on branch $BRANCH (already branched off $DEFAULT_BRANCH). Fix issue $ISSUE_URL — \"$ISSUE_TITLE\". Steps: (1) implement the change, (2) commit with a descriptive message, (3) push the branch (\`git push -u origin $BRANCH\`), (4) open a PR back to $DEFAULT_BRANCH with \"Closes #$ISSUE_NUM\" in the body, then stop. Do not delegate to subagents. Do not ask the user for confirmation. cameron-claw is the git author identity (already configured via \$GITHUB_TOKEN)."
   AGENT_EXIT=$?
 
