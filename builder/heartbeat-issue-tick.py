@@ -104,20 +104,23 @@ def kubectl_exec_capture(namespace: str, pod: str, *cmd: str, timeout: int = 15)
 
 
 def list_locked_repos(namespace: str, pod: str) -> set[str]:
-    """Return set of repo full_names whose .fixer.lock dir exists and is
-    newer than TTL_SECONDS. Each lock corresponds to one in-flight fixer
-    (the per-repo cap is 1)."""
-    # `find` is faster than a recursive ls; the projects tree is small
-    # (≤ one dir per repo cameron-claw is a collaborator on).
+    """Return set of repo full_names whose lock dir under
+    ~/.openclaw/.fixer-locks/<owner>__<name>/ exists and is newer than
+    TTL_SECONDS. Each lock corresponds to one in-flight fixer (per-repo
+    cap is 1, because the on-disk checkout can't be shared)."""
+    # `find` is faster than a recursive ls; the lock-set is small
+    # (≤ one dir per repo cameron-claw is a collaborator on). Lock
+    # dirs are siblings of the project tree (NOT inside it — a
+    # `.fixer.lock` inside the project dir broke `git clone`).
     script = (
-        "set -eu; root=$HOME/.openclaw/projects; "
+        "set -eu; root=$HOME/.openclaw/.fixer-locks; "
         "[ -d $root ] || exit 0; "
         f"now=$(date +%s); ttl={TTL_SECONDS}; "
-        "for lock in $(find $root -maxdepth 3 -type d -name .fixer.lock 2>/dev/null); do "
+        "for lock in $(find $root -maxdepth 1 -mindepth 1 -type d 2>/dev/null); do "
         "  age=$(( now - $(stat -c %Y $lock) )); "
         "  if [ $age -lt $ttl ]; then "
-        # Print "owner/name" path component
-        "    echo \"${lock#$root/}\" | sed 's|/.fixer.lock$||'; "
+        # Lock dir name is owner__name → emit owner/name
+        "    basename $lock | sed 's|__|/|'; "
         "  fi; "
         "done"
     )

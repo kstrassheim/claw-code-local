@@ -70,7 +70,7 @@ data:
     kubectl -n claw-code-local patch cronjob issue-watcher \
       -p '{"spec":{"suspend":true}}'
     pkill -f 'openclaw agent --local' || true
-    rm -rf $HOME/.openclaw/projects/*/*/.fixer.lock 2>/dev/null
+    rm -rf $HOME/.openclaw/.fixer-locks/* 2>/dev/null
     ```
 
     Run all three. Then run the status command. Report:
@@ -84,8 +84,7 @@ data:
     ### list
 
     ```
-    ls -1d $HOME/.openclaw/projects/*/*/.fixer.lock 2>/dev/null \
-      | sed "s|$HOME/.openclaw/projects/||; s|/.fixer.lock$||"
+    ls -1 $HOME/.openclaw/.fixer-locks/ 2>/dev/null | sed 's|__|/|'
     ```
 
     Each line is an `<owner>/<name>` repo with an in-flight fixer.
@@ -118,7 +117,7 @@ data:
 
     ```
     pkill -f 'openclaw agent --local' || true
-    rm -rf $HOME/.openclaw/projects/*/*/.fixer.lock 2>/dev/null
+    rm -rf $HOME/.openclaw/.fixer-locks/* 2>/dev/null
     ```
 
     ## Reporting style

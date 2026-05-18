@@ -29,27 +29,29 @@ ISSUE_TITLE="$4"
 STATE_ROOT="${HOME:-/home/node}/.openclaw"
 PROJECTS_ROOT="$STATE_ROOT/projects"
 PROJECT_DIR="$PROJECTS_ROOT/$REPO"
-LOCK_DIR="$PROJECT_DIR/.fixer.lock"
+# Lock dirs are siblings of the project tree, NOT inside it — having
+# the lock inside the project dir broke `git clone` because the
+# destination directory was non-empty.
+LOCK_ROOT="$STATE_ROOT/.fixer-locks"
+LOCK_DIR="$LOCK_ROOT/${REPO//\//__}"
 LOG_DIR="$STATE_ROOT/fixer-logs"
 LOG_FILE="$LOG_DIR/${REPO//\//_}-${ISSUE_NUM}.log"
 
-mkdir -p "$LOG_DIR" "$(dirname "$PROJECT_DIR")"
+mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$(dirname "$PROJECT_DIR")"
 
-# Acquire the per-repo lock. `mkdir` returns non-zero if it already
-# exists — that's our "another fixer is in flight, skip" signal.
-if ! mkdir "$PROJECT_DIR" 2>/dev/null && ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  # Either the repo dir creation raced or the lock is already held.
-  # The second mkdir distinguishes: if the project dir existed but
-  # no lock, we still want to proceed — so retry the lock.
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "[$(date -Iseconds)] lock held for $REPO; aborting fixer for #$ISSUE_NUM" >> "$LOG_FILE"
-    exit 0
-  fi
+# Acquire the per-repo lock. `mkdir` is atomic on local filesystems —
+# the first runner that asks for it wins; everyone else exits fast.
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "[$(date -Iseconds)] lock held for $REPO; aborting fixer for #$ISSUE_NUM" >> "$LOG_FILE"
+  exit 0
 fi
-# Even if `mkdir PROJECT_DIR` above succeeded (fresh repo), we still
-# need to take the lock for it.
-mkdir -p "$LOCK_DIR" 2>/dev/null || true
 echo "$BASHPID $(date -Iseconds) issue=$ISSUE_NUM" > "$LOCK_DIR/owner"
+
+# Defensive cleanup: a previous build (.22/.23) put .fixer.lock
+# INSIDE the project dir, which leaves the dir non-empty and breaks
+# the clone path below. Strip any leftover .fixer.lock from the
+# legacy location so the clone-or-update logic can proceed cleanly.
+rm -rf "$PROJECT_DIR/.fixer.lock" 2>/dev/null
 
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
