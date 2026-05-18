@@ -7,7 +7,7 @@
 # validate workflows pull ghcr.io/openclaw/openclaw:<this minus v-prefix>
 # and re-tag it locally as openclaw-base:<this with v-prefix>.
 OPENCLAW_UPSTREAM=v2026.5.12
-OPENCLAW_VERSION=v2026.5.12.21
+OPENCLAW_VERSION=v2026.5.12.22
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
