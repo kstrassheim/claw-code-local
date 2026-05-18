@@ -198,8 +198,14 @@ spec:
             # commands. ConfigMap source is in 050-issue-watcher.yaml,
             # so git owns the SKILL.md text and changes flow through
             # ArgoCD. Pod restart required to pick up subPath updates.
+            # Mount path is workspace/skills/ (NOT plugin-skills/) —
+            # openclaw's loadWorkspaceSkillEntries scans <workspaceDir>/
+            # skills/, and plugin-skills/ is reserved for installed
+            # plugin extensions (the browser-automation symlink there
+            # is a leftover from the browser extension's auto-install,
+            # not a workspace-skill registration path).
             - name: skill-issue-watcher
-              mountPath: /home/node/.openclaw/plugin-skills/issue-watcher/SKILL.md
+              mountPath: /home/node/.openclaw/workspace/skills/issue-watcher/SKILL.md
               subPath: SKILL.md
           resources:
             requests:

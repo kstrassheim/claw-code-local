@@ -59,16 +59,23 @@ data:
 
     ### stop
 
+    Two operations: suspend the CronJob AND delete every in-flight
+    fixer Job immediately (the user expects `stop` to actually stop
+    coding work, not just block new ticks).
+
     ```
     kubectl -n claw-code-local patch cronjob issue-watcher \
       -p '{"spec":{"suspend":true}}'
+    kubectl -n claw-code-local delete jobs -l app=issue-fixer
     ```
 
-    Then run the status command and report the new state. In-flight
-    fixer Jobs continue until they complete or hit their 1h deadline
-    — `stop` only prevents *new* ticks; it does not cancel existing
-    work. If the user wants to kill in-flight fixers too, use
-    `watcher kill` (below).
+    Run both. Then run the status command. Report:
+      - the new suspended state, and
+      - how many fixer Jobs were terminated (the second command
+        prints one `job.batch "<name>" deleted` line per Job).
+
+    Partial work in those Jobs is discarded — there is no clean
+    shutdown handshake. That is the user's stated intent.
 
     ### list
 
@@ -81,14 +88,14 @@ data:
     `issueNumber` identify what it's working on. Empty result means
     nothing is being fixed right now.
 
-    ### kill (rare — use only when explicitly asked)
+    ### kill (alias for the second half of `stop`)
+
+    When the user wants to terminate in-flight fixers but keep the
+    CronJob running (so the next tick can pick the issues up again):
 
     ```
     kubectl -n claw-code-local delete jobs -l app=issue-fixer
     ```
-
-    Cancels every in-flight fixer Job. Be careful — partial work is
-    discarded. Ask the user to confirm before running this.
 
     ## Reporting style
 
@@ -211,10 +218,12 @@ spec:
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   startingDeadlineSeconds: 120
-  # `suspend: true` here would also disable the watcher; we leave it
-  # off so the watcher runs by default once this manifest lands. Toggle
-  # at runtime with `kubectl patch cronjob issue-watcher`.
-  suspend: false
+  # `spec.suspend` deliberately omitted: K8s defaults it to false, so
+  # the watcher runs on initial deploy. With ArgoCD's ServerSideApply
+  # syncPolicy, an absent field is unmanaged — runtime `kubectl patch`
+  # toggles (from the issue-watcher chat skill) stick across syncs.
+  # If we set `suspend: false` here, ArgoCD's selfHeal would revert
+  # any chat-driven `watcher stop` back to running.
   jobTemplate:
     metadata:
       labels:
