@@ -89,7 +89,10 @@ spec:
     spec:
       backoffLimit: 0
       ttlSecondsAfterFinished: 300
-      activeDeadlineSeconds: 60
+      # 60s was too tight — image pull on a cold node + GitHub pagination
+      # + K8s API calls easily exceed it. 300s leaves headroom for slow
+      # paths but still kills a wedged tick before the next cron fire.
+      activeDeadlineSeconds: 300
       template:
         metadata:
           labels:
