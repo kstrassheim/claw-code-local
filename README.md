@@ -207,18 +207,7 @@ Secret `openclaw-secrets`.
 | `TELEGRAM_BOT_TOKEN` | Telegram channel. Pair the bot with `openclaw pairing approve telegram <code>` after first start. |
 | `BOT_GITHUB_TOKEN` | Sealed as `GITHUB_TOKEN`; PAT the agent uses for git/gh operations. |
 | `GITLAB_TOKEN`, `GITLAB_LOCAL_TOKEN` | GitLab.com and self-hosted GitLab PATs. |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | AWS CLI / MCP. |
-| `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud CLI / MCP. |
 | `ENTRA_TENANT_ID`, `ENTRA_USERNAME`, `ENTRA_PASSWORD`, `ENTRA_TOTP_SEED` | Azure / Entra ID sign-in for the TOTP helper. |
-
-**Variables** (non-secret, repo Variables)
-
-| Name | Used for |
-|---|---|
-| `OPENCLAW_REGISTRY_URL` | Image registry host. |
-| `GITLAB_LOCAL_URL` | Self-hosted GitLab URL the agent should target. |
-| `PROXY_URL` | Outbound HTTP proxy if any. |
-| `ALIBABA_CLOUD_REGION_ID` | Default Alibaba Cloud region. |
 
 Missing optional secrets are tolerated: openclaw config strips Mistral
 or MiniMax when its key is empty, and individual MCP servers fail
