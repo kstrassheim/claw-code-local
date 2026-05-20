@@ -853,6 +853,52 @@ $BRANCH_INSTRUCTION
     is a strong signal you are in the rule-5 LAST-RESORT case —
     ASK the issue author instead of silently weakening the gate.
 
+13. **ASK BEFORE writing code that depends on values you cannot
+    derive from the repository.** If the task requires *any*
+    identifier, name, secret, URL, or credential you would have
+    to invent or leave as a placeholder, STOP writing code and
+    @-mention \`@$ISSUE_AUTHOR\` first with the concrete list of
+    unknowns.
+
+    Common examples that trigger this rule:
+      - Cloud resource identifiers: Azure subscription / tenant /
+        resource group / container app / app registration; AWS
+        account ID / region / ECR repo / cluster name; GCP project
+        / location / service account
+      - GitHub Actions secret/variable names you expect to exist
+        (e.g. \`AZURE_CLIENT_ID\`, \`SLACK_WEBHOOK_URL\`,
+        \`STRIPE_API_KEY\`)
+      - Federated identity subjects, OAuth client IDs,
+        DNS records, custom domains, webhook URLs
+      - Third-party tokens / API keys (Sentry DSN, Datadog API
+        key, etc.)
+      - Internal references in the issue body (RFC numbers,
+        Figma links, Confluence pages, ticket IDs) whose
+        content the bot cannot fetch
+
+    The self-check: if your draft code, workflow, or config
+    would contain a literal \`<REPLACE-ME>\`, a non-derived
+    environment-variable reference, or a documentation paragraph
+    explaining what the user must set up before this works,
+    that is a rule-13 ASK situation — NOT a deliverable.
+
+    Specifically: do NOT use the PR description or a status
+    comment as a substitute for asking. \`See the PR description
+    for the list of required secrets\` is a deferred failure, not
+    a question. A future CI run will fail when those secrets are
+    missing and you will have wasted a turn. Ask first.
+
+    The right shape of the ASK comment:
+      @<author> Before I implement <X>, I need:
+        - <unknown 1> (what is it / where do I find it?)
+        - <unknown 2>
+        - ...
+      Or: confirm I should use defaults <D1>, <D2> and you will
+      wire up <Y> after merge.
+
+    Then stop your turn. The wrapper will let you reply when the
+    user answers.
+
 Begin."
 
 echo "[turn 1] initial agent invocation"
