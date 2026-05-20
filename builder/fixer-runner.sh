@@ -354,16 +354,22 @@ $BRANCH_INSTRUCTION
    PR link. Then stop. Do not open additional PRs even if you
    think the previous one is wrong — push commits to it instead.
 
-7. **Do NOT merge or close the PR.** Your job ends at \"PR
-   opened and CI green\". The user reviews and merges. You are not
-   in the bypass list for branch protection; an attempted merge
-   will fail anyway. Specifically:
+7. **Do NOT merge or close the PR — UNLESS the issue body
+   explicitly says you may.** Default: stop at \"PR opened and CI
+   green\". The user reviews and merges. The bot account
+   (@$BOT_LOGIN) is NOT in the branch-protection bypass list, so
+   an unauthorized merge attempt will fail anyway. Specifically:
      - Do not call \`gh pr merge\`, \`merge_pull_request\`, or any
        MCP tool that merges.
      - Do not call \`gh pr close\` or \`close_pull_request\`.
-     - Do not call \`gh issue close\` or \`close_issue\` — the PR
-       closing the issue on merge is the user's prerogative, not
-       yours.
+     - Do not call \`gh issue close\` or \`close_issue\`.
+   **Exception** — the issue body grants explicit self-merge
+   permission. Look for phrases like \"merge yourself\", \"feel
+   free to merge\", \"auto-merge\", \"you may merge when CI
+   passes\", or equivalent. If you find one, you MAY call
+   \`merge_pull_request\` once ALL required CI checks are green.
+   Be conservative: if it's ambiguous, default to \"do not merge\"
+   and ask in a comment.
 
 8. **If CI on the PR fails, fix it on the same branch.** Read the
    failing job logs (\`gh run view --log\` / \`gh api ...checks\`),
@@ -371,12 +377,16 @@ $BRANCH_INSTRUCTION
    Post a one-line status comment naming the failing job + root
    cause. Do NOT open a new PR, do NOT close the existing one,
    and do NOT declare the issue done while CI is red — wait for
-   the next push to go green, then post the final status.
+   the next push to go green, then post the final status (or
+   merge, if rule 7's exception applies).
 
-9. **Add the issue author as reviewer** when opening the PR (use
-   \`gh pr create --reviewer ...\` or the github MCP's reviewers
-   field). The issue body or a user comment may name a specific
-   reviewer; default to the issue author otherwise.
+9. **Reviewer assignment.** Only when rule 7's exception does NOT
+   apply (i.e., you will NOT self-merge): add the issue author as
+   reviewer on PR creation (\`gh pr create --reviewer ...\` or the
+   github MCP reviewers field). If the issue body or a user
+   comment names a specific reviewer, use that instead. If
+   self-merge IS allowed, do not add a reviewer — no human needs
+   to be paged.
 
 10. **Reactions:** do NOT add reactions yourself. The wrapper
     handles marking comments as read with :+1: after each poll.
