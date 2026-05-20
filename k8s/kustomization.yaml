@@ -10,7 +10,11 @@ resources:
   - 030-service.yaml
   - 040-networkpolicy.yaml
   - 050-issue-watcher.yaml
-  - openclaw-secrets-sealed.yaml
+  # openclaw-secrets is no longer in git. The Deploy workflow's
+  # publish-secrets job `kubectl apply`s it directly each run; Argo
+  # CD doesn't manage that resource. If you ever need a "clean slate"
+  # bootstrap from git, re-run the Deploy workflow (or workflow_dispatch
+  # the apply-secrets job).
 # Pin the openclaw image here so the deployment manifest stays static and
 # Argo CD picks up new builds when this tag is bumped. Tag tracks
 # OPENCLAW_VERSION in /VERSIONS — the deploy workflow rewrites this entry

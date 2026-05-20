@@ -7,8 +7,10 @@ over Telegram.
 
 The repository builds a custom openclaw image, ships the Kubernetes
 manifests as a Kustomize bundle, and is reconciled into the cluster by
-Argo CD. Secrets are committed encrypted with
-[Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets).
+Argo CD. Secrets are **not** stored in the repo — the Deploy workflow
+reads GitHub Actions environment secrets and `kubectl apply`s them
+directly to the cluster on every run (the YAML never touches disk or
+git).
 
 ## What's in the image
 
@@ -45,7 +47,7 @@ k8s/            Kustomize bundle deployed by Argo CD
   050-issue-watcher.yaml    Issue-watcher CronJob, RBAC, chat skill
 argocd/         Argo CD AppProject + Applications + PreSync hook
 .github/
-  workflows/    image build, sealed-secret rotation, validation, CodeQL
+  workflows/    image build, secret apply, validation, CodeQL
 VERSIONS        Pinned upstream versions (openclaw + every CLI baked in)
 ```
 
@@ -56,24 +58,26 @@ VERSIONS        Pinned upstream versions (openclaw + every CLI baked in)
                       |
               .github/workflows/deploy.yml
               /                            \
-   publish-secrets  (re-seals)        build-and-push-image
-              \                            /
-               \                          /
-                \                        /
-                 commit to main  ←  builds + pushes
-                 (sealed-secrets         to local registry
-                  if rotated)
-                          |
-                 Argo CD auto-sync
-                          |
-              kustomize build k8s/  →  apply
-                          |
-                Pod up in `claw-code-local`
+   publish-secrets  (direct apply)    build-and-push-image
+              |                              |
+              v                              v
+       kubectl apply -f -          docker push + commit
+       openclaw-secrets             k8s/kustomization.yaml
+       (no git, no commit)         (image-tag pin)
+                                         |
+                                         v
+                                  Argo CD auto-sync
+                                         |
+                            kustomize build k8s/  →  apply
+                                         |
+                              Pod up in `claw-code-local`
 ```
 
-- `publish-secrets` reads GitHub Actions secrets, runs `kubeseal`
-  against the cluster's Sealed Secrets controller cert, and commits
-  the encrypted YAML back to `main`.
+- `publish-secrets` reads GitHub Actions secrets and `kubectl apply`s
+  the resulting `openclaw-secrets` Secret directly to the cluster.
+  The manifest is piped from `kubectl create -o yaml` into
+  `kubectl apply -f -` and never written to disk or git. Argo CD
+  does **not** manage this Secret; the workflow is its sole owner.
 - `build-and-push-image` resolves the upstream openclaw tag from
   `VERSIONS`, layers in the extra CLIs / MCP servers, pushes the
   result to a private registry, and commits a pinning update to
@@ -186,21 +190,23 @@ Existing on-disk state under `~/.openclaw/projects/` and
 
 The deploy target is assumed to provide:
 
-- A Kubernetes cluster with Argo CD, Sealed Secrets controller, and a
-  default StorageClass that provisions `ReadWriteOnce` volumes.
+- A Kubernetes cluster with Argo CD and a default StorageClass that
+  provisions `ReadWriteOnce` volumes.
 - A reachable container registry the cluster can pull from (image
   pull credentials are expected in a `registry-pull-secret` Secret in
   the target namespace — this is the only Secret not managed by the
   pipeline; see "Bootstrap" below).
-- A self-hosted GitHub Actions runner that can reach the cluster
-  (the workflows use `arc-runner-scale-claw-code-local`). Workflows
-  rely on in-cluster network reach for `kubeseal --fetch-cert`.
+- A self-hosted GitHub Actions runner that has kubectl reach into
+  the target namespace (the workflows use
+  `arc-runner-scale-claw-code-local`; its ServiceAccount must be
+  granted `secrets: create/update/get/patch` on `claw-code-local`).
 
 ## Required GitHub Actions secrets and variables
 
 Set on the repository (Settings → Secrets and variables → Actions).
-The deploy workflow seals every secret listed here into the cluster
-Secret `openclaw-secrets`.
+The deploy workflow `kubectl apply`s every secret listed here as a
+`Secret` named `openclaw-secrets` in the `claw-code-local` namespace
+(directly to the cluster — never written to disk or committed).
 
 **Secrets**
 
@@ -226,10 +232,10 @@ For a fresh cluster, applied once out-of-band:
 2. `registry-pull-secret` in the target namespace, holding a
    `kubernetes.io/dockerconfigjson` for the image registry. This is
    referenced by the pod's `imagePullSecrets` and is the one piece of
-   credential state not managed through Sealed Secrets.
-3. The Sealed Secrets controller in `kube-system` — once present,
-   pushing to `main` (or running the Deploy workflow manually) fills
-   in everything else.
+   credential state not managed by the pipeline.
+3. Push to `main` (or `workflow_dispatch` the Deploy workflow). The
+   `publish-secrets` job creates `openclaw-secrets` directly via
+   kubectl. From then on, every push to `main` re-applies it.
 
 ## Bumping versions
 

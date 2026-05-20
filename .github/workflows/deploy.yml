@@ -168,57 +168,42 @@ jobs:
           git push
 
   publish-secrets:
-    name: Publish Sealed Secrets
+    name: Apply Secrets
     runs-on: arc-runner-scale-claw-code-local
+    # Renders the openclaw-secrets Secret from GitHub Actions environment
+    # secrets and `kubectl apply`s it directly to the cluster — no
+    # kubeseal, no committed sealed-secret YAML, no push to main. The
+    # manifest is piped from `kubectl create -o yaml` straight into
+    # `kubectl apply -f -`, so plaintext never touches disk or git.
+    # ArgoCD does NOT manage this Secret; this workflow is the sole
+    # owner.
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        # Default GITHUB_TOKEN — pushes made with it don't trigger
-        # further workflows (GitHub anti-recursion), which is what
-        # bounds the publish loop. BOT_GITHUB_TOKEN is still used below
-        # to seal the bot's real PAT into the k8s secret.
 
-      - name: Install kubectl and kubeseal
+      - name: Install kubectl
         run: |
           ARCH=$(dpkg --print-architecture)
           mkdir -p "$HOME/.local/bin"
-
           KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)"
           curl -sLo "$HOME/.local/bin/kubectl" \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
           chmod +x "$HOME/.local/bin/kubectl"
-
-          KUBESEAL_VERSION="0.27.3"
-          curl -sLo /tmp/kubeseal.tar.gz \
-            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-${ARCH}.tar.gz"
-          tar -xzf /tmp/kubeseal.tar.gz -C "$HOME/.local/bin" kubeseal
-          chmod +x "$HOME/.local/bin/kubeseal"
-
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Fetch SealedSecrets certificate
-        # In-cluster runner has pod-network reach to the controller's
-        # Service in kube-system; /v1/cert.pem is unauthenticated by
-        # design, so no kubeconfig / KUBECONFIG_DATA secret is needed.
-        run: |
-          kubeseal --fetch-cert \
-            --controller-namespace kube-system \
-            --controller-name sealed-secrets \
-            > /tmp/ss-cert.pem
-          test -s /tmp/ss-cert.pem
-
       - name: Resolve Versions
-        # OPENCLAW_UPSTREAM is read from VERSIONS into the seal step
+        # OPENCLAW_UPSTREAM is read from VERSIONS into the apply step
         # below so the runtime pod knows which upstream tag to track.
         run: |
           . ./VERSIONS
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
-      - name: Seal openclaw-secrets
-        # secrets.GITHUB_TOKEN is reserved by GitHub Actions (returns the
-        # ephemeral, repo-scoped workflow token, NOT a usable bot PAT).
-        # Read the real bot PAT from BOT_GITHUB_TOKEN and seal it under
-        # the k8s-side key name `GITHUB_TOKEN` that openclaw expects.
+      - name: Apply openclaw-secrets to cluster
+        # secrets.GITHUB_TOKEN is reserved by GitHub Actions (returns
+        # the ephemeral, repo-scoped workflow token, NOT a usable bot
+        # PAT). Read the real bot PAT from BOT_GITHUB_TOKEN and apply
+        # it under the k8s-side key name `GITHUB_TOKEN` that openclaw
+        # expects.
         env:
           MISTRAL_API_KEY:                 ${{ secrets.MISTRAL_API_KEY }}
           MINIMAX_API_KEY:                 ${{ secrets.MINIMAX_API_KEY }}
@@ -229,15 +214,6 @@ jobs:
           ENTRA_TOTP_SEED:                 ${{ secrets.ENTRA_TOTP_SEED }}
           GITLAB_TOKEN:                    ${{ secrets.GITLAB_TOKEN }}
           GITLAB_LOCAL_TOKEN:              ${{ secrets.GITLAB_LOCAL_TOKEN }}
-          GITLAB_LOCAL_URL:                ${{ vars.GITLAB_LOCAL_URL }}
-          OPENCLAW_REGISTRY_URL:           ${{ vars.OPENCLAW_REGISTRY_URL }}
-          PROXY_URL:                       ${{ vars.PROXY_URL }}
-          AWS_ACCESS_KEY_ID:               ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY:           ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          ALIBABA_CLOUD_ACCESS_KEY_ID:     ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
-          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
-          ALIBABA_CLOUD_REGION_ID:         ${{ vars.ALIBABA_CLOUD_REGION_ID }}
-          ARGOCD_AUTH_TOKEN:               ${{ secrets.ARGOCD_AUTH_TOKEN }}
           TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           kubectl create secret generic openclaw-secrets \
@@ -252,44 +228,8 @@ jobs:
             --from-literal=ENTRA_TOTP_SEED="$ENTRA_TOTP_SEED" \
             --from-literal=GITLAB_TOKEN="$GITLAB_TOKEN" \
             --from-literal=GITLAB_LOCAL_TOKEN="$GITLAB_LOCAL_TOKEN" \
-            --from-literal=GITLAB_LOCAL_URL="$GITLAB_LOCAL_URL" \
-            --from-literal=OPENCLAW_REGISTRY_URL="$OPENCLAW_REGISTRY_URL" \
-            --from-literal=PROXY_URL="$PROXY_URL" \
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
             --from-literal=GOOGLE_APPLICATION_CREDENTIALS="/etc/openclaw/secrets/gcp-service-account.json" \
-            --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-            --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-            --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID="$ALIBABA_CLOUD_ACCESS_KEY_ID" \
-            --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET="$ALIBABA_CLOUD_ACCESS_KEY_SECRET" \
-            --from-literal=ALIBABA_CLOUD_REGION_ID="$ALIBABA_CLOUD_REGION_ID" \
-            --from-literal=ARGOCD_AUTH_TOKEN="$ARGOCD_AUTH_TOKEN" \
-            --from-literal=ARGOCD_SERVER="${{ vars.ARGOCD_SERVER }}" \
             --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
             -o yaml \
-          | kubeseal --cert /tmp/ss-cert.pem --format yaml \
-              > k8s/openclaw-secrets-sealed.yaml
-
-      - name: Commit SealedSecrets
-        # kubeseal injects a random nonce per call so the bytes change
-        # every run even when the plaintext is identical. Skip the
-        # commit (and the follow-up push that would loop the workflow)
-        # whenever the diff is byte-equal to whatever is on main —
-        # otherwise every push to main triggers Deploy, which triggers
-        # this re-seal, which pushes to main, ad infinitum.
-        run: |
-          set -eu
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add k8s/openclaw-secrets-sealed.yaml
-          if git diff --cached --quiet; then
-            echo "no sealed-secret changes"
-            exit 0
-          fi
-          git commit -m "chore: rotate sealed secrets"
-          if ! git pull --rebase origin main; then
-            git rebase --abort
-            git reset --hard origin/main
-            echo "race: origin already has fresh sealed secrets, exiting 0"
-            exit 0
-          fi
-          git push origin main
+          | kubectl apply -f -
