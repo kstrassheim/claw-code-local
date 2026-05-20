@@ -803,17 +803,17 @@ $BRANCH_INSTRUCTION
     Instead, post ONE comment on the issue tagging
     \`@$ISSUE_AUTHOR\` summarising:
       - What you initially understood the task to be
-      - What you discovered (e.g. "found existing X in Y.yaml
-        that already does this")
-      - The specific clarifying question (e.g. "should I add
+      - What you discovered (e.g. \"found existing X in Y.yaml
+        that already does this\")
+      - The specific clarifying question (e.g. \"should I add
         a separate Z job to ci.yml, or is the existing Y.yaml
-        flow what you intended?")
+        flow what you intended?\")
     Then stop your turn. The wrapper will let you reply when
     the user answers.
 
     Quick self-check before pushing the final commit: run
     \`git diff --stat origin/<default-branch>...HEAD\` — if
-    that's empty, you're in the empty-PR case.
+    that is empty, you are in the empty-PR case.
 
 Begin."
 
