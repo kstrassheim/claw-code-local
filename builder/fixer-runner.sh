@@ -1,13 +1,18 @@
 #!/bin/bash
 # fixer-runner: backgrounded subprocess inside the openclaw container.
-# Holds a per-repo lock, manages the shared git checkout under
-# ~/.openclaw/projects/<repo>/, then runs `openclaw agent --local`
+# Holds a per-repo lock, manages a shared git checkout under
+# ~/.openclaw/projects/<repo>/, and runs `openclaw agent --local`
 # in a poll loop: agent does one turn at a time, the wrapper checks
 # the issue for new @-mention comments every POLL_INTERVAL, reacts
 # :+1: to each, and re-invokes the agent with the comment as the
 # next turn's user message (same --session-id so context persists).
-# Exits when the agent has opened a PR on the branch, or after
-# MAX_LIFETIME_SECONDS (whichever first).
+#
+# Strict one-PR-per-issue: on startup we look up any existing open PR
+# linked to this issue (PR body contains "closes/fixes/resolves #<n>"
+# OR head ref starts with "issue-<n>-"). If found we check out that
+# branch and the prompt tells the agent to push commits to it, NOT
+# open a new PR. Same check at every poll: if ANY linked PR is open,
+# the fixer's job is done — exit.
 #
 # Args:
 #   $1 repo full_name       (owner/name)
@@ -22,11 +27,6 @@
 #   FIXER_BOT_LOGIN         — bot's GH login (default: cameron-claw)
 #   FIXER_POLL_INTERVAL     — seconds between comment polls (default 300)
 #   FIXER_MAX_LIFETIME      — overall wall-clock cap, seconds (default 6h)
-#
-# Lock semantics: `mkdir <lockdir>` is atomic. The lock dir is a
-# sibling of the project tree, NOT inside it (a `.fixer.lock` inside
-# the project dir broke `git clone` because the destination was
-# non-empty). Trap clears the lock on every exit path.
 set -uo pipefail
 
 REPO="$1"
@@ -37,8 +37,7 @@ ISSUE_TITLE="$4"
 BOT_LOGIN="${FIXER_BOT_LOGIN:-cameron-claw}"
 POLL_INTERVAL="${FIXER_POLL_INTERVAL:-300}"
 MAX_LIFETIME_SECONDS="${FIXER_MAX_LIFETIME:-$((6 * 3600))}"
-AGENT_TURN_TIMEOUT=3500  # per --local invocation, leave grace under the
-                         # 6h overall budget
+AGENT_TURN_TIMEOUT=3500
 
 STATE_ROOT="${HOME:-/home/node}/.openclaw"
 PROJECTS_ROOT="$STATE_ROOT/projects"
@@ -58,31 +57,12 @@ fi
 echo "$BASHPID $(date -Iseconds) issue=$ISSUE_NUM" > "$LOCK_DIR/owner"
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
-# Legacy cleanup: pre-.24 builds left a .fixer.lock inside the project
-# dir, which would break the empty-dir check on the next clone.
 rm -rf "$PROJECT_DIR/.fixer.lock" 2>/dev/null
-
 exec >> "$LOG_FILE" 2>&1
 
 echo "============================================================"
 echo "[$(date -Iseconds)] fixer start  repo=$REPO  issue=#$ISSUE_NUM"
 echo "============================================================"
-
-# -- workspace setup (clone or update) --------------------------------
-if [ ! -d "$PROJECT_DIR/.git" ]; then
-  echo "[clone] $REPO → $PROJECT_DIR"
-  git clone --quiet "https://github.com/$REPO.git" "$PROJECT_DIR"
-fi
-cd "$PROJECT_DIR"
-git fetch --quiet origin
-DEFAULT_BRANCH="$(git remote show origin | awk '/HEAD branch/ {print $NF}')"
-echo "[checkout] default-branch=$DEFAULT_BRANCH"
-git checkout --quiet "$DEFAULT_BRANCH"
-git reset --hard --quiet "origin/$DEFAULT_BRANCH"
-git clean -fdx --quiet
-BRANCH="issue-$ISSUE_NUM-fix"
-git branch -D "$BRANCH" 2>/dev/null || true
-git checkout --quiet -b "$BRANCH"
 
 # -- GH API helpers ---------------------------------------------------
 
@@ -91,13 +71,56 @@ AUTH_HEADER="Authorization: Bearer $GITHUB_TOKEN"
 ACCEPT_HEADER="Accept: application/vnd.github+json"
 APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"
 
-# Fetch new @-mention comments since cursor. Stdin: cursor id (or 0).
-# Stdout: JSON array of {id, user, body, html_url} for matching comments.
+export FIXER_BOT_LOGIN_VAL="$BOT_LOGIN"
+export FIXER_ISSUE_NUM="$ISSUE_NUM"
+
+# Find all OPEN PRs in this repo whose body says they close issue #N,
+# OR whose head ref starts with `issue-<n>-`. Output: JSON array of
+# {number, head_ref, html_url, title}.
+fetch_open_prs_for_issue() {
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls?state=open&per_page=100" \
+  | python3 -c "
+import sys, json, re, os
+n = os.environ['FIXER_ISSUE_NUM']
+pat = re.compile(r'\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#' + n + r'\\b', re.IGNORECASE)
+prefix = f'issue-{n}-'
+out = []
+for p in json.load(sys.stdin):
+    body = p.get('body') or ''
+    head_ref = (p.get('head') or {}).get('ref','')
+    if pat.search(body) or head_ref.startswith(prefix):
+        out.append({
+            'number': p['number'],
+            'head_ref': head_ref,
+            'html_url': p['html_url'],
+            'title': p['title'],
+        })
+print(json.dumps(out))
+"
+}
+
+# All comments on the issue (used to seed the agent's context).
+fetch_all_comments() {
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100"
+}
+
+# Issue body itself.
+fetch_issue_body() {
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
+  | python3 -c "import sys,json; i=json.load(sys.stdin); print(i.get('body') or '')"
+}
+
+# Filter to comments newer than cursor where the bot is @-mentioned
+# (case-insensitive). Skip the bot's own comments so we don't react to
+# our own posts.
 fetch_new_mentions() {
   local since_id="$1"
   curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
     "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" \
-    | python3 -c "
+  | python3 -c "
 import sys, json, re, os
 since = int('${since_id:-0}')
 bot = os.environ['FIXER_BOT_LOGIN_VAL'].lower()
@@ -107,7 +130,7 @@ for c in json.load(sys.stdin):
     if c['id'] <= since:
         continue
     if (c.get('user') or {}).get('login', '').lower() == bot:
-        continue  # skip own comments — we don't react to our own posts
+        continue
     body = c.get('body') or ''
     if not mention_re.search(body):
         continue
@@ -131,80 +154,232 @@ react_to_comment() {
     || echo "[react] FAILED on comment $cid"
 }
 
-pr_exists_for_branch() {
-  # Returns 0 if a PR is open from <branch> in this repo, else 1.
-  local count
-  count=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls?head=${REPO%%/*}:${BRANCH}&state=all&per_page=1" \
-    | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-  [ "${count:-0}" -ge 1 ]
-}
-
 most_recent_comment_id() {
   curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
     "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" \
-    | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
+  | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
 }
 
-# Make the bot login visible to the inline python helpers.
-export FIXER_BOT_LOGIN_VAL="$BOT_LOGIN"
+# -- detect existing PR + pick branch ---------------------------------
 
-# -- session + initial turn --------------------------------------------
+EXISTING_PRS_JSON="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
+EXISTING_PR_COUNT="$(echo "$EXISTING_PRS_JSON" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
-# Fresh per-invocation session (no context bleed between fixer-runner
-# lifetimes). Within this lifetime, every agent turn shares this id.
+if [ "$EXISTING_PR_COUNT" -ge 1 ]; then
+  # Resume on the existing PR's branch. If multiple are open (legacy
+  # mess from before this fix), pick the lowest-numbered one — that's
+  # the first one the bot opened, and we'll work to merge IT rather
+  # than continue the cascade.
+  EXISTING_PR_NUMBER="$(echo "$EXISTING_PRS_JSON" | python3 -c "import sys,json; ps=sorted(json.load(sys.stdin), key=lambda p: p['number']); print(ps[0]['number'])")"
+  EXISTING_PR_BRANCH="$(echo "$EXISTING_PRS_JSON" | python3 -c "import sys,json; ps=sorted(json.load(sys.stdin), key=lambda p: p['number']); print(ps[0]['head_ref'])")"
+  EXISTING_PR_URL="$(echo "$EXISTING_PRS_JSON" | python3 -c "import sys,json; ps=sorted(json.load(sys.stdin), key=lambda p: p['number']); print(ps[0]['html_url'])")"
+  BRANCH="$EXISTING_PR_BRANCH"
+  echo "[pr] resuming existing PR #$EXISTING_PR_NUMBER on branch '$BRANCH' ($EXISTING_PR_URL)"
+  echo "[pr] also-open (will note in prompt): $EXISTING_PRS_JSON"
+else
+  EXISTING_PR_NUMBER=""
+  EXISTING_PR_BRANCH=""
+  EXISTING_PR_URL=""
+  BRANCH="issue-$ISSUE_NUM-fix"
+  echo "[pr] no open PR linked to issue #$ISSUE_NUM yet; will work on fresh branch '$BRANCH'"
+fi
+
+# -- workspace setup --------------------------------------------------
+
+if [ ! -d "$PROJECT_DIR/.git" ]; then
+  echo "[clone] $REPO → $PROJECT_DIR"
+  git clone --quiet "https://github.com/$REPO.git" "$PROJECT_DIR"
+fi
+cd "$PROJECT_DIR"
+git fetch --quiet origin
+DEFAULT_BRANCH="$(git remote show origin | awk '/HEAD branch/ {print $NF}')"
+echo "[checkout] default-branch=$DEFAULT_BRANCH"
+
+if [ -n "$EXISTING_PR_BRANCH" ] && git ls-remote --heads origin "$EXISTING_PR_BRANCH" | grep -q .; then
+  # Resume on the existing PR's remote branch
+  git checkout --quiet "$DEFAULT_BRANCH"
+  git branch -D "$EXISTING_PR_BRANCH" 2>/dev/null || true
+  git checkout --quiet -b "$EXISTING_PR_BRANCH" "origin/$EXISTING_PR_BRANCH"
+  echo "[checkout] resumed existing branch $EXISTING_PR_BRANCH from origin"
+else
+  # Fresh branch off default
+  git checkout --quiet "$DEFAULT_BRANCH"
+  git reset --hard --quiet "origin/$DEFAULT_BRANCH"
+  git clean -fdx --quiet
+  git branch -D "$BRANCH" 2>/dev/null || true
+  git checkout --quiet -b "$BRANCH"
+  echo "[checkout] created fresh branch $BRANCH off $DEFAULT_BRANCH"
+fi
+
+# -- gather issue context for the agent -------------------------------
+
+ISSUE_BODY="$(fetch_issue_body 2>/dev/null || echo '')"
+ALL_COMMENTS_JSON="$(fetch_all_comments 2>/dev/null || echo '[]')"
+
+ISSUE_HISTORY_TEXT="$(python3 - <<'PY'
+import os, sys, json
+body = os.environ.get('FIXER_ISSUE_BODY', '')
+print('## Issue body')
+print(body.strip() if body else '(empty)')
+print()
+print('## Conversation history (most recent first)')
+try:
+    cs = json.loads(os.environ.get('FIXER_ALL_COMMENTS_JSON','[]'))
+except Exception:
+    cs = []
+if not cs:
+    print('(no comments yet)')
+else:
+    for c in reversed(cs):
+        user = (c.get('user') or {}).get('login','?')
+        ts = c.get('created_at','')
+        body = (c.get('body') or '').strip()
+        if len(body) > 1200:
+            body = body[:1200] + '\n…[truncated]'
+        print(f'--- @{user} at {ts} ---')
+        print(body)
+        print()
+PY
+)"
+FIXER_ISSUE_BODY="$ISSUE_BODY" FIXER_ALL_COMMENTS_JSON="$ALL_COMMENTS_JSON" python3 -c "import os; pass" >/dev/null 2>&1
+# Note: bash here-doc captures don't pass env through `python3 - <<`,
+# so we re-run with the env set explicitly:
+ISSUE_HISTORY_TEXT="$(FIXER_ISSUE_BODY="$ISSUE_BODY" FIXER_ALL_COMMENTS_JSON="$ALL_COMMENTS_JSON" python3 - <<'PY'
+import os, json
+body = os.environ.get('FIXER_ISSUE_BODY', '')
+print('## Issue body')
+print(body.strip() if body else '(empty)')
+print()
+print('## Conversation history (oldest first)')
+try:
+    cs = json.loads(os.environ.get('FIXER_ALL_COMMENTS_JSON','[]'))
+except Exception:
+    cs = []
+if not cs:
+    print('(no comments yet)')
+else:
+    for c in cs:
+        user = (c.get('user') or {}).get('login','?')
+        ts = c.get('created_at','')
+        text = (c.get('body') or '').strip()
+        if len(text) > 1200:
+            text = text[:1200] + '\n…[truncated]'
+        print(f'--- @{user} at {ts} ---')
+        print(text)
+        print()
+PY
+)"
+
+# Existing-PRs section for the prompt
+EXISTING_PRS_TEXT="$(FIXER_EXISTING_PRS="$EXISTING_PRS_JSON" python3 - <<'PY'
+import os, json
+try:
+    prs = json.loads(os.environ.get('FIXER_EXISTING_PRS','[]'))
+except Exception:
+    prs = []
+if not prs:
+    print('(none — you may open a new PR when ready)')
+else:
+    for p in sorted(prs, key=lambda x: x['number']):
+        print(f"- PR #{p['number']} ({p['html_url']}) head_ref=`{p['head_ref']}` — {p['title']}")
+PY
+)"
+
+# -- session + initial turn -------------------------------------------
+
 SESSION_ID="issue-${REPO//\//-}-${ISSUE_NUM}-$(date +%s)"
 
-# Initialise the comment cursor: anchor on the newest existing comment
-# so the first poll only picks up brand-new ones the user posts AFTER
-# the fixer starts. (Otherwise the agent would react to old comments
-# from prior fixers / unrelated discussion on first poll.)
+# Anchor the comment cursor at the latest existing comment so first
+# poll doesn't pick up old ones.
 if [ -f "$CURSOR_FILE" ]; then
   LAST_SEEN_ID="$(cat "$CURSOR_FILE")"
   echo "[cursor] resumed from $CURSOR_FILE = $LAST_SEEN_ID"
 else
   LAST_SEEN_ID="$(most_recent_comment_id)"
   echo "$LAST_SEEN_ID" > "$CURSOR_FILE"
-  echo "[cursor] initialised at $LAST_SEEN_ID (anchor to current latest)"
+  echo "[cursor] initialised at $LAST_SEEN_ID"
+fi
+
+if [ -n "$EXISTING_PR_NUMBER" ]; then
+  BRANCH_INSTRUCTION="**An open PR for this issue already exists: PR #${EXISTING_PR_NUMBER} on branch \`${EXISTING_PR_BRANCH}\` (${EXISTING_PR_URL}).** You have ALREADY checked out that branch. Push any further commits to **this same branch** — do NOT create a new branch, do NOT open a new PR. If the PR needs updates, push commits to ${EXISTING_PR_BRANCH}; the PR will pick them up automatically."
+else
+  BRANCH_INSTRUCTION="No PR is open for this issue yet. When the work is ready, open ONE PR from branch \`${BRANCH}\` to \`${DEFAULT_BRANCH}\` with \"Closes #${ISSUE_NUM}\" in the body. Do NOT open multiple PRs for the same issue."
 fi
 
 INITIAL_PROMPT="You are working autonomously to fix GitHub issue $ISSUE_URL — \"$ISSUE_TITLE\".
 
-You are in a fresh checkout of $REPO at $(pwd) on branch $BRANCH
-(already branched off $DEFAULT_BRANCH). The git author identity is
-cameron-claw (via \$GITHUB_TOKEN). You have the github MCP server
-available for issue/PR operations.
+You are in a checkout of $REPO at $(pwd) on branch $BRANCH (off $DEFAULT_BRANCH). The git author identity is cameron-claw (via \$GITHUB_TOKEN). You have the github MCP server available.
+
+## What has already been said on the issue
+
+$ISSUE_HISTORY_TEXT
+
+## Currently-open PRs linked to this issue
+
+$EXISTING_PRS_TEXT
+
+## Branch policy — STRICT
+
+$BRANCH_INSTRUCTION
 
 ## Protocol — follow this exactly
 
-1. **Post an initial status comment** on issue #$ISSUE_NUM via the
-   github MCP \`add_issue_comment\` tool. One short line: what you
-   are about to do.
+1. **Read the conversation history above.** Continue from where the
+   previous turns left off. Do NOT post \"🚧 Starting work\" or
+   similar if a previous status already says you are working — the
+   user is reading these in a notification feed and duplicates are
+   annoying.
 
-2. **Work as autonomously as possible.** Read the codebase,
-   implement the change, run tests if any exist, commit, push. Use
-   the descriptive message style of recent commits on the default
-   branch. Do not delegate to subagents.
+2. **If the most recent user comment includes a directive or
+   correction**, apply it. If the answer was given to a question you
+   previously asked, use that answer.
 
-3. **When you finish:** open a PR back to $DEFAULT_BRANCH with
-   \"Closes #$ISSUE_NUM\" in the body. Then post a **final status
-   comment** on the issue with the PR link. Then stop your turn.
+3. **Work as autonomously as possible.** Read the codebase,
+   implement the change, run tests if any exist, commit, push the
+   branch indicated above. Do not delegate to subagents.
 
-4. **If you get blocked** — i.e., the issue is genuinely ambiguous
-   and you'd be guessing — **DO NOT guess**. Post a comment on the
-   issue tagging \`@kstrassheim\` with ONE specific question, then
-   stop your turn. A wrapper will keep polling for the user's
-   reply; when they answer (by tagging you @$BOT_LOGIN), you will
-   be re-invoked in the same session with their reply as the next
-   user message. Resume from where you left off — do NOT start
-   over.
+4. **Status comments**: post AT MOST one short status comment per
+   meaningful state transition (started / blocked / pushed / done).
+   Never repeat a status that's already in the history. One line.
 
-5. **Comment hygiene:** keep status comments terse. One line is
-   often enough. The user is reading these in their notification
-   feed, not a meeting prep doc.
+5. **If you get blocked** — i.e., the issue is genuinely ambiguous
+   and you'd be guessing — DO NOT guess. Post ONE comment on the
+   issue tagging \`@kstrassheim\` with a SPECIFIC question, then
+   stop your turn. A wrapper polls for the reply; when the user
+   answers (by tagging you @$BOT_LOGIN), you'll be re-invoked in
+   the same session with their reply as the next user message.
 
-6. **Reactions:** do NOT add reactions yourself. The wrapper handles
-   marking comments as read with :+1: after each poll.
+6. **When you finish**: ensure there is exactly ONE open PR for
+   this issue. Post a final status comment on the issue with the
+   PR link. Then stop. Do not open additional PRs even if you
+   think the previous one is wrong — push commits to it instead.
+
+7. **Do NOT merge or close the PR.** Your job ends at \"PR
+   opened and CI green\". The user reviews and merges. You are not
+   in the bypass list for branch protection; an attempted merge
+   will fail anyway. Specifically:
+     - Do not call \`gh pr merge\`, \`merge_pull_request\`, or any
+       MCP tool that merges.
+     - Do not call \`gh pr close\` or \`close_pull_request\`.
+     - Do not call \`gh issue close\` or \`close_issue\` — the PR
+       closing the issue on merge is the user's prerogative, not
+       yours.
+
+8. **If CI on the PR fails, fix it on the same branch.** Read the
+   failing job logs (\`gh run view --log\` / \`gh api ...checks\`),
+   diagnose the root cause, push a fix commit to the SAME branch.
+   Post a one-line status comment naming the failing job + root
+   cause. Do NOT open a new PR, do NOT close the existing one,
+   and do NOT declare the issue done while CI is red — wait for
+   the next push to go green, then post the final status.
+
+9. **Add the issue author as reviewer** when opening the PR (use
+   \`gh pr create --reviewer ...\` or the github MCP's reviewers
+   field). The issue body or a user comment may name a specific
+   reviewer; default to the issue author otherwise.
+
+10. **Reactions:** do NOT add reactions yourself. The wrapper
+    handles marking comments as read with :+1: after each poll.
 
 Begin."
 
@@ -214,7 +389,7 @@ openclaw agent --local \
   --session-id "$SESSION_ID" \
   --message "$INITIAL_PROMPT" || echo "[agent] turn 1 exited non-zero ($?) — continuing into poll loop"
 
-# -- poll loop ---------------------------------------------------------
+# -- poll loop --------------------------------------------------------
 
 START_TIME=$(date +%s)
 turn=2
@@ -222,22 +397,27 @@ turn=2
 while :; do
   elapsed=$(( $(date +%s) - START_TIME ))
   if [ "$elapsed" -ge "$MAX_LIFETIME_SECONDS" ]; then
-    echo "[$(date -Iseconds)] max lifetime ($MAX_LIFETIME_SECONDS s) reached — exiting"
+    echo "[$(date -Iseconds)] max lifetime reached — exiting"
     break
   fi
 
-  if pr_exists_for_branch; then
-    echo "[$(date -Iseconds)] PR exists for $BRANCH — exiting"
+  # Exit when there's any open PR linked to this issue.
+  CUR_PRS="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
+  CUR_PR_COUNT="$(echo "$CUR_PRS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+  if [ "$CUR_PR_COUNT" -ge 1 ]; then
+    echo "[$(date -Iseconds)] open PR exists for issue #$ISSUE_NUM — exiting"
+    echo "[pr] $(echo "$CUR_PRS" | python3 -c "import sys,json; [print(f\"#{p[\\\"number\\\"]} {p[\\\"html_url\\\"]}\") for p in json.load(sys.stdin)]")"
     break
   fi
 
   echo "[poll] sleeping $POLL_INTERVAL s (last_seen=$LAST_SEEN_ID)"
   sleep "$POLL_INTERVAL"
 
-  # Re-check PR after the sleep in case the agent's first turn took a
-  # while and finished asynchronously.
-  if pr_exists_for_branch; then
-    echo "[$(date -Iseconds)] PR exists for $BRANCH — exiting"
+  # Re-check before doing more work.
+  CUR_PRS="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
+  CUR_PR_COUNT="$(echo "$CUR_PRS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+  if [ "$CUR_PR_COUNT" -ge 1 ]; then
+    echo "[$(date -Iseconds)] open PR appeared during sleep — exiting"
     break
   fi
 
@@ -247,9 +427,6 @@ while :; do
     continue
   fi
 
-  # React to each new comment, advance cursor.
-  # Process substitution (not a pipe) — keeps the loop in the parent
-  # shell so LAST_SEEN_ID updates persist.
   while read -r cid; do
     [ -z "$cid" ] && continue
     react_to_comment "$cid"
@@ -263,7 +440,6 @@ for c in json.load(sys.stdin):
     print(c['id'])
 ")
 
-  # Build the follow-up prompt from the new comments.
   FOLLOWUP_PROMPT="New comments on issue #$ISSUE_NUM in which you are mentioned:
 
 $(echo "$NEW_JSON" | python3 -c "
@@ -274,11 +450,9 @@ for c in json.load(sys.stdin):
     print()
 ")
 
-Take these into account and continue from where you left off. If a
-comment answers a question you previously asked, apply the answer
-and resume work. If a comment redirects the work, adjust accordingly."
+Apply this guidance and continue from where you left off. Push commits to the branch you have checked out (\`$BRANCH\`); do not open a new PR — if a PR is already open, push to its branch."
 
-  echo "[turn $turn] re-invoking agent with $(echo "$NEW_JSON" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))') new comment(s)"
+  echo "[turn $turn] re-invoking agent"
   openclaw agent --local \
     --timeout "$AGENT_TURN_TIMEOUT" \
     --session-id "$SESSION_ID" \
