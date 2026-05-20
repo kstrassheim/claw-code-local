@@ -164,6 +164,14 @@ fetch_issue_state() {
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','open'))"
 }
 
+# Author of the issue (the person who created it). Used as the
+# default @-mention target when the bot needs to ask for help.
+fetch_issue_author() {
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
+  | python3 -c "import sys,json; print(((json.load(sys.stdin).get('user') or {}).get('login')) or '')"
+}
+
 # Filter to comments newer than cursor where the bot is @-mentioned
 # (case-insensitive). Skip the bot's own comments so we don't react to
 # our own posts.
@@ -421,6 +429,14 @@ fi
 
 ISSUE_BODY="$(fetch_issue_body 2>/dev/null || echo '')"
 ALL_COMMENTS_JSON="$(fetch_all_comments 2>/dev/null || echo '[]')"
+ISSUE_AUTHOR="$(fetch_issue_author 2>/dev/null || echo '')"
+if [ -z "$ISSUE_AUTHOR" ]; then
+  # Fall back to repo owner if the issue API didn't return an author —
+  # the repo owner is always who created the project, so they're the
+  # best default ask-target.
+  ISSUE_AUTHOR="${REPO%%/*}"
+fi
+echo "[author] issue #$ISSUE_NUM created by @$ISSUE_AUTHOR — will be the default @-mention target when the bot needs help"
 
 ISSUE_HISTORY_TEXT="$(python3 - <<'PY'
 import os, sys, json
@@ -546,22 +562,34 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
   CURRENT_CI_FP="$(ci_fingerprint_for_pr "$EXISTING_PR_NUMBER" 2>/dev/null || echo unknown)"
   LAST_CI_FP=""
   [ -f "$CI_FP_FILE" ] && LAST_CI_FP="$(cat "$CI_FP_FILE")"
+
+  # Fingerprint policy (token-saver): track every transition on disk
+  # but only WAKE the agent on transitions into "settled:*". CI being
+  # in_progress means there's nothing actionable yet — no point
+  # spending a turn just to be told to wait.
   CI_CHANGED=0
   if [ -n "$CURRENT_CI_FP" ] && [ "$CURRENT_CI_FP" != "unknown" ] && [ "$CURRENT_CI_FP" != "$LAST_CI_FP" ]; then
-    CI_CHANGED=1
+    echo "$CURRENT_CI_FP" > "$CI_FP_FILE"
+    case "$CURRENT_CI_FP" in
+      settled:*)
+        CI_CHANGED=1
+        ;;
+      *)
+        echo "[preflight] PR #$EXISTING_PR_NUMBER CI fingerprint changed but state is '$CURRENT_CI_FP' (not settled) — tracking but NOT waking agent (saves LLM calls during in-progress phase)"
+        ;;
+    esac
   fi
 
   PREFLIGHT_NEW="$(fetch_new_mentions "$LAST_SEEN_ID" 2>/dev/null || echo '[]')"
   PREFLIGHT_NEW_COUNT="$(echo "$PREFLIGHT_NEW" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
   if [ "$PREFLIGHT_NEW_COUNT" = "0" ] && [ "$CI_CHANGED" = "0" ]; then
-    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged — exiting without agent invocation"
+    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged or not settled — exiting without agent invocation"
     exit 0
   fi
 
   if [ "$CI_CHANGED" = "1" ]; then
-    echo "[preflight] PR #$EXISTING_PR_NUMBER CI fingerprint changed: '$LAST_CI_FP' → '$CURRENT_CI_FP' — waking agent (rule 8 if red, rule 9 if green)"
-    echo "$CURRENT_CI_FP" > "$CI_FP_FILE"
+    echo "[preflight] PR #$EXISTING_PR_NUMBER CI settled: '$LAST_CI_FP' → '$CURRENT_CI_FP' — waking agent (rule 8 if red, rule 9 if green)"
     WAKE_REASON="ci-change"
   fi
 
@@ -684,7 +712,7 @@ $BRANCH_INSTRUCTION
    environment secret in someone else's account, a missing
    federated identity in Azure Entra, a feature flag you don't
    own) — THEN post ONE comment on the issue tagging
-   \`@kstrassheim\` with a specific, actionable question:
+   \`@$ISSUE_AUTHOR\` with a specific, actionable question:
    what's blocked, what you tried, what setting you need
    changed. Then stop your turn. A wrapper polls for the
    reply; when the user answers (by tagging you @$BOT_LOGIN),
@@ -714,13 +742,28 @@ $BRANCH_INSTRUCTION
    and ask in a comment.
 
 8. **If CI on the PR fails, fix it on the same branch.** Read the
-   failing job logs (\`gh run view --log\` / \`gh api ...checks\`),
-   diagnose the root cause, push a fix commit to the SAME branch.
-   Post a one-line status comment naming the failing job + root
-   cause. Do NOT open a new PR, do NOT close the existing one,
-   and do NOT declare the issue done while CI is red — wait for
-   the next push to go green, then post the final status (or
-   merge, if rule 7's exception applies).
+   actual failing job logs FIRST — guessing from the workflow YAML
+   alone wastes turns. Use the **github MCP** to fetch logs:
+   \`github__list_workflow_runs\`, then
+   \`github__get_workflow_run_usage\` /
+   \`github__download_workflow_run_logs\` etc. **Do NOT use
+   \`gh\` CLI** — the openclaw exec tool sanitizes \`\$GITHUB_TOKEN\`
+   from subprocesses, so every \`gh\` call will fail with
+   \"please run gh auth login\". Same applies to bare
+   \`curl -H \"Authorization: Bearer \$GITHUB_TOKEN\"\` from inside
+   exec — token is gone.
+
+   Once you have the actual error, diagnose the root cause, push a
+   fix commit to the SAME branch. Post a one-line status comment
+   naming the failing job + root cause. Do NOT open a new PR, do
+   NOT close the existing one, and do NOT declare the issue done
+   while CI is red — wait for the next push to go green, then post
+   the final status (or merge, if rule 7's exception applies).
+
+   The wrapper's pre-flight gate already waits for CI to settle
+   before waking you again on the next tick — you don't need to
+   poll CI yourself inside the same turn. Make your fix, push, and
+   stop. The next tick will pick up the new CI result.
 
 9. **Reviewer assignment — STRICT, ENFORCED BY THE WRAPPER.**
    NEVER request a reviewer while ANY CI check on the PR head is
@@ -748,6 +791,29 @@ $BRANCH_INSTRUCTION
 
 10. **Reactions:** do NOT add reactions yourself. The wrapper
     handles marking comments as read with :+1: after each poll.
+
+11. **Empty-PR is a signal to ASK, not to declare done.** If you
+    find yourself about to push a commit that, combined with the
+    PR's prior commits, results in a **net-zero diff** vs the base
+    branch (i.e. you've effectively undone your own earlier work
+    in this PR), STOP. Do not push. Do not request review on an
+    empty PR. That state is a strong signal that you misread the
+    issue and need clarification.
+
+    Instead, post ONE comment on the issue tagging
+    \`@$ISSUE_AUTHOR\` summarising:
+      - What you initially understood the task to be
+      - What you discovered (e.g. "found existing X in Y.yaml
+        that already does this")
+      - The specific clarifying question (e.g. "should I add
+        a separate Z job to ci.yml, or is the existing Y.yaml
+        flow what you intended?")
+    Then stop your turn. The wrapper will let you reply when
+    the user answers.
+
+    Quick self-check before pushing the final commit: run
+    \`git diff --stat origin/<default-branch>...HEAD\` — if
+    that's empty, you're in the empty-PR case.
 
 Begin."
 
