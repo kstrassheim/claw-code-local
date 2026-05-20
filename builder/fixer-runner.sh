@@ -24,7 +24,8 @@
 #   GITHUB_TOKEN            — bot's PAT (already on the openclaw pod)
 #
 # Optional env:
-#   FIXER_BOT_LOGIN         — bot's GH login (default: cameron-claw)
+#   FIXER_BOT_LOGIN         — bot's GH login. If unset, resolved from
+#                             $GITHUB_TOKEN at startup via /user.
 #   FIXER_POLL_INTERVAL     — seconds between comment polls (default 300)
 #   FIXER_MAX_LIFETIME      — overall wall-clock cap, seconds (default 6h)
 set -uo pipefail
@@ -34,7 +35,25 @@ ISSUE_NUM="$2"
 ISSUE_URL="$3"
 ISSUE_TITLE="$4"
 
-BOT_LOGIN="${FIXER_BOT_LOGIN:-cameron-claw}"
+# Resolve bot identity from $GITHUB_TOKEN unless explicitly pinned via
+# FIXER_BOT_LOGIN. Hardcoding the login would couple the code to one
+# deployment's identity — sibling deployments use different tokens
+# (e.g. sephiroth-claw vs whatever this cluster's bot is).
+if [ -n "${FIXER_BOT_LOGIN:-}" ]; then
+  BOT_LOGIN="$FIXER_BOT_LOGIN"
+else
+  BOT_LOGIN="$(curl -fsSL \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    https://api.github.com/user 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" \
+    2>/dev/null)"
+  if [ -z "$BOT_LOGIN" ]; then
+    echo "FATAL: could not resolve bot identity from \$GITHUB_TOKEN /user — aborting" >&2
+    exit 1
+  fi
+fi
 POLL_INTERVAL="${FIXER_POLL_INTERVAL:-300}"
 MAX_LIFETIME_SECONDS="${FIXER_MAX_LIFETIME:-$((6 * 3600))}"
 AGENT_TURN_TIMEOUT=3500
@@ -67,10 +86,11 @@ WIPE_FULL_STATE=0
 
 wipe_issue_state() {
   rm -f "$CURSOR_FILE" 2>/dev/null
+  rm -f "$PROJECT_DIR/.issue-${ISSUE_NUM}.ci-fingerprint" 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.jsonl 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory.jsonl 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory-path.json 2>/dev/null
-  echo "[cleanup] wiped local state for $REPO#$ISSUE_NUM (cursor + session files)"
+  echo "[cleanup] wiped local state for $REPO#$ISSUE_NUM (cursor + ci-fingerprint + session files)"
 }
 
 on_exit() {
@@ -189,6 +209,72 @@ most_recent_comment_id() {
   curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
     "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" \
   | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
+}
+
+# CI fingerprint: a stable token for the CI state on the PR head.
+#   "no-checks"      — no checks reported yet
+#   "in-progress"    — at least one check still running / queued
+#   "settled:<hash>" — all checks have a non-null conclusion; hash
+#                     captures the set of (name, conclusion) pairs
+# Used by the pre-flight gate to wake the agent on CI-state changes
+# without polling during the noisy in-progress phase. Triggers ONCE
+# per CI run: when the last check settles. If the head SHA changes
+# (push of a fix) and CI restarts, fingerprint flips back to
+# in-progress, then to a new "settled:<hash>" — agent wakes again.
+ci_fingerprint_for_pr() {
+  local pr_num="$1"
+  local head_sha
+  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  if [ -z "$head_sha" ]; then echo "unknown"; return; fi
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
+  | python3 -c "
+import sys, json, hashlib
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('unknown'); sys.exit(0)
+runs = d.get('check_runs', [])
+if not runs:
+    print('no-checks'); sys.exit(0)
+if any(r.get('status') != 'completed' for r in runs):
+    print('in-progress'); sys.exit(0)
+completed = sorted([(r['name'], r.get('conclusion') or 'unknown') for r in runs])
+print('settled:' + hashlib.sha256(repr(completed).encode()).hexdigest()[:16])
+"
+}
+
+# Human-readable summary of CI on the PR head, included in the
+# initial agent prompt so the agent can act on rule 8 (CI red → fix)
+# or rule 9 (CI green + no more work → request review) without
+# having to fetch first.
+ci_summary_text_for_pr() {
+  local pr_num="$1"
+  local head_sha
+  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  if [ -z "$head_sha" ]; then echo "(could not fetch CI status)"; return; fi
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
+  | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('(unparseable check-runs response)'); sys.exit(0)
+runs = d.get('check_runs', [])
+if not runs:
+    print('(no checks reported yet on head sha)'); sys.exit(0)
+for r in sorted(runs, key=lambda x: x['name']):
+    status = r.get('status','?')
+    conclusion = r.get('conclusion') or '-'
+    url = r.get('html_url','')
+    marker = '✅' if conclusion == 'success' else ('❌' if conclusion in ('failure','cancelled','timed_out') else '⏳')
+    print(f'{marker} {r[\"name\"]:35s} status={status:12s} conclusion={conclusion:10s} {url}')
+"
 }
 
 # CI gate: returns "green" if every check-run on the PR's head SHA
@@ -436,20 +522,48 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
   enforce_no_reviewer_when_ci_red "$EXISTING_PR_NUMBER"
 fi
 
-# Gate 2: PR open AND no new @-mentions since cursor → exit without
-# invoking the agent. The work is done and there's no user input to
-# react to. Cursor is preserved so the next tick can repeat this cheap
-# check. (Previously: every tick spawned a full agent turn just to
-# realise "PR exists, nothing new" — wasteful LLM calls + duplicate
-# status comments.)
+# Gate 2: PR open. Wake the agent only when there's something for it to
+# do; otherwise exit cheaply.
+#
+# Wake triggers (any one of them):
+#   - new @-mention to the bot since cursor (user input)
+#   - CI fingerprint on the PR head changed since last seen (CI just
+#     settled — agent must react per rule 8 if red, rule 9 if green)
+# In either case, save the new state and fall through to the initial
+# agent invocation. Otherwise exit silently.
+WAKE_REASON=""
 if [ -n "$EXISTING_PR_NUMBER" ]; then
+  CI_FP_FILE="$PROJECT_DIR/.issue-${ISSUE_NUM}.ci-fingerprint"
+  CURRENT_CI_FP="$(ci_fingerprint_for_pr "$EXISTING_PR_NUMBER" 2>/dev/null || echo unknown)"
+  LAST_CI_FP=""
+  [ -f "$CI_FP_FILE" ] && LAST_CI_FP="$(cat "$CI_FP_FILE")"
+  CI_CHANGED=0
+  if [ -n "$CURRENT_CI_FP" ] && [ "$CURRENT_CI_FP" != "unknown" ] && [ "$CURRENT_CI_FP" != "$LAST_CI_FP" ]; then
+    CI_CHANGED=1
+  fi
+
   PREFLIGHT_NEW="$(fetch_new_mentions "$LAST_SEEN_ID" 2>/dev/null || echo '[]')"
   PREFLIGHT_NEW_COUNT="$(echo "$PREFLIGHT_NEW" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
-  if [ "$PREFLIGHT_NEW_COUNT" = "0" ]; then
-    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID — exiting without agent invocation"
+
+  if [ "$PREFLIGHT_NEW_COUNT" = "0" ] && [ "$CI_CHANGED" = "0" ]; then
+    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged — exiting without agent invocation"
     exit 0
   fi
-  echo "[preflight] PR #$EXISTING_PR_NUMBER open AND $PREFLIGHT_NEW_COUNT new @-mention(s) since cursor — proceeding with agent turn"
+
+  if [ "$CI_CHANGED" = "1" ]; then
+    echo "[preflight] PR #$EXISTING_PR_NUMBER CI fingerprint changed: '$LAST_CI_FP' → '$CURRENT_CI_FP' — waking agent (rule 8 if red, rule 9 if green)"
+    echo "$CURRENT_CI_FP" > "$CI_FP_FILE"
+    WAKE_REASON="ci-change"
+  fi
+
+  if [ "$PREFLIGHT_NEW_COUNT" != "0" ]; then
+    echo "[preflight] PR #$EXISTING_PR_NUMBER $PREFLIGHT_NEW_COUNT new @-mention(s) since cursor — waking agent"
+    if [ -n "$WAKE_REASON" ]; then
+      WAKE_REASON="${WAKE_REASON}+user-mention"
+    else
+      WAKE_REASON="user-mention"
+    fi
+  fi
 
   # Pre-react + advance cursor so the initial prompt below sees them
   # consistently and we never re-prompt for the same comment on a
@@ -474,9 +588,35 @@ else
   BRANCH_INSTRUCTION="No PR is open for this issue yet. When the work is ready, open ONE PR from branch \`${BRANCH}\` to \`${DEFAULT_BRANCH}\` with \"Closes #${ISSUE_NUM}\" in the body. Do NOT open multiple PRs for the same issue."
 fi
 
+# Current CI state on the PR, embedded in the prompt so the agent sees
+# failures/successes without having to fetch first. Only meaningful
+# when a PR exists.
+if [ -n "$EXISTING_PR_NUMBER" ]; then
+  CI_STATUS_TEXT="$(ci_summary_text_for_pr "$EXISTING_PR_NUMBER" 2>/dev/null || echo '(could not fetch)')"
+else
+  CI_STATUS_TEXT="(no PR yet — CI not applicable)"
+fi
+
+# Why-am-I-awake hint for the agent. The wrapper has already decided
+# there's work to do; this just tells the agent why and what to do
+# first.
+if [ "$WAKE_REASON" = "ci-change" ]; then
+  WAKE_REASON_TEXT="The wrapper woke you because **CI state changed** on the PR head. Inspect the CI summary below and act per rule 8 (red → fix on same branch) or rule 9 (all green + work done → request review)."
+elif [ "$WAKE_REASON" = "user-mention" ]; then
+  WAKE_REASON_TEXT="The wrapper woke you because the **user @-mentioned you** in a comment. Read their message in the conversation history below and respond / act."
+elif [ "$WAKE_REASON" = "ci-change+user-mention" ]; then
+  WAKE_REASON_TEXT="The wrapper woke you because **both CI state changed AND the user @-mentioned you**. Handle both."
+else
+  WAKE_REASON_TEXT="Initial run on this issue."
+fi
+
 INITIAL_PROMPT="You are working autonomously to fix GitHub issue $ISSUE_URL — \"$ISSUE_TITLE\".
 
-You are in a checkout of $REPO at $(pwd) on branch $BRANCH (off $DEFAULT_BRANCH). The git author identity is cameron-claw (via \$GITHUB_TOKEN). You have the github MCP server available.
+You are in a checkout of $REPO at $(pwd) on branch $BRANCH (off $DEFAULT_BRANCH). The git author identity is \`$BOT_LOGIN\` (resolved at runtime from \$GITHUB_TOKEN). You have the github MCP server available.
+
+## Why you're awake right now
+
+$WAKE_REASON_TEXT
 
 ## What has already been said on the issue
 
@@ -485,6 +625,10 @@ $ISSUE_HISTORY_TEXT
 ## Currently-open PRs linked to this issue
 
 $EXISTING_PRS_TEXT
+
+## Current CI state on the PR head
+
+$CI_STATUS_TEXT
 
 ## Branch policy — STRICT
 
