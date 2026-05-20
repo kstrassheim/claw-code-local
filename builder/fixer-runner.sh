@@ -55,7 +55,30 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   exit 0
 fi
 echo "$BASHPID $(date -Iseconds) issue=$ISSUE_NUM" > "$LOCK_DIR/owner"
-trap 'rm -rf "$LOCK_DIR"' EXIT
+
+# WIPE_LOCAL_STATE_ON_EXIT toggles the per-issue cleanup in the EXIT
+# trap. It is set to 1 only when the fixer exits because a PR exists
+# for this issue (i.e., the bot's job is genuinely done). On all other
+# exits (max-lifetime, crash, lock-collision) we keep the per-issue
+# state on disk so it's debuggable + the next fixer can read the
+# cursor.
+WIPE_LOCAL_STATE_ON_EXIT=0
+
+wipe_issue_state() {
+  rm -f "$CURSOR_FILE" 2>/dev/null
+  rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.jsonl 2>/dev/null
+  rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory.jsonl 2>/dev/null
+  rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory-path.json 2>/dev/null
+  echo "[cleanup] wiped local state for $REPO#$ISSUE_NUM (cursor + session files)"
+}
+
+on_exit() {
+  if [ "$WIPE_LOCAL_STATE_ON_EXIT" = "1" ]; then
+    wipe_issue_state
+  fi
+  rm -rf "$LOCK_DIR"
+}
+trap on_exit EXIT
 
 rm -rf "$PROJECT_DIR/.fixer.lock" 2>/dev/null
 exec >> "$LOG_FILE" 2>&1
@@ -342,12 +365,33 @@ $BRANCH_INSTRUCTION
    meaningful state transition (started / blocked / pushed / done).
    Never repeat a status that's already in the history. One line.
 
-5. **If you get blocked** — i.e., the issue is genuinely ambiguous
-   and you'd be guessing — DO NOT guess. Post ONE comment on the
-   issue tagging \`@kstrassheim\` with a SPECIFIC question, then
-   stop your turn. A wrapper polls for the reply; when the user
-   answers (by tagging you @$BOT_LOGIN), you'll be re-invoked in
-   the same session with their reply as the next user message.
+5. **Asking the user is the LAST resort.** Before posting any
+   question, exhaust your toolbox:
+     - Use every relevant MCP server (github, k8s, terraform,
+       aws/gcp/aliyun, debug, etc.). Read tool descriptions if
+       you're unsure what's available — \`/tools\`-style listings
+       are free, and the github MCP alone has ~30 actions.
+     - Try the action, even if you're not 100% sure of the
+       arguments. A failed call gives you an error message you
+       can debug. Hesitation is more expensive than experiment.
+     - If a tool you'd normally reach for isn't wired, look for
+       a CLI substitute (\`gh\`, \`kubectl\`, \`terraform\`, \`az\`,
+       \`aws\`, \`gcloud\`, \`aliyun\`, \`git\`). They're all on
+       PATH.
+     - Read the codebase, the failing CI logs, the issue's
+       linked PRs, neighbouring docs. The answer is usually
+       already written down somewhere.
+   ONLY when you definitively know a blocker is a setting or
+   permission you cannot change (e.g., a missing GitHub
+   environment secret in someone else's account, a missing
+   federated identity in Azure Entra, a feature flag you don't
+   own) — THEN post ONE comment on the issue tagging
+   \`@kstrassheim\` with a specific, actionable question:
+   what's blocked, what you tried, what setting you need
+   changed. Then stop your turn. A wrapper polls for the
+   reply; when the user answers (by tagging you @$BOT_LOGIN),
+   you'll be re-invoked in the same session with their reply
+   as the next user message.
 
 6. **When you finish**: ensure there is exactly ONE open PR for
    this issue. Post a final status comment on the issue with the
@@ -380,13 +424,18 @@ $BRANCH_INSTRUCTION
    the next push to go green, then post the final status (or
    merge, if rule 7's exception applies).
 
-9. **Reviewer assignment.** Only when rule 7's exception does NOT
-   apply (i.e., you will NOT self-merge): add the issue author as
-   reviewer on PR creation (\`gh pr create --reviewer ...\` or the
-   github MCP reviewers field). If the issue body or a user
-   comment names a specific reviewer, use that instead. If
-   self-merge IS allowed, do not add a reviewer — no human needs
-   to be paged.
+9. **Reviewer assignment — only when finished, only when not
+   allowed to self-merge.** Do NOT add a reviewer when you first
+   open the PR; that pings the user before the work is even
+   reviewable. Add a reviewer **only after CI is green and the
+   PR is the final deliverable** (no more commits planned) AND
+   rule 7's self-merge exception does NOT apply. Use
+   \`gh pr edit <n> --add-reviewer <user>\` or the github MCP
+   \`request_reviewers\` tool at that moment. If the issue body or
+   a user comment names a specific reviewer, use that; otherwise
+   default to the issue author. If rule 7's exception applies
+   (you may self-merge), do NOT add a reviewer — proceed to
+   merge once CI is green.
 
 10. **Reactions:** do NOT add reactions yourself. The wrapper
     handles marking comments as read with :+1: after each poll.
@@ -417,6 +466,7 @@ while :; do
   if [ "$CUR_PR_COUNT" -ge 1 ]; then
     echo "[$(date -Iseconds)] open PR exists for issue #$ISSUE_NUM — exiting"
     echo "[pr] $(echo "$CUR_PRS" | python3 -c "import sys,json; [print(f\"#{p[\\\"number\\\"]} {p[\\\"html_url\\\"]}\") for p in json.load(sys.stdin)]")"
+    WIPE_LOCAL_STATE_ON_EXIT=1
     break
   fi
 
@@ -428,6 +478,7 @@ while :; do
   CUR_PR_COUNT="$(echo "$CUR_PRS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
   if [ "$CUR_PR_COUNT" -ge 1 ]; then
     echo "[$(date -Iseconds)] open PR appeared during sleep — exiting"
+    WIPE_LOCAL_STATE_ON_EXIT=1
     break
   fi
 
