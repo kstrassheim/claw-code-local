@@ -56,13 +56,14 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo "$BASHPID $(date -Iseconds) issue=$ISSUE_NUM" > "$LOCK_DIR/owner"
 
-# WIPE_LOCAL_STATE_ON_EXIT toggles the per-issue cleanup in the EXIT
-# trap. It is set to 1 only when the fixer exits because a PR exists
-# for this issue (i.e., the bot's job is genuinely done). On all other
-# exits (max-lifetime, crash, lock-collision) we keep the per-issue
-# state on disk so it's debuggable + the next fixer can read the
-# cursor.
-WIPE_LOCAL_STATE_ON_EXIT=0
+# WIPE_FULL_STATE toggles the per-issue cleanup in the EXIT trap. It is
+# set to 1 ONLY when the issue itself is closed — at that point the
+# fixer's memory of the issue (cursor + session jsonls) is finished
+# business and can go. On every other exit (PR-exists, max-lifetime,
+# crash, lock-collision) we keep the per-issue state on disk so the
+# next cron tick can read the cursor and the pre-flight gate can decide
+# cheaply whether to bother spawning an agent.
+WIPE_FULL_STATE=0
 
 wipe_issue_state() {
   rm -f "$CURSOR_FILE" 2>/dev/null
@@ -73,7 +74,7 @@ wipe_issue_state() {
 }
 
 on_exit() {
-  if [ "$WIPE_LOCAL_STATE_ON_EXIT" = "1" ]; then
+  if [ "$WIPE_FULL_STATE" = "1" ]; then
     wipe_issue_state
   fi
   rm -rf "$LOCK_DIR"
@@ -134,6 +135,13 @@ fetch_issue_body() {
   curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
     "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
   | python3 -c "import sys,json; i=json.load(sys.stdin); print(i.get('body') or '')"
+}
+
+# Issue state ("open" or "closed"). Used to trigger full wipe on close.
+fetch_issue_state() {
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','open'))"
 }
 
 # Filter to comments newer than cursor where the bot is @-mentioned
@@ -323,6 +331,55 @@ else
   echo "[cursor] initialised at $LAST_SEEN_ID"
 fi
 
+# -- early-exit gates -------------------------------------------------
+# These run BEFORE the initial agent invocation so we don't burn an LLM
+# turn just to discover "nothing to do". Every cron tick respawns this
+# script for any open assigned issue; we need to be cheap when there's
+# no actual new work.
+
+# Gate 1: issue closed → wipe everything and exit. This is the only
+# path that triggers WIPE_FULL_STATE (the user's "once an issue is
+# finished he can wipe his local memory" — the definitive signal of
+# finished is the issue being closed, typically via PR merge).
+ISSUE_STATE="$(fetch_issue_state 2>/dev/null || echo open)"
+if [ "$ISSUE_STATE" = "closed" ]; then
+  echo "[$(date -Iseconds)] issue #$ISSUE_NUM is CLOSED — wiping state and exiting"
+  WIPE_FULL_STATE=1
+  exit 0
+fi
+
+# Gate 2: PR open AND no new @-mentions since cursor → exit without
+# invoking the agent. The work is done and there's no user input to
+# react to. Cursor is preserved so the next tick can repeat this cheap
+# check. (Previously: every tick spawned a full agent turn just to
+# realise "PR exists, nothing new" — wasteful LLM calls + duplicate
+# status comments.)
+if [ -n "$EXISTING_PR_NUMBER" ]; then
+  PREFLIGHT_NEW="$(fetch_new_mentions "$LAST_SEEN_ID" 2>/dev/null || echo '[]')"
+  PREFLIGHT_NEW_COUNT="$(echo "$PREFLIGHT_NEW" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
+  if [ "$PREFLIGHT_NEW_COUNT" = "0" ]; then
+    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID — exiting without agent invocation"
+    exit 0
+  fi
+  echo "[preflight] PR #$EXISTING_PR_NUMBER open AND $PREFLIGHT_NEW_COUNT new @-mention(s) since cursor — proceeding with agent turn"
+
+  # Pre-react + advance cursor so the initial prompt below sees them
+  # consistently and we never re-prompt for the same comment on a
+  # later tick.
+  while read -r cid; do
+    [ -z "$cid" ] && continue
+    react_to_comment "$cid"
+    if [ "$cid" -gt "$LAST_SEEN_ID" ]; then
+      LAST_SEEN_ID="$cid"
+      echo "$cid" > "$CURSOR_FILE"
+    fi
+  done < <(echo "$PREFLIGHT_NEW" | python3 -c "
+import sys, json
+for c in json.load(sys.stdin):
+    print(c['id'])
+")
+fi
+
 if [ -n "$EXISTING_PR_NUMBER" ]; then
   BRANCH_INSTRUCTION="**An open PR for this issue already exists: PR #${EXISTING_PR_NUMBER} on branch \`${EXISTING_PR_BRANCH}\` (${EXISTING_PR_URL}).** You have ALREADY checked out that branch. Push any further commits to **this same branch** — do NOT create a new branch, do NOT open a new PR. If the PR needs updates, push commits to ${EXISTING_PR_BRANCH}; the PR will pick them up automatically."
 else
@@ -460,13 +517,20 @@ while :; do
     break
   fi
 
-  # Exit when there's any open PR linked to this issue.
+  # Exit when the issue is closed (full wipe) or when any open PR
+  # linked to this issue exists (preserve cursor for next tick).
+  CUR_ISSUE_STATE="$(fetch_issue_state 2>/dev/null || echo open)"
+  if [ "$CUR_ISSUE_STATE" = "closed" ]; then
+    echo "[$(date -Iseconds)] issue #$ISSUE_NUM closed — wiping state and exiting"
+    WIPE_FULL_STATE=1
+    break
+  fi
+
   CUR_PRS="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
   CUR_PR_COUNT="$(echo "$CUR_PRS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
   if [ "$CUR_PR_COUNT" -ge 1 ]; then
-    echo "[$(date -Iseconds)] open PR exists for issue #$ISSUE_NUM — exiting"
-    echo "[pr] $(echo "$CUR_PRS" | python3 -c "import sys,json; [print(f\"#{p[\\\"number\\\"]} {p[\\\"html_url\\\"]}\") for p in json.load(sys.stdin)]")"
-    WIPE_LOCAL_STATE_ON_EXIT=1
+    echo "[$(date -Iseconds)] open PR exists for issue #$ISSUE_NUM — exiting (cursor preserved)"
+    echo "[pr] $(echo "$CUR_PRS" | python3 -c "import sys,json; nums=[p['number'] for p in json.load(sys.stdin)]; print(','.join('#%d' % n for n in nums))")"
     break
   fi
 
@@ -474,11 +538,16 @@ while :; do
   sleep "$POLL_INTERVAL"
 
   # Re-check before doing more work.
+  CUR_ISSUE_STATE="$(fetch_issue_state 2>/dev/null || echo open)"
+  if [ "$CUR_ISSUE_STATE" = "closed" ]; then
+    echo "[$(date -Iseconds)] issue #$ISSUE_NUM closed during sleep — wiping state and exiting"
+    WIPE_FULL_STATE=1
+    break
+  fi
   CUR_PRS="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
   CUR_PR_COUNT="$(echo "$CUR_PRS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
   if [ "$CUR_PR_COUNT" -ge 1 ]; then
-    echo "[$(date -Iseconds)] open PR appeared during sleep — exiting"
-    WIPE_LOCAL_STATE_ON_EXIT=1
+    echo "[$(date -Iseconds)] open PR appeared during sleep — exiting (cursor preserved)"
     break
   fi
 
