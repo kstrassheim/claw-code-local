@@ -1,0 +1,41 @@
+---
+# RBAC for the GitHub Actions runner so the Deploy workflow's
+# publish-secrets job can `kubectl apply` the openclaw-secrets Secret
+# directly into this namespace. Scoped as narrowly as possible: only
+# the one named Secret, only this namespace, only get/create/update/patch
+# (no list, no delete, no broader read).
+#
+# Why a separate file (and not inlined in 020-deployment.yaml): the
+# runner pod's ServiceAccount lives in the `arc-runners` namespace, but
+# the Role+Binding live here in `claw-code-local` (Role authority is
+# always namespace-local — the RoleBinding just references a subject
+# from elsewhere).
+#
+# The SA name `…-gha-rs-no-permission` is the default ARC convention:
+# scale-set runners ship with a SA that has zero cluster permissions
+# by design, so each workload that wants to give them access has to
+# grant it explicitly (which is what we're doing here).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-runner-secrets-writer
+  namespace: claw-code-local
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["openclaw-secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-runner-secrets-writer
+  namespace: claw-code-local
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-scale-claw-code-local-gha-rs-no-permission
+    namespace: arc-runners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: arc-runner-secrets-writer
