@@ -211,16 +211,22 @@ most_recent_comment_id() {
   | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
 }
 
-# CI fingerprint: a stable token for the CI state on the PR head.
-#   "no-checks"      — no checks reported yet
-#   "in-progress"    — at least one check still running / queued
-#   "settled:<hash>" — all checks have a non-null conclusion; hash
-#                     captures the set of (name, conclusion) pairs
-# Used by the pre-flight gate to wake the agent on CI-state changes
-# without polling during the noisy in-progress phase. Triggers ONCE
-# per CI run: when the last check settles. If the head SHA changes
-# (push of a fix) and CI restarts, fingerprint flips back to
-# in-progress, then to a new "settled:<hash>" — agent wakes again.
+# CI fingerprint: a stable token for the CI state on the PR head. The
+# head SHA is part of the fingerprint so a new push (even one whose CI
+# settles with the exact same set of check conclusions as the previous
+# commit) still wakes the agent — otherwise a "fix that didn't fix"
+# looks identical to "no change" and the bot misses the chance to
+# diagnose the next root cause.
+#
+# Format:
+#   "no-checks:<sha7>"     — head exists, no checks reported yet
+#   "in-progress:<sha7>"   — at least one check still running / queued
+#   "settled:<sha7>:<hash>"— all checks settled; hash over (name,conclusion) pairs
+#
+# Pre-flight gate wakes the agent on ANY change. So:
+#   - push of a fix → sha7 changes → wake
+#   - last check settles → settled prefix → wake
+#   - CI flaps red after a hotfix attempt → still wakes via sha
 ci_fingerprint_for_pr() {
   local pr_num="$1"
   local head_sha
@@ -228,21 +234,24 @@ ci_fingerprint_for_pr() {
     "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
   if [ -z "$head_sha" ]; then echo "unknown"; return; fi
+  local sha7="${head_sha:0:7}"
   curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
     "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
-  | python3 -c "
-import sys, json, hashlib
+  | SHA7="$sha7" python3 -c "
+import sys, json, hashlib, os
+sha7 = os.environ['SHA7']
 try:
     d = json.load(sys.stdin)
 except Exception:
     print('unknown'); sys.exit(0)
 runs = d.get('check_runs', [])
 if not runs:
-    print('no-checks'); sys.exit(0)
+    print(f'no-checks:{sha7}'); sys.exit(0)
 if any(r.get('status') != 'completed' for r in runs):
-    print('in-progress'); sys.exit(0)
+    print(f'in-progress:{sha7}'); sys.exit(0)
 completed = sorted([(r['name'], r.get('conclusion') or 'unknown') for r in runs])
-print('settled:' + hashlib.sha256(repr(completed).encode()).hexdigest()[:16])
+h = hashlib.sha256(repr(completed).encode()).hexdigest()[:16]
+print(f'settled:{sha7}:{h}')
 "
 }
 
