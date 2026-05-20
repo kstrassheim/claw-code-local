@@ -191,6 +191,86 @@ most_recent_comment_id() {
   | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
 }
 
+# CI gate: returns "green" if every check-run on the PR's head SHA
+# completed=success, "pending" if none have reported yet, "not_green"
+# otherwise. The user's rule is "only request review when all pipelines
+# are running [green]" — anything other than "green" disqualifies the
+# PR from having a reviewer assigned.
+ci_status_for_pr() {
+  local pr_num="$1"
+  local head_sha
+  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  if [ -z "$head_sha" ]; then
+    echo "unknown"
+    return
+  fi
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
+  | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('unknown'); sys.exit(0)
+runs = d.get('check_runs', [])
+if not runs:
+    print('pending')
+elif all(r.get('status') == 'completed' and r.get('conclusion') == 'success' for r in runs):
+    print('green')
+else:
+    print('not_green')
+"
+}
+
+# List requested-reviewer logins on the PR (one per line).
+fetch_pr_reviewers() {
+  local pr_num="$1"
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls/$pr_num/requested_reviewers" 2>/dev/null \
+  | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for u in d.get('users', []):
+    print(u['login'])
+"
+}
+
+# Enforce the invariant: while CI is not all-green on a PR, that PR
+# must have ZERO requested reviewers. If the agent added one
+# prematurely (against rule 9), this wipes it. Idempotent + cheap to
+# call on every tick.
+enforce_no_reviewer_when_ci_red() {
+  local pr_num="$1"
+  local reviewers
+  reviewers="$(fetch_pr_reviewers "$pr_num")"
+  if [ -z "$reviewers" ]; then
+    return 0
+  fi
+  local status
+  status="$(ci_status_for_pr "$pr_num")"
+  if [ "$status" = "green" ]; then
+    echo "[ci-gate] PR #$pr_num CI green and reviewers=[$(echo "$reviewers" | tr '\n' ',' | sed 's/,$//')] — allowed"
+    return 0
+  fi
+  local reviewers_json
+  reviewers_json="$(echo "$reviewers" | python3 -c "
+import sys, json
+logins = [l.strip() for l in sys.stdin if l.strip()]
+print(json.dumps({'reviewers': logins}))
+")"
+  curl -fsSL -X DELETE -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    -H 'Content-Type: application/json' \
+    -d "$reviewers_json" \
+    "$GH_API/repos/$REPO/pulls/$pr_num/requested_reviewers" >/dev/null 2>&1 \
+    && echo "[ci-gate] PR #$pr_num CI=$status — removed reviewer(s) [$(echo "$reviewers" | tr '\n' ',' | sed 's/,$//')] (rule 9: no review until all checks green)" \
+    || echo "[ci-gate] PR #$pr_num CI=$status — FAILED to remove reviewers"
+}
+
 # -- detect existing PR + pick branch ---------------------------------
 
 EXISTING_PRS_JSON="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
@@ -348,6 +428,14 @@ if [ "$ISSUE_STATE" = "closed" ]; then
   exit 0
 fi
 
+# CI-gate enforcement on the existing PR (idempotent): if any check is
+# red/pending/missing AND a reviewer is requested, remove the reviewer.
+# Runs on every tick so a premature add-reviewer is unwound within ~5
+# minutes (current cron schedule).
+if [ -n "$EXISTING_PR_NUMBER" ]; then
+  enforce_no_reviewer_when_ci_red "$EXISTING_PR_NUMBER"
+fi
+
 # Gate 2: PR open AND no new @-mentions since cursor → exit without
 # invoking the agent. The work is done and there's no user input to
 # react to. Cursor is preserved so the next tick can repeat this cheap
@@ -481,18 +569,29 @@ $BRANCH_INSTRUCTION
    the next push to go green, then post the final status (or
    merge, if rule 7's exception applies).
 
-9. **Reviewer assignment — only when finished, only when not
-   allowed to self-merge.** Do NOT add a reviewer when you first
-   open the PR; that pings the user before the work is even
-   reviewable. Add a reviewer **only after CI is green and the
-   PR is the final deliverable** (no more commits planned) AND
-   rule 7's self-merge exception does NOT apply. Use
-   \`gh pr edit <n> --add-reviewer <user>\` or the github MCP
-   \`request_reviewers\` tool at that moment. If the issue body or
-   a user comment names a specific reviewer, use that; otherwise
-   default to the issue author. If rule 7's exception applies
-   (you may self-merge), do NOT add a reviewer — proceed to
-   merge once CI is green.
+9. **Reviewer assignment — STRICT, ENFORCED BY THE WRAPPER.**
+   NEVER request a reviewer while ANY CI check on the PR head is
+   queued, in_progress, pending, or has conclusion != success.
+   The wrapper checks CI on every tick and will IMMEDIATELY
+   REMOVE any reviewer you add while CI is not all-green —
+   adding one early is wasted effort and annoys the user.
+
+   When you need user input because you're blocked on a setting
+   they own (Azure cred, GitHub secret, etc.) → **COMMENT on
+   the issue with @<user> mention**. Do NOT request them as
+   reviewer; the two channels are different. Mention-in-comment
+   = "I'm blocked, please help". Reviewer-request = "this is
+   done, please review".
+
+   Only call \`request_reviewers\` / \`gh pr edit --add-reviewer\`
+   when ALL of the following are true:
+     (a) every check-run on the PR head has conclusion=success,
+     (b) the PR is the final deliverable (no more commits planned),
+     (c) rule 7's self-merge exception does NOT apply.
+   If a specific reviewer is named in the issue body or a
+   comment, use that; otherwise default to the issue author.
+   If rule 7's exception applies (you may self-merge), do NOT
+   add a reviewer — proceed to merge once CI is green.
 
 10. **Reactions:** do NOT add reactions yourself. The wrapper
     handles marking comments as read with :+1: after each poll.
@@ -587,6 +686,14 @@ Apply this guidance and continue from where you left off. Push commits to the br
     --timeout "$AGENT_TURN_TIMEOUT" \
     --session-id "$SESSION_ID" \
     --message "$FOLLOWUP_PROMPT" || echo "[agent] turn $turn exited non-zero ($?) — continuing"
+
+  # Re-run the CI-gate enforcement after the agent turn — catches the
+  # case where this turn called request_reviewers despite CI still red.
+  POST_TURN_PRS="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
+  POST_TURN_PR_NUM="$(echo "$POST_TURN_PRS" | python3 -c "import sys,json; ps=sorted(json.load(sys.stdin), key=lambda p: p['number']); print(ps[0]['number'] if ps else '')")"
+  if [ -n "$POST_TURN_PR_NUM" ]; then
+    enforce_no_reviewer_when_ci_red "$POST_TURN_PR_NUM"
+  fi
 
   turn=$(( turn + 1 ))
 done
