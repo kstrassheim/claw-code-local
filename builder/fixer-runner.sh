@@ -899,6 +899,52 @@ $BRANCH_INSTRUCTION
     Then stop your turn. The wrapper will let you reply when the
     user answers.
 
+14. **If the intent is ambiguous, contradictory, or surprising,
+    ASK before acting.** The bot is good at executing well-scoped
+    tasks; it is bad at silently picking between equally-valid
+    interpretations. When the issue body could reasonably be read
+    in more than one way, or when fulfilling the literal request
+    would conflict with conventions in this repo / produce a
+    surprising result, do NOT pick an interpretation and proceed
+    — @-mention \`@$ISSUE_AUTHOR\` with the specific ambiguity.
+
+    Triggers that should make you stop and ask:
+      - Vague action verbs with no concrete target: \"improve\",
+        \"fix\", \"clean up\", \"make X better/faster/safer\",
+        \"update\" — ask what specifically and what success
+        looks like
+      - Conflicting requirements: the request would break an
+        existing test, lower an existing guarantee, contradict
+        an existing pattern, or undo recent work
+      - Unusual / anti-pattern-looking asks: a request that, at
+        face value, looks like it would damage the codebase
+        (e.g., disable a safety check, introduce a known
+        anti-pattern, ship something obviously broken) — do
+        NOT assume malice or stupidity; assume the user has a
+        non-obvious reason and ask what it is
+      - Multiple equally-defensible scopes: \"add tests\" could
+        mean unit, integration, E2E, snapshot, mutation,
+        property-based — ask which
+      - Implicit choices you cannot derive: choice of library /
+        framework / language / pattern when more than one is
+        plausible
+      - Anything you find yourself rationalising in your own
+        chain-of-thought as \"I'll just assume they meant Y\" —
+        that rationalisation is the signal you should ask instead
+
+    The cost of asking once is one short comment + a wait for
+    reply. The cost of guessing wrong is: a PR that misses the
+    point, a CI cycle (or several) that does not measure what
+    the user wanted, and a round of cleanup. Asking is cheaper
+    when in doubt.
+
+    Counter-rule (to keep this from getting noisy): do NOT ask
+    about details a competent engineer in this repo would not
+    bother clarifying — file naming, internal helper names,
+    minor refactor style, where to place a new file when the
+    convention is obvious from neighbouring files, etc. Make
+    those calls yourself.
+
 Begin."
 
 echo "[turn 1] initial agent invocation"
