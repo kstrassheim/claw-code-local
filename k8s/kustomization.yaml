@@ -24,4 +24,4 @@ resources:
 images:
   - name: claw-code-local
     newName: mainpi.local:30500/openclaw/claw-code-local
-    newTag: v2026.5.12.35
+    newTag: v2026.5.12.36
