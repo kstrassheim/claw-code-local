@@ -580,8 +580,8 @@ $BRANCH_INSTRUCTION
    they own (Azure cred, GitHub secret, etc.) → **COMMENT on
    the issue with @<user> mention**. Do NOT request them as
    reviewer; the two channels are different. Mention-in-comment
-   = "I'm blocked, please help". Reviewer-request = "this is
-   done, please review".
+   = \"I'm blocked, please help\". Reviewer-request = \"this is
+   done, please review\".
 
    Only call \`request_reviewers\` / \`gh pr edit --add-reviewer\`
    when ALL of the following are true:
