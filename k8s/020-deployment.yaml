@@ -207,6 +207,9 @@ spec:
             - name: skill-issue-watcher
               mountPath: /home/node/.openclaw/workspace/skills/issue-watcher/SKILL.md
               subPath: SKILL.md
+            - name: skill-tester
+              mountPath: /home/node/.openclaw/workspace/skills/tester/SKILL.md
+              subPath: SKILL.md
           resources:
             requests:
               cpu: 600m
@@ -228,6 +231,9 @@ spec:
         - name: skill-issue-watcher
           configMap:
             name: openclaw-skill-issue-watcher
+        - name: skill-tester
+          configMap:
+            name: openclaw-skill-tester
         - name: config-template
           configMap:
             name: openclaw-config-template
