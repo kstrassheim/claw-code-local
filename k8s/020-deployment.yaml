@@ -118,6 +118,8 @@ spec:
               # then NOT touched by fsGroup, leaving the in-pod uid 1000
               # unable to write AGENTS.md and friends into it).
               mkdir -p /home/node/.openclaw/workspace
+              mkdir -p /home/node/.openclaw/workspace/skills/developer
+              mkdir -p /home/node/.openclaw/workspace/skills/tester
               chown -R 1000:1000 /home/node/.openclaw
               chmod -R u+rwX,g+rwX /home/node/.openclaw
           volumeMounts:
@@ -194,18 +196,18 @@ spec:
             - name: tools-md
               mountPath: /home/node/.openclaw/workspace/TOOLS.md
               subPath: TOOLS.md
-            # issue-watcher chat skill — drives the kubectl toggle
-            # commands. ConfigMap source is in 050-issue-watcher.yaml,
-            # so git owns the SKILL.md text and changes flow through
-            # ArgoCD. Pod restart required to pick up subPath updates.
+            # `developer` chat skill — drives the kubectl toggle
+            # commands for the issue-fixer subsystem. ConfigMap source
+            # is in 050-issue-watcher.yaml (the CronJob name stays
+            # `issue-watcher`, but the user-facing skill name is
+            # `developer`). Changes flow through ArgoCD; pod restart
+            # required to pick up subPath updates.
             # Mount path is workspace/skills/ (NOT plugin-skills/) —
             # openclaw's loadWorkspaceSkillEntries scans <workspaceDir>/
             # skills/, and plugin-skills/ is reserved for installed
-            # plugin extensions (the browser-automation symlink there
-            # is a leftover from the browser extension's auto-install,
-            # not a workspace-skill registration path).
-            - name: skill-issue-watcher
-              mountPath: /home/node/.openclaw/workspace/skills/issue-watcher/SKILL.md
+            # plugin extensions.
+            - name: skill-developer
+              mountPath: /home/node/.openclaw/workspace/skills/developer/SKILL.md
               subPath: SKILL.md
             - name: skill-tester
               mountPath: /home/node/.openclaw/workspace/skills/tester/SKILL.md
@@ -228,9 +230,9 @@ spec:
         - name: tools-md
           configMap:
             name: openclaw-tools-md
-        - name: skill-issue-watcher
+        - name: skill-developer
           configMap:
-            name: openclaw-skill-issue-watcher
+            name: openclaw-skill-developer
         - name: skill-tester
           configMap:
             name: openclaw-skill-tester
