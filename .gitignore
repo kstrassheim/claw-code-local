@@ -1,0 +1,23 @@
+# Python bytecode caches generated when builder/*.py files get
+# `python -m py_compile`'d or imported during local development.
+# Re-generated on every interpreter run, never useful to commit.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Common virtualenv / dependency directories developers create
+# locally next to the per-MCP source under builder/.
+.venv/
+venv/
+env/
+
+# Editor / IDE state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
