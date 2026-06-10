@@ -421,6 +421,36 @@ sed -i \
   -e "s|__DRAFTS_DIR__|$DRAFTS_DIR|g" \
   "$PROMPT_FILE"
 
+# Prepend the bot's persona (IDENTITY.md) and voice (SOUL.md) so they
+# are in this turn's context without an extra tool call. Done via file
+# concatenation (not sed) because IDENTITY/SOUL bodies can contain |,
+# &, / and other sed-special characters.
+PROMPT_FILE_FULL="$(mktemp -t tester-prompt-full.XXXXXX)"
+{
+  echo "## Your identity & voice"
+  echo
+  echo "The runtime mounts your persona at \`workspace/IDENTITY.md\` and your"
+  echo "voice at \`workspace/SOUL.md\`. They are inlined below so you have"
+  echo "them in this turn's context."
+  echo
+  echo "When you write text a human will read — issue draft bodies, ASK"
+  echo "questions in commit-comments, the final stdout summary — use this"
+  echo "voice. The role rules below (no commits, no PRs, draft schema,"
+  echo "PHASE 1-5) still bind; they describe **what** to do."
+  echo "IDENTITY.md / SOUL.md describe **how to sound**."
+  echo
+  echo "### workspace/IDENTITY.md"
+  cat "$HOME/.openclaw/workspace/IDENTITY.md" 2>/dev/null || echo "(IDENTITY.md unreadable)"
+  echo
+  echo "### workspace/SOUL.md"
+  cat "$HOME/.openclaw/workspace/SOUL.md" 2>/dev/null || echo "(SOUL.md unreadable)"
+  echo
+  echo "---"
+  echo
+  cat "$PROMPT_FILE"
+} > "$PROMPT_FILE_FULL"
+mv "$PROMPT_FILE_FULL" "$PROMPT_FILE"
+
 # Remember where the log was before the agent runs — used by the
 # post-agent fallback to extract just THIS run's MEDIA: lines for
 # drafts that didn't fill in media[].

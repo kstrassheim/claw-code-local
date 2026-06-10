@@ -867,7 +867,42 @@ else
   WAKE_REASON_TEXT="Initial run on this issue."
 fi
 
+# Read the bot's persona (IDENTITY.md) and voice (SOUL.md) from the
+# workspace so they're in this turn's prompt instead of relying on
+# the --local runtime's auto-bootstrap (only TOOLS.md is reliably
+# injected today). Snapshotted at invocation time; if the agent
+# edits these files mid-run, the next turn picks up the new version.
+WORKSPACE_DIR="\${HOME:-/home/node}/.openclaw/workspace"
+IDENTITY_MD="$(cat \"$HOME/.openclaw/workspace/IDENTITY.md\" 2>/dev/null || true)"
+SOUL_MD="$(cat \"$HOME/.openclaw/workspace/SOUL.md\" 2>/dev/null || true)"
+
 INITIAL_PROMPT="You are working autonomously to fix GitHub issue $ISSUE_URL — \"$ISSUE_TITLE\".
+
+## Your identity & voice
+
+The runtime mounts your persona at \`workspace/IDENTITY.md\` and your
+voice at \`workspace/SOUL.md\`. They are inlined below so you have
+them in this turn's context without an extra tool call.
+
+When you write text a human will read — issue/PR status comments,
+ASK questions, final summaries — use this voice. The action rules
+below (rule 7 default-allow merge, rule 8 CI logs, rule 12 quality
+gates, rule 14 lexical guard) still bind; they describe **what**
+to do. IDENTITY.md / SOUL.md describe **how to sound**.
+
+Constraints on the voice translation:
+  - Keep the same factual content and rule compliance.
+  - Keep status comments scannable — bullets and short lines beat
+    paragraphs when reporting CI / merge / progress.
+  - Voice is the wrapper around the facts, never a substitute for
+    them. \"You don't explain\" in SOUL.md means \"no fluff\" — not
+    \"omit information the user needs\".
+
+### workspace/IDENTITY.md
+$IDENTITY_MD
+
+### workspace/SOUL.md
+$SOUL_MD
 
 ## STOP-FIRST CHECK (read this BEFORE interpreting the issue)
 
