@@ -309,6 +309,7 @@ The deploy workflow `kubectl apply`s every secret listed here as a
 | `BOT_GITHUB_TOKEN` | Sealed as `GITHUB_TOKEN`; PAT the agent uses for git/gh operations. |
 | `GITLAB_TOKEN`, `GITLAB_LOCAL_TOKEN` | GitLab.com and self-hosted GitLab PATs. |
 | `ENTRA_TENANT_ID`, `ENTRA_USERNAME`, `ENTRA_PASSWORD`, `ENTRA_TOTP_SEED` | Azure / Entra ID sign-in for the TOTP helper. |
+| `TESTER_ALLOWED_HOSTNAMES` | Optional. Comma-separated LAN hostnames the tester's browser plugin may navigate to (private-network deploy URLs). Injected into `browser.ssrfPolicy.allowedHostnames` at pod start; kept in the Secret so the internal DNS domain stays out of this public repo. |
 
 Missing optional secrets are tolerated: openclaw config strips Mistral
 or MiniMax when its key is empty, and individual MCP servers fail

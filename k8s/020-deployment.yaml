@@ -146,6 +146,17 @@ spec:
                   name: openclaw-secrets
                   key: MINIMAX_API_KEY
                   optional: true
+            # Comma-separated hostnames the tester's browser plugin is
+            # allowed to reach on the private network (RFC1918). Kept out
+            # of the public config template; injected by render-config.sh
+            # into browser.ssrfPolicy.allowedHostnames. optional:true so
+            # the pod still boots when the key is absent.
+            - name: TESTER_ALLOWED_HOSTNAMES
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: TESTER_ALLOWED_HOSTNAMES
+                  optional: true
           volumeMounts:
             - name: config-template
               mountPath: /template

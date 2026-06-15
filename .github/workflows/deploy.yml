@@ -215,6 +215,11 @@ jobs:
           GITLAB_TOKEN:                    ${{ secrets.GITLAB_TOKEN }}
           GITLAB_LOCAL_TOKEN:              ${{ secrets.GITLAB_LOCAL_TOKEN }}
           TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Comma-separated LAN hostnames the tester's browser plugin may
+          # reach (private-network deploy URLs). Not a credential, but kept
+          # in the Secret rather than the public config template so the
+          # internal DNS domain stays out of git.
+          TESTER_ALLOWED_HOSTNAMES:        ${{ secrets.TESTER_ALLOWED_HOSTNAMES }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace claw-code-local \
@@ -228,6 +233,7 @@ jobs:
             --from-literal=ENTRA_TOTP_SEED="$ENTRA_TOTP_SEED" \
             --from-literal=GITLAB_TOKEN="$GITLAB_TOKEN" \
             --from-literal=GITLAB_LOCAL_TOKEN="$GITLAB_LOCAL_TOKEN" \
+            --from-literal=TESTER_ALLOWED_HOSTNAMES="$TESTER_ALLOWED_HOSTNAMES" \
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
             --from-literal=GOOGLE_APPLICATION_CREDENTIALS="/etc/openclaw/secrets/gcp-service-account.json" \
             --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \

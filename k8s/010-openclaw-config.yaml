@@ -155,6 +155,31 @@ data:
       fs.writeFileSync("/tmp/openclaw.json", JSON.stringify(c, null, 2));
     '
 
+    # Inject the browser SSRF allowlist from the secret-provided host list so
+    # the tester can drive the browser plugin against private-network (RFC1918)
+    # deploy URLs. The hostnames are kept OUT of this public config template —
+    # the value arrives via the openclaw-secrets Secret (TESTER_ALLOWED_HOSTNAMES,
+    # comma-separated). `allowedHostnames` (exact match) is the only knob that
+    # exempts a host from the private-network block — `hostnameAllowlist` is a
+    # restrictive name filter and does NOT grant private-IP access. Link-local
+    # and cloud-metadata addresses stay blocked even for allowlisted hosts.
+    if [ -n "${TESTER_ALLOWED_HOSTNAMES:-}" ]; then
+      TESTER_ALLOWED_HOSTNAMES="$TESTER_ALLOWED_HOSTNAMES" node -e '
+        const fs = require("fs");
+        const c = JSON.parse(fs.readFileSync("/tmp/openclaw.json", "utf8"));
+        const hosts = (process.env.TESTER_ALLOWED_HOSTNAMES || "")
+          .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+        if (hosts.length) {
+          c.browser = c.browser || {};
+          c.browser.ssrfPolicy = c.browser.ssrfPolicy || {};
+          const existing = c.browser.ssrfPolicy.allowedHostnames || [];
+          c.browser.ssrfPolicy.allowedHostnames = Array.from(new Set([...existing, ...hosts]));
+          console.log("Injected browser.ssrfPolicy.allowedHostnames: " + c.browser.ssrfPolicy.allowedHostnames.join(", "));
+        }
+        fs.writeFileSync("/tmp/openclaw.json", JSON.stringify(c, null, 2));
+      '
+    fi
+
     PERSISTENT_DIR=/home/node/.openclaw
     PERSISTENT_FILE=$PERSISTENT_DIR/openclaw.json
     mkdir -p "$PERSISTENT_DIR"
