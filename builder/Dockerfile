@@ -150,12 +150,14 @@ RUN ARCH=$(dpkg --print-architecture) \
  && terraform version | head -1 \
  && terraform-mcp-server --version 2>&1 | head -1 || true
 
-# Chromium
+# Chromium. libnss3-tools provides `certutil`, used at pod start to trust the
+# internal CA in Chromium's NSS store (see render-config.sh) so the tester can
+# open internal HTTPS deploy URLs without ERR_CERT_AUTHORITY_INVALID.
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       chromium fonts-liberation \
-      libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+      libnss3 libnss3-tools libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
       libgbm1 libasound2 libxshmfence1 \
  && rm -rf /var/lib/apt/lists/* \
  && chromium --version

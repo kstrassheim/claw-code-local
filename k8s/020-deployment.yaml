@@ -108,6 +108,16 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+          env:
+            # Internal CA PEM (optional). When present it is imported into the
+            # Chromium NSS store below so the tester trusts internal HTTPS
+            # ingresses. Absent → skipped, no behaviour change.
+            - name: INTERNAL_CA_CERT
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: INTERNAL_CA_CERT
+                  optional: true
           command:
             - /bin/sh
             - -c
@@ -122,9 +132,28 @@ spec:
               mkdir -p /home/node/.openclaw/workspace/skills/tester
               chown -R 1000:1000 /home/node/.openclaw
               chmod -R u+rwX,g+rwX /home/node/.openclaw
+
+              # Trust the internal CA in Chromium's NSS store ($HOME/.pki/nssdb,
+              # shared with the main container via the `pki` emptyDir) so the
+              # tester can open internal HTTPS deploy URLs without
+              # ERR_CERT_AUTHORITY_INVALID. Best-effort: never blocks startup.
+              if [ -n "${INTERNAL_CA_CERT:-}" ] && [ "${INTERNAL_CA_CERT}" != "null" ]; then
+                mkdir -p /home/node/.pki/nssdb
+                printf '%s\n' "$INTERNAL_CA_CERT" > /home/node/.pki/internal-ca.crt
+                certutil -d sql:/home/node/.pki/nssdb -A -n internal-ca -t "C,," \
+                  -i /home/node/.pki/internal-ca.crt \
+                  && echo "Imported internal CA into Chromium NSS store" \
+                  || echo "WARN: internal CA import failed — continuing without it"
+                chown -R 1000:1000 /home/node/.pki
+                chmod -R u+rwX,g+rwX /home/node/.pki
+              else
+                echo "INTERNAL_CA_CERT not set — skipping internal CA trust"
+              fi
           volumeMounts:
             - name: workspace
               mountPath: /home/node/.openclaw
+            - name: pki
+              mountPath: /home/node/.pki
         # Reads the canonical template from /template, decides whether
         # MiniMax is reachable based on $MINIMAX_API_KEY, strips it with
         # node if not, and writes the rendered result back into the live
@@ -204,6 +233,10 @@ spec:
             # identity/) didn't persist.
             - name: workspace
               mountPath: /home/node/.openclaw
+            # Chromium NSS trust store, populated by the fix-perms init
+            # container (internal CA) so the tester trusts internal HTTPS.
+            - name: pki
+              mountPath: /home/node/.pki
             - name: tools-md
               mountPath: /home/node/.openclaw/workspace/TOOLS.md
               subPath: TOOLS.md
@@ -238,6 +271,10 @@ spec:
         - name: workspace
           persistentVolumeClaim:
             claimName: openclaw-workspace
+        # Chromium NSS trust store ($HOME/.pki), shared between the fix-perms
+        # init container (which imports the internal CA) and the main container.
+        - name: pki
+          emptyDir: {}
         - name: tools-md
           configMap:
             name: openclaw-tools-md
