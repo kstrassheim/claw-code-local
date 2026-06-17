@@ -104,24 +104,30 @@ def kubectl_exec_capture(namespace: str, pod: str, *cmd: str, timeout: int = 15)
 
 
 def list_locked_repos(namespace: str, pod: str) -> set[str]:
-    """Return set of repo full_names whose lock dir under
-    ~/.openclaw/.fixer-locks/<owner>__<name>/ exists and is newer than
-    TTL_SECONDS. Each lock corresponds to one in-flight fixer (per-repo
-    cap is 1, because the on-disk checkout can't be shared)."""
+    """Return set of repo full_names with a LIVE in-flight fixer. A lock dir
+    under ~/.openclaw/.fixer-locks/<owner>__<name>/ counts as held only if it
+    is newer than TTL_SECONDS AND its owner PID is still alive in this pod.
+    An orphaned lock (owner died without its EXIT trap firing — e.g. the pod
+    was redeployed mid-fix) is NOT counted, so the repo is eligible again
+    immediately instead of waiting out the TTL. The spawned fixer-runner makes
+    the same stale check before claiming, so this only governs scheduling."""
     # `find` is faster than a recursive ls; the lock-set is small
     # (≤ one dir per repo the bot is a collaborator on). Lock
     # dirs are siblings of the project tree (NOT inside it — a
-    # `.fixer.lock` inside the project dir broke `git clone`).
+    # `.fixer.lock` inside the project dir broke `git clone`). This script
+    # runs INSIDE the openclaw pod, so `kill -0` sees the fixer PIDs.
     script = (
         "set -eu; root=$HOME/.openclaw/.fixer-locks; "
         "[ -d $root ] || exit 0; "
         f"now=$(date +%s); ttl={TTL_SECONDS}; "
         "for lock in $(find $root -maxdepth 1 -mindepth 1 -type d 2>/dev/null); do "
-        "  age=$(( now - $(stat -c %Y $lock) )); "
-        "  if [ $age -lt $ttl ]; then "
+        "  age=$(( now - $(stat -c %Y \"$lock\") )); "
+        "  [ $age -lt $ttl ] || continue; "  # older than TTL → stale, not held
+        "  pid=$(awk 'NR==1{print $1}' \"$lock/owner\" 2>/dev/null || true); "
+        # owner PID recorded but no longer alive → orphaned lock, not held
+        "  if [ -n \"$pid\" ] && ! kill -0 \"$pid\" 2>/dev/null; then continue; fi; "
         # Lock dir name is owner__name → emit owner/name
-        "    basename $lock | sed 's|__|/|'; "
-        "  fi; "
+        "  basename \"$lock\" | sed 's|__|/|'; "
         "done"
     )
     rc, out, err = kubectl_exec_capture(namespace, pod, "bash", "-c", script)
