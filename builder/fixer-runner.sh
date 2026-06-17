@@ -76,9 +76,27 @@ CI_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-fingerprint"
 
 mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$ISSUE_STATE_DIR" "$(dirname "$PROJECT_DIR")"
 
+# Per-repo lock. A fixer killed without its EXIT trap firing (SIGKILL,
+# pod restart, lifetime cap) leaves an orphaned lock dir. The planner
+# (heartbeat-issue-tick) treats locks older than its TTL as stale and keeps
+# re-spawning us, so a plain mkdir-or-abort here would deadlock the repo
+# forever. Reclaim the lock when it's stale: older than the TTL, or its owner
+# PID is no longer alive in this pod.
+LOCK_TTL="${FIXER_LOCK_TTL:-${HEARTBEAT_TTL_SECONDS:-3600}}"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "[$(date -Iseconds)] lock held for $REPO; aborting fixer for #$ISSUE_NUM" >> "$LOG_FILE"
-  exit 0
+  lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_DIR" 2>/dev/null || date +%s) ))
+  lock_pid="$(awk 'NR==1{print $1}' "$LOCK_DIR/owner" 2>/dev/null || true)"
+  if [ "$lock_age" -ge "$LOCK_TTL" ] || { [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; }; then
+    echo "[$(date -Iseconds)] reclaiming stale lock for $REPO (age=${lock_age}s owner=${lock_pid:-?}); proceeding with #$ISSUE_NUM" >> "$LOG_FILE"
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo "[$(date -Iseconds)] lock race after reclaim for $REPO; aborting fixer for #$ISSUE_NUM" >> "$LOG_FILE"
+      exit 0
+    fi
+  else
+    echo "[$(date -Iseconds)] lock held for $REPO (age=${lock_age}s, owner live); aborting fixer for #$ISSUE_NUM" >> "$LOG_FILE"
+    exit 0
+  fi
 fi
 echo "$BASHPID $(date -Iseconds) issue=$ISSUE_NUM" > "$LOCK_DIR/owner"
 
