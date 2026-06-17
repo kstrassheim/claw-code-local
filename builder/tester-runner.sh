@@ -359,20 +359,40 @@ You're now logged in. Test the page generically:
   - Navigate around (top-level routes, menu items)
   - Try forms (fill with plausible test data, submit)
   - Click buttons / links
-  - Watch the browser console for JS errors
-  - Watch the network tab for 4xx / 5xx responses
 
-For each DISTINCT error class (don't open 20 drafts for the same
-console message repeating on every page):
+### JavaScript console + page errors — check on EVERY page
+
+A page can return HTTP 200 and still be broken: a blank/white screen, a
+half-rendered view, or a control that silently does nothing is almost always
+a JavaScript error. So **actively read the console — don't just glance at the
+page**:
+
+  - After EACH navigation / route change, use the browser plugin to pull the
+    console output AND uncaught page errors (console messages + `pageerror` /
+    unhandled exceptions). Query it explicitly every time — errors are NOT
+    surfaced to you automatically, and a clean-looking screenshot does not mean
+    the console is clean.
+  - Treat as a finding ANY of: a console `error`-level message; an uncaught
+    exception; a failed module/chunk/script/stylesheet load; `Uncaught
+    SyntaxError` / `Unexpected token '<'` (HTML returned where JS/JSON was
+    expected — a classic broken-asset-path symptom); a CSP or CORS failure;
+    a failed `fetch`/XHR.
+  - A blank or visually-empty page is itself a finding: open the console,
+    capture the first error, and screenshot it — do not pass it as "loads OK".
+  - Also watch the network panel for 4xx / 5xx responses.
+
+For each DISTINCT error class (don't open 20 drafts for the same console
+message repeating on every page):
   - Take a screenshot. Note its `mediaPath`.
   - For HTTP errors: try to pull the corresponding cloud-side log
     via `az monitor app-insights query` / `kubectl logs` / similar
     (use `$AZURE_CONFIG_DIR` so parallel testers don't fight over
     the same az profile)
   - Stage __DRAFTS_DIR__/04-error-<n>.json:
-    - title: short, error-class summary
-    - body: URL path that triggered it, console excerpt, network
-      excerpt, cloud-log excerpt if available. Do NOT mention the
+    - title: short, error-class summary (include the key console text, e.g.
+      the exception name/message, so repeats of the same error collapse)
+    - body: URL path that triggered it, the **exact** console error text,
+      network excerpt, cloud-log excerpt if available. Do NOT mention the
       screenshot in the body — the wrapper attaches it.
     - assigneeRole: "BOT"
     - media: [{"path": "<mediaPath>", "alt": "<short error description>"}]
@@ -555,11 +575,40 @@ if [ -n "$RUN_MEDIA" ]; then
 fi
 FALLBACK_USED=""
 
+# Dedup guard. The tester is stateless per run (it does NOT read existing
+# issues while testing — see "YOUR ROLE"), so without this a bug that persists
+# across commits gets re-filed on every run. Collect the normalized titles of
+# currently-OPEN `tester`-labeled issues; skip any draft whose title matches.
+# (The issue-solver closes issues it fixes, so a closed one CAN be re-filed if
+# it regresses — we only dedup against open ones.)
+EXISTING_TITLES="$(curl -fsSL \
+  -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+  "$GH_API/repos/$REPO/issues?state=open&labels=tester&per_page=100" 2>/dev/null \
+  | python3 -c "
+import sys, json
+try: data = json.load(sys.stdin)
+except Exception: data = []
+for i in data if isinstance(data, list) else []:
+    if 'pull_request' in i: continue
+    print(' '.join((i.get('title') or '').lower().split()))
+" 2>/dev/null)"
+
 CREATED_ISSUES=()
 DRAFT_COUNT=0
 for draft in "$DRAFTS_DIR"/*.json; do
   [ -f "$draft" ] || continue
   DRAFT_COUNT=$((DRAFT_COUNT + 1))
+
+  # Skip drafts that duplicate an already-open tester issue (normalized title).
+  dtitle="$(python3 -c "
+import sys, json
+try: print(' '.join((json.load(open('$draft')).get('title') or '').lower().split()))
+except Exception: pass
+" 2>/dev/null)"
+  if [ -n "$dtitle" ] && printf '%s\n' "$EXISTING_TITLES" | grep -qxF "$dtitle"; then
+    echo "[tester] skipping duplicate — open tester issue already exists: $dtitle"
+    continue
+  fi
 
   # Upload any screenshots referenced in draft.media[] to the orphan
   # `tester-screenshots` branch and rewrite the draft body to link
