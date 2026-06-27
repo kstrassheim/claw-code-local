@@ -6,8 +6,8 @@
 # Tag matches https://github.com/openclaw/openclaw releases. The deploy /
 # validate workflows pull ghcr.io/openclaw/openclaw:<this minus v-prefix>
 # and re-tag it locally as openclaw-base:<this with v-prefix>.
-OPENCLAW_UPSTREAM=v2026.6.8
-OPENCLAW_VERSION=v2026.6.8.0
+OPENCLAW_UPSTREAM=v2026.6.10
+OPENCLAW_VERSION=v2026.6.10.0
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
