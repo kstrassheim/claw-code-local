@@ -175,6 +175,12 @@ spec:
                   name: openclaw-secrets
                   key: MINIMAX_API_KEY
                   optional: true
+            - name: MOONSHOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: MOONSHOT_API_KEY
+                  optional: true
             # Comma-separated hostnames the tester's browser plugin is
             # allowed to reach on the private network (RFC1918). Kept out
             # of the public config template; injected by render-config.sh
