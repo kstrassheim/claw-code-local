@@ -226,6 +226,13 @@ jobs:
           # can open internal deploy URLs without ERR_CERT_AUTHORITY_INVALID.
           # Optional; kept in the Secret so the internal CA stays out of git.
           INTERNAL_CA_CERT:                ${{ secrets.INTERNAL_CA_CERT }}
+          # Comma-separated `owner/repo` list used to SEED the bot's
+          # allowed-projects list the first time a workspace volume comes up.
+          # After that the list belongs to the `projects` chat skill and lives
+          # on the volume, and this value is ignored — so a revoke is never
+          # undone by a deploy. Optional: an empty list means the bot starts
+          # permitted on nothing, which is the correct default.
+          PROJECTS_ALLOWED_BOOTSTRAP:      ${{ secrets.PROJECTS_ALLOWED_BOOTSTRAP }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace claw-code-local \
@@ -245,5 +252,6 @@ jobs:
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
             --from-literal=GOOGLE_APPLICATION_CREDENTIALS="/etc/openclaw/secrets/gcp-service-account.json" \
             --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+            --from-literal=PROJECTS_ALLOWED_BOOTSTRAP="$PROJECTS_ALLOWED_BOOTSTRAP" \
             -o yaml \
           | kubectl apply -f -

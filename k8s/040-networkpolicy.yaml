@@ -44,5 +44,41 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+    # The planning store. Scoped to the database pod rather than opened as a
+    # bare port: a NetworkPolicy egress rule with only `ports` and no `to`
+    # permits that port to ANY destination, which would quietly turn a
+    # database allowance into general outbound access on 27017.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: claw-code-mongodb
+      ports:
+        - protocol: TCP
+          port: 27017
   policyTypes:
     - Egress
+---
+# The database accepts connections from this namespace and nowhere else.
+#
+# Without an ingress policy the pod is reachable by anything in the cluster
+# that can route to it, and it runs without authentication — the credentials
+# story here is "only the bot can reach the port", so this policy IS the
+# authentication. If that ever stops being true, add a user before removing
+# this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongodb-ingress
+  namespace: claw-code-local
+spec:
+  podSelector:
+    matchLabels:
+      app: claw-code-mongodb
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 27017
+  policyTypes:
+    - Ingress

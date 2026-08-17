@@ -176,6 +176,48 @@ spec:
               mountPath: /home/node/.openclaw
             - name: pki
               mountPath: /home/node/.pki
+        # Seeds the allowed-projects list the FIRST time a workspace volume
+        # comes up, and never again.
+        #
+        # After that first boot the list belongs to the `projects` chat skill
+        # and lives on the volume, so PROJECTS_ALLOWED_BOOTSTRAP is ignored on
+        # every subsequent start. That is the whole point: if a deploy re-seeded
+        # the list, revoking a repository would last only until the next
+        # rollout, and a permission that comes back on its own is not a
+        # permission boundary.
+        #
+        # Runs as uid 1000 so the list it writes is owned by the account that
+        # has to rewrite it later from chat.
+        - name: seed-allowed-projects
+          image: claw-code-local
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 1000
+          env:
+            - name: PROJECTS_ALLOWED_BOOTSTRAP
+              valueFrom:
+                secretKeyRef:
+                  name: openclaw-secrets
+                  key: PROJECTS_ALLOWED_BOOTSTRAP
+                  optional: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Fails CLOSED on a missing binary: an image without the
+              # permission CLI is not the image we think it is, and starting
+              # anyway would leave every subsystem deciding for itself what it
+              # may touch.
+              if [ ! -x /usr/local/bin/project-allow ]; then
+                echo "FATAL: project-allow missing from the image — refusing to start" >&2
+                exit 1
+              fi
+              # `bootstrap` is a no-op when a list already exists, and makes no
+              # network call, so a platform outage can never gate the rollout.
+              /usr/local/bin/project-allow bootstrap
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/node/.openclaw
         # Reads the canonical template from /template, decides whether
         # MiniMax is reachable based on $MINIMAX_API_KEY, strips it with
         # node if not, and writes the rendered result back into the live
@@ -251,6 +293,26 @@ spec:
                   name: openclaw-config-template
                   key: OPENCLAW_IMAGE
                   optional: true
+            # Planning store. An unset or unreachable store is a SUPPORTED
+            # state, not an error: documents spool to the workspace volume and
+            # flush when the database comes back, so the solver never waits on
+            # it and never fails because of it.
+            - name: PLANNING_MONGO_URI
+              value: "mongodb://claw-code-mongodb:27017"
+            - name: PLANNING_MONGO_DB
+              value: "planning"
+            # The host segment of every planning document key. Must match what
+            # the runners pass to `planning-record --host`, or the delivery
+            # sweep looks up keys nothing ever wrote and silently records
+            # nothing at all.
+            - name: PLANNING_HOST
+              value: "github"
+            # How many agent runs may hold a model slot at once, across the
+            # solver, tester and reviewer. The chat bot is deliberately NOT
+            # gated by this — a user asking a question must never queue behind
+            # an hour-long autonomous run.
+            - name: MAX_AGENT_SLOTS
+              value: "2"
           volumeMounts:
             # Mount the PVC at the WHOLE openclaw state directory, not just
             # the `workspace/` subdir. Previously openclaw.json, identity/,
@@ -284,6 +346,15 @@ spec:
             - name: skill-tester
               mountPath: /home/node/.openclaw/workspace/skills/tester/SKILL.md
               subPath: SKILL.md
+            - name: skill-reviewer
+              mountPath: /home/node/.openclaw/workspace/skills/reviewer/SKILL.md
+              subPath: SKILL.md
+            - name: skill-projects
+              mountPath: /home/node/.openclaw/workspace/skills/projects/SKILL.md
+              subPath: SKILL.md
+            - name: skill-planning
+              mountPath: /home/node/.openclaw/workspace/skills/planning/SKILL.md
+              subPath: SKILL.md
           resources:
             requests:
               cpu: 600m
@@ -312,6 +383,15 @@ spec:
         - name: skill-tester
           configMap:
             name: openclaw-skill-tester
+        - name: skill-reviewer
+          configMap:
+            name: openclaw-skill-reviewer
+        - name: skill-projects
+          configMap:
+            name: openclaw-skill-projects
+        - name: skill-planning
+          configMap:
+            name: openclaw-skill-planning
         - name: config-template
           configMap:
             name: openclaw-config-template

@@ -5,6 +5,7 @@ namespace: claw-code-local
 resources:
   - 000-namespace-and-config.yaml
   - 005-pvc.yaml
+  - 006-mongodb.yaml
   - 010-openclaw-config.yaml
   - 020-deployment.yaml
   - 030-service.yaml
@@ -12,6 +13,8 @@ resources:
   - 050-issue-watcher.yaml
   - 051-tester.yaml
   - 052-reviewer.yaml
+  - 053-projects.yaml
+  - 054-planning.yaml
   - 060-runner-rbac.yaml
   # openclaw-secrets is no longer in git. The Deploy workflow's
   # publish-secrets job `kubectl apply`s it directly each run via
@@ -26,4 +29,4 @@ resources:
 images:
   - name: claw-code-local
     newName: mainpi.local:30500/openclaw/claw-code-local
-    newTag: v2026.7.1.2
+    newTag: v2026.7.1.3

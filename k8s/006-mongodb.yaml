@@ -1,0 +1,154 @@
+---
+# MongoDB — the planning store's backing database.
+#
+# WHY A DATABASE AND NOT THE WORKSPACE VOLUME
+# The planning documents answer questions across stories, sprints and
+# repositories: velocity, burndown, what a sprint committed against what it
+# delivered, whether a story was reworked after shipping. Those are aggregate
+# queries over thousands of small documents. The workspace volume already
+# holds the write-ahead spool, and that is the right place for a spool — but
+# reading a report out of an append-only JSONL file means loading all of it
+# and grouping in Python, which stops being reasonable in the first month.
+#
+# WHY A SEPARATE POD AND ITS OWN VOLUME
+# The database outlives any single version of the bot and must not share a
+# failure domain with it. The agent pod is restarted on every deploy, is the
+# thing most likely to exhaust its memory, and mounts a volume the agent
+# itself can write to. Putting the planning history behind a separate pod with
+# its own claim means a bad image, an OOM kill or a corrupted workspace does
+# not take the sprint history with it.
+#
+# NOT A REPLICA SET. One replica, RWO volume, `Recreate`. This is planning
+# history for one bot, not a transactional system of record: the cost of a
+# short outage is that flushes queue in the spool and drain afterwards, which
+# is exactly the case the store was built to handle. A replica set would add
+# election complexity and two more volumes to protect against an outage that
+# costs nothing.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claw-code-mongodb
+  namespace: claw-code-local
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-data
+  resources:
+    requests:
+      # Planning documents are small (~1 KB) and one per story, work event,
+      # sprint and tested commit. 10Gi is years of history at this bot's rate
+      # and still small enough to sit comfortably on the node.
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claw-code-mongodb
+  namespace: claw-code-local
+  labels:
+    app: claw-code-mongodb
+spec:
+  type: ClusterIP
+  selector:
+    app: claw-code-mongodb
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claw-code-mongodb
+  namespace: claw-code-local
+  labels:
+    app: claw-code-mongodb
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: the volume is ReadWriteOnce, so a rolling
+    # update deadlocks — the new pod waits for a volume the old pod will not
+    # release until the new one is ready. Same reasoning as the agent
+    # Deployment.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: claw-code-mongodb
+  template:
+    metadata:
+      labels:
+        app: claw-code-mongodb
+    spec:
+      # The claim is bound to a local-path volume on datapi, so the pod has to
+      # land there too.
+      nodeSelector:
+        kubernetes.io/hostname: datapi
+      tolerations:
+        - key: data
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      securityContext:
+        # The upstream image runs as uid 999 and needs to own its data
+        # directory. fsGroup hands it the mounted volume without an init
+        # container.
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: Always
+      containers:
+        - name: mongodb
+          image: mongo:7
+          imagePullPolicy: IfNotPresent
+          args:
+            # Bind to every interface so the Service can reach it. The pod is
+            # only reachable inside the namespace — see the NetworkPolicy in
+            # 040-networkpolicy.yaml, which permits exactly the agent and the
+            # CronJobs to open 27017 and nothing else.
+            - "--bind_ip_all"
+            # WiredTiger sizes its cache from the HOST's memory, not the
+            # container limit, so on a large node it reserves far more than
+            # the limit allows and the pod is OOM-killed under load while
+            # appearing to be idle. Pin it well under the limit.
+            - "--wiredTigerCacheSizeGB"
+            - "0.25"
+          env:
+            - name: MONGO_INITDB_DATABASE
+              value: planning
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - --quiet
+                - --eval
+                - "db.adminCommand('ping').ok"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - mongosh
+                - --quiet
+                - --eval
+                - "db.adminCommand('ping').ok"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: claw-code-mongodb
