@@ -579,10 +579,24 @@ USER root
 # as `(A && … && Z) || true`, so one trailing `|| true` swallows a failure
 # ANYWHERE in the chain — which is precisely how a template-less scanner ships
 # unnoticed and then reports a clean scan it never performed. The templates are
-# baked from a PINNED static release tarball rather than fetched with
-# `nuclei -update-templates`, because that resolves the version through a
-# GitHub API call which can silently no-op in CI (exit 0, download nothing).
-# The guards below are hard and unmasked for the same reason.
+# baked at a PINNED tag rather than fetched with `nuclei -update-templates`,
+# because that resolves the version through a GitHub API call which can
+# silently no-op in CI (exit 0, download nothing). The guards below are hard
+# and unmasked for the same reason.
+#
+# THE TEMPLATES AND testssl COME FROM `git clone`, NOT FROM A TARBALL URL.
+# `/archive/refs/tags/<tag>.tar.gz` is generated on demand, and that generation
+# is throttled per source IP — it returns 429 even to an authenticated request,
+# and it does so independently of the ordinary API rate limit. On a runner that
+# shares an egress address with anything else busy, this layer therefore fails
+# with `curl (22) … 429` while every release-asset download in the same build
+# succeeds, which reads like a bad pin and is not one.
+#
+# Retrying does not help: `--retry-delay` OVERRIDES the server's Retry-After,
+# so the five retries all land inside the same throttle window. Cloning a
+# single pinned tag at depth 1 goes through a different backend that is not
+# rate-limited this way, costs about the same bytes, and is just as
+# deterministic — the tag is still the thing being pinned.
 RUN ARCH=$(dpkg --print-architecture) \
  && apt-get update \
  && apt-get install -y --no-install-recommends unzip bsdmainutils dnsutils \
@@ -594,20 +608,16 @@ RUN ARCH=$(dpkg --print-architecture) \
  && mv /tmp/nuclei/nuclei /opt/pentest-bin/nuclei \
  && chmod 0755 /opt/pentest-bin/nuclei \
  && rm -rf /tmp/nuclei.zip /tmp/nuclei \
- && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
-      -o /tmp/nuclei-templates.tar.gz \
-      "https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/v${NUCLEI_TEMPLATES_VERSION}.tar.gz" \
- && mkdir -p /opt/nuclei-templates \
- && tar -xzf /tmp/nuclei-templates.tar.gz -C /opt/nuclei-templates --strip-components=1 \
- && rm /tmp/nuclei-templates.tar.gz \
+ && git -c advice.detachedHead=false clone --depth 1 --quiet \
+      --branch "v${NUCLEI_TEMPLATES_VERSION}" \
+      https://github.com/projectdiscovery/nuclei-templates.git /opt/nuclei-templates \
+ && rm -rf /opt/nuclei-templates/.git \
  && chown -R 1000:1000 /opt/nuclei-templates /opt/pentest-bin \
- && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
-      -o /tmp/testssl.tar.gz \
-      "https://github.com/testssl/testssl.sh/archive/refs/tags/v${TESTSSL_VERSION}.tar.gz" \
- && mkdir -p /opt/testssl \
- && tar -xzf /tmp/testssl.tar.gz -C /opt/testssl --strip-components=1 \
+ && git -c advice.detachedHead=false clone --depth 1 --quiet \
+      --branch "v${TESTSSL_VERSION}" \
+      https://github.com/testssl/testssl.sh.git /opt/testssl \
+ && rm -rf /opt/testssl/.git \
  && chmod 0755 /opt/testssl/testssl.sh \
- && rm /tmp/testssl.tar.gz \
  # Hard guards (no `|| true`): fail the build if either binary is missing or
  # the template tree holds no template at all.
  && test -x /opt/pentest-bin/nuclei \
