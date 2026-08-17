@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from harness import BUILDER, FAKES, TMP_ROOT, load, load_script, temp_env
+from harness import BUILDER, TMP_ROOT, fake_path, load, load_script, temp_env
 
 pa = load("project_allowlist")
 
@@ -263,7 +263,12 @@ class CliTestCase(unittest.TestCase):
                     if not k.startswith(("GITHUB_", "GH_", "PROJECT"))}
         self.env.update({
             "HOME": self.home,
-            "PATH": FAKES + os.pathsep + os.environ.get("PATH", ""),
+            # Copied into the sandbox rather than pointed at in the
+            # checkout: a fake is only a fake if the shell can execute it,
+            # and the execute bit in a checkout is not something a test
+            # should depend on.
+            "PATH": (fake_path(os.path.join(self.home, "bin"))
+                     + os.pathsep + os.environ.get("PATH", "")),
             "FAKE_CURL_LOG": self.curl_log,
         })
 

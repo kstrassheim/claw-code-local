@@ -221,6 +221,29 @@ class ShellTestCase(unittest.TestCase):
         return out
 
 
+def fake_path(into: str) -> str:
+    """Copy the stand-ins into `into` and return it, ready to prepend to PATH.
+
+    ALWAYS COPY, NEVER POINT PATH AT THE FAKES DIRECTORY IN THE CHECKOUT.
+
+    A fake is only a fake if the shell can execute it, and whether the file in
+    the checkout carries its execute bit is a property of git and of whoever
+    cloned it — not something a test should depend on. That bit was recorded
+    as 0644 once: every one of these files came out of a fresh clone
+    non-executable, so on a machine without the real binary installed the
+    lookup found NOTHING, the code under test took its "the tool is not
+    available here" branch, and three tests failed while the rest of the suite
+    passed for reasons that had nothing to do with the fakes.
+
+    `_install` sets the bit on the copy, so the sandbox is correct however the
+    checkout arrived.
+    """
+    os.makedirs(into, exist_ok=True)
+    for name in os.listdir(FAKES):
+        _install(os.path.join(FAKES, name), os.path.join(into, name))
+    return into
+
+
 def _install(src: str, dst: str) -> None:
     """Copy a script into the sandbox with LF endings and the execute bit.
 
