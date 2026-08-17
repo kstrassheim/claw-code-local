@@ -174,10 +174,26 @@ RUN apt-get update \
 # invoked without --build-arg: an empty ARG here would expand to `pymongo==`,
 # which pip rejects, and the whole image would fail on a missing variable
 # rather than on anything to do with the driver.
+#
+# python3-pip is installed HERE rather than assumed. The base image ships a
+# python3 interpreter but no pip, so a bare `pip install` exits 127 — "command
+# not found", which reads as a broken package name rather than a missing tool.
+# The scanner layer further down needs pip and venv too; apt is idempotent, so
+# installing it in both places costs nothing and neither layer depends on the
+# other having run first.
+#
+# Invoked as `python3 -m pip`, not `pip`: Debian's packaging has moved which of
+# pip / pip3 / neither ends up on PATH more than once, and the module form is
+# the spelling that has always worked.
 ARG PYMONGO_VERSION=4.17.0
 USER root
-RUN pip install --no-cache-dir --break-system-packages "pymongo==${PYMONGO_VERSION}" \
- && python3 -c "import pymongo; print('pymongo', pymongo.__version__)"
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3-pip; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -m pip install --no-cache-dir --break-system-packages \
+      "pymongo==${PYMONGO_VERSION}"; \
+    python3 -c "import pymongo; print('pymongo', pymongo.__version__)"
 
 # k8s-mcp + azure-mcp
 COPY --chown=1000:1000 k8s-mcp /opt/k8s-mcp
