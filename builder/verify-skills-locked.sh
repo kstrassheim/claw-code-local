@@ -2,14 +2,14 @@
 # verify-skills-locked: the bot must not be able to give itself new skills.
 #
 # Run from the repository root. Used by the `verify-skills-locked` CI job on
-# every merge request (and on main/tags), and runnable by hand:
+# every pull request (and on main), and runnable by hand:
 #
 #     sh builder/verify-skills-locked.sh
 #
 # WHAT THIS PROVES, AND WHAT IT DOES NOT
 # --------------------------------------
 # Every capability the bot has is supposed to be in this repository and to
-# have gone through a merge request. A skill the agent acquires at RUNTIME is
+# have gone through a pull request. A skill the agent acquires at RUNTIME is
 # neither — and it is the shortest way around every other control, the
 # allowed-projects permission list included: a skill is just instructions the
 # agent will follow, so one it wrote for itself can tell it to do anything
@@ -32,8 +32,8 @@
 #
 # The image is checked FOR REAL as well, at build time, by the assertion in
 # builder/Dockerfile that check 1 is guarding — that is what inspects the
-# actual filesystem of the actual image, and it fails the MR's docker-build
-# job if a denied skill is present.
+# actual filesystem of the actual image, and it fails the pull request's
+# image-build job if a denied skill is present.
 #
 # Checks 3 and 4 are the two halves of "the bot's own skills, and no others":
 # 3 fixes the set at deploy time from reviewed ConfigMaps, 4 stops anything
@@ -146,10 +146,10 @@ echo "== 3. the loadable skills are exactly the ones this repo defines =="
 # skills are built this way and MUST be there; nothing else may be.
 MOUNTED="$(grep -oE 'workspace/skills/[a-z0-9-]+/SKILL\.md' "$DEPLOYMENT" \
            | sed 's|workspace/skills/||; s|/SKILL\.md||' | sort -u)"
-VOLUMES="$(grep -oE 'name: claw-code-skill-[a-z0-9-]+' "$DEPLOYMENT" \
-           | sed 's|name: claw-code-skill-||' | sort -u)"
-DEFINED="$(grep -rhoE '^  name: claw-code-skill-[a-z0-9-]+' k8s/*.yaml \
-           | sed 's|^  name: claw-code-skill-||' | sort -u)"
+VOLUMES="$(grep -oE 'name: openclaw-skill-[a-z0-9-]+' "$DEPLOYMENT" \
+           | sed 's|name: openclaw-skill-||' | sort -u)"
+DEFINED="$(grep -rhoE '^  name: openclaw-skill-[a-z0-9-]+' k8s/*.yaml \
+           | sed 's|^  name: openclaw-skill-||' | sort -u)"
 
 if [ -z "$MOUNTED" ]; then
   fail "no skill mounts found in $DEPLOYMENT — the grep above has gone stale"
@@ -163,11 +163,11 @@ fi
 # written and then silently never loaded.
 for name in $MOUNTED; do
   if ! echo "$VOLUMES" | grep -qx "$name"; then
-    fail "skill '$name' is mounted but has no claw-code-skill-$name volume"
+    fail "skill '$name' is mounted but has no openclaw-skill-$name volume"
   elif echo "$DEFINED" | grep -qx "$name"; then
-    ok "$name ← ConfigMap claw-code-skill-$name, defined in k8s/"
+    ok "$name ← ConfigMap openclaw-skill-$name, defined in k8s/"
   else
-    fail "skill '$name' mounts ConfigMap claw-code-skill-$name, which no
+    fail "skill '$name' mounts ConfigMap openclaw-skill-$name, which no
         manifest in k8s/ defines — it would resolve to whatever else in the
         cluster claims that name"
   fi
@@ -175,7 +175,7 @@ done
 
 for name in $DEFINED; do
   if echo "$MOUNTED" | grep -qx "$name"; then continue; fi
-  fail "k8s/ defines the skill ConfigMap claw-code-skill-$name but
+  fail "k8s/ defines the skill ConfigMap openclaw-skill-$name but
         $DEPLOYMENT never mounts it — one of the bot's own skills would not
         be loaded at all"
 done
@@ -267,11 +267,12 @@ fi
 
 # The functional test has to actually be wired in, or the only thing behind
 # this whole section is the grepping above.
-if grep -q 'verify-lockdown-effective' .gitlab-ci.yml 2>/dev/null; then
-  ok "docker-build attacks the lockdown in the built image (functional test)"
+if grep -rq 'verify-lockdown-effective' .github/workflows/ 2>/dev/null; then
+  ok "the image build attacks the lockdown in the built image (functional test)"
 else
-  fail "verify-lockdown-effective.sh is not run by .gitlab-ci.yml — nothing
-        then proves the lockdown HOLDS, only that it is written down"
+  fail "verify-lockdown-effective.sh is not run by any workflow in
+        .github/workflows/ — nothing then proves the lockdown HOLDS, only
+        that it is written down"
 fi
 
 echo "== 5. openclaw's own chat commands stay enabled =="
@@ -307,5 +308,5 @@ if [ "$FAIL" -eq 0 ]; then
   exit 0
 fi
 echo "FAILED: $FAIL check(s). The bot could gain a capability that never went"
-echo "through a merge request — see the comments in $ALLOW_FILE." >&2
+echo "through a pull request — see the comments in $ALLOW_FILE." >&2
 exit 1

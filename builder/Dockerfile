@@ -17,13 +17,46 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Strip openclaw skills that expand the agent's capabilities at runtime:
-#   - mcporter      — dynamic MCP-server gateway (loads tools over HTTP/stdio,
-#                     bypasses our static MCP allowlist)
-#   - skill-creator — guides the agent to write new skill files
-# Skills live at /app/skills/ in the upstream openclaw image.
+# Strip the bundled skills the agent could otherwise load at runtime.
+#
+# ALLOWLIST, NOT DENYLIST. The previous form named the two skills known to be
+# dangerous (mcporter, skill-creator) and kept everything else. That is the
+# wrong way round: an upstream release that adds a fifty-first skill ships it
+# to the agent silently, and nobody finds out until it uses one. The list of
+# what may survive lives in BUNDLED_SKILLS_ALLOWED — currently empty, because
+# the bot's own skills arrive as reviewed ConfigMap mounts under the workspace
+# and nothing upstream ships needs to be kept.
+#
+# THE ASSERTION IS THE POINT. `rm -rf` on a path upstream has moved exits 0
+# and removes nothing. That failure is silent and total: every bundled skill
+# ships and the build stays green. So after removing, this enumerates what is
+# actually loadable in the image and fails the build on anything the allowlist
+# does not name. The SKILLS-LOCKED-ASSERT sentinel is what CI greps for, so
+# deleting this block is itself a CI failure rather than a quiet loss.
 USER root
-RUN rm -rf /app/skills/mcporter /app/skills/skill-creator
+COPY BUNDLED_SKILLS_ALLOWED /usr/local/share/BUNDLED_SKILLS_ALLOWED
+RUN set -eu; \
+    sed 's/#.*//' /usr/local/share/BUNDLED_SKILLS_ALLOWED | awk 'NF' | sort -u > /tmp/allowed; \
+    for d in /app/skills/*/; do \
+      [ -d "$d" ] || continue; \
+      name="$(basename "$d")"; \
+      if grep -qxF "$name" /tmp/allowed; then \
+        echo "keep   $name"; \
+      else \
+        echo "strip  $name"; \
+        rm -rf "$d"; \
+      fi; \
+    done; \
+    echo "SKILLS-LOCKED-ASSERT: verifying nothing unlisted survived"; \
+    find /app -name SKILL.md 2>/dev/null \
+      | sed -E 's#.*/([^/]+)/SKILL\.md$#\1#' | sort -u > /tmp/remaining || true; \
+    if [ -s /tmp/remaining ] && grep -vxF -f /tmp/allowed /tmp/remaining > /tmp/extra; then \
+      echo "FATAL: bundled skills survived the strip that the allowlist does not name:" >&2; \
+      cat /tmp/extra >&2; \
+      exit 1; \
+    fi; \
+    rm -f /tmp/allowed /tmp/remaining /tmp/extra; \
+    echo "SKILLS-LOCKED-ASSERT: ok"
 
 # gh CLI + GitHub MCP server, installed for autonomous git/github work.
 # Image is arm64-only (AKS uses ARM); upstream release archives use `arm64`.

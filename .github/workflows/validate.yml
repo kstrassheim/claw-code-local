@@ -1,13 +1,147 @@
 name: PR Verify
 
+# Every gate that decides what reaches main.
+#
+# The cheap checks run first on hosted runners and the image build depends on
+# them. That ordering is deliberate: the build clones upstream openclaw and
+# produces a multi-hundred-megabyte arm64 image on the one self-hosted runner
+# scale set, and there is no reason to spend that on a branch whose tests do
+# not pass. A failing unit test now costs about a minute instead of the better
+# part of an hour of runner time.
+#
+# The same jobs run on pushes to main, not only on pull requests, so a merge
+# that lands while two PRs were green in isolation still gets checked.
+
 on:
   pull_request:
     branches:
       - main
+  push:
+    branches:
+      - main
 
 jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+    steps:
+      - name: Install git
+        # The checkout tests drive REAL git against a real repository rather
+        # than a mock, because the block they pin is the one that once
+        # discarded work. No pip install: the suite is standard-library
+        # unittest on purpose — the runtime image has no pip packages beyond
+        # the store driver, and a suite that only runs where someone
+        # remembered to install a framework is a suite that stops being run.
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure git identity
+        # The checkout tests commit; git refuses to without an identity.
+        run: |
+          git config --global user.email ci@example.invalid
+          git config --global user.name CI
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Run the suite
+        run: |
+          cd builder/tests
+          python -m unittest discover -s . -p 'test_*.py' -v
+
+  function-coverage:
+    name: Function Coverage Ledger
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+    # A ledger, not a coverage percentage: half of what ships is shell, and no
+    # tool in this image can instrument a bash function. This fails when a NEW
+    # untested function appears, so the gap can shrink but never grow
+    # silently. Closing gaps is deliberate work; letting them open is not.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Report
+        run: python builder/tools/function-inventory.py
+      - name: Fail on a new untested function
+        run: python builder/tools/function-inventory.py --check
+
+  check-python-names:
+    name: Undefined Names
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Scan
+        # py_compile accepts an undefined name — it is a runtime NameError. A
+        # planner that references a variable which does not exist crashes on
+        # every tick, and the only symptom is a stack trace in a CronJob log
+        # nobody reads, so the subsystem is dead until someone looks. That
+        # happened once; this job is why it cannot happen quietly again.
+        run: python builder/tools/check-undefined-names.py
+
+  check-model-config:
+    name: Model Config
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+    # The model configuration is JSON inside a ConfigMap, so it cannot carry
+    # comments, and every property it encodes fails SILENTLY when removed — no
+    # error, no log line, just a bot that is worse at its job.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+      - name: Check
+        run: python builder/tools/check-model-config.py
+
+  check-llm-secrets:
+    name: LLM Secrets
+    runs-on: ubuntu-latest
+    # Fails fast if no model provider is configured. openclaw needs at least
+    # one, and discovering that at pod start means a deploy that rolls out and
+    # then does nothing.
+    steps:
+      - name: At least one provider key must be set
+        env:
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+        run: |
+          if [ -z "$MISTRAL_API_KEY" ] && [ -z "$MINIMAX_API_KEY" ] && [ -z "$MOONSHOT_API_KEY" ]; then
+            echo "::error::None of MOONSHOT_API_KEY, MINIMAX_API_KEY or MISTRAL_API_KEY is set. openclaw needs at least one."
+            exit 1
+          fi
+          if [ -z "$MOONSHOT_API_KEY" ]; then
+            echo "::warning::MOONSHOT_API_KEY is not set — the default model is unavailable and the render step will fall back."
+          fi
+          echo "OK - at least one provider key is configured."
+
+  verify-skills-locked:
+    name: Skills Lockdown
+    runs-on: ubuntu-latest
+    # Static half of the supply-chain guard: the agent must not be able to
+    # grant itself new capabilities at runtime. The dynamic half — actually
+    # trying to defeat the lockdown as uid 1000 — runs inside the built image
+    # in verify-build, because it needs the image to exist.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Check
+        run: sh builder/verify-skills-locked.sh
+
   verify-build:
     name: Verify Image Build
+    needs:
+      - unit-tests
+      - function-coverage
+      - check-python-names
+      - check-model-config
+      - check-llm-secrets
+      - verify-skills-locked
     runs-on: arc-runner-scale-claw-code-local
     env:
       IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
@@ -120,3 +254,42 @@ jobs:
             --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             builder/
+
+      - name: Only allowlisted bundled skills may ship
+        # An upstream skill that survives the strip is a capability the agent
+        # can load at runtime, outside the static MCP allowlist. The strip
+        # itself cannot be trusted to have worked: `rm -rf` on a path that
+        # moved in an upstream release exits 0 and does nothing, so this
+        # enumerates what is actually loadable in the finished image and
+        # diffs it against the allowlist.
+        run: |
+          docker run --rm --entrypoint sh "${IMAGE_NAME}:${IMAGE_TAG}" -c \
+            'find /app -name SKILL.md 2>/dev/null | grep /skills/ || true' \
+            | sed -E 's#.*/skills/([^/]+)/.*#\1#' | sort -u > /tmp/shipped-skills.txt
+          grep -vE '^\s*(#|$)' builder/BUNDLED_SKILLS_ALLOWED | sort -u > /tmp/allowed-skills.txt
+          if ! extra=$(comm -23 /tmp/shipped-skills.txt /tmp/allowed-skills.txt) || [ -n "$extra" ]; then
+            echo "::error::bundled skills shipped that BUNDLED_SKILLS_ALLOWED does not list:"
+            echo "$extra"
+            exit 1
+          fi
+          echo "OK - no unlisted bundled skills in the image."
+
+      - name: The lockdown must actually hold
+        # The static check says the manifests are right; this one tries to
+        # defeat the real lockdown as uid 1000 inside the real image. It also
+        # checks the lockdown did not go too far — the agent must still be
+        # able to write its own workspace file, or chat dispatch dies with
+        # EACCES on every turn.
+        run: |
+          docker run --rm --user 0 \
+            -v "$PWD/builder/verify-lockdown-effective.sh:/tmp/verify.sh:ro" \
+            --entrypoint sh "${IMAGE_NAME}:${IMAGE_TAG}" /tmp/verify.sh
+
+      - name: Reclaim runner disk
+        # The scale set shares a dind host across jobs and ran out of disk
+        # without this. Always, so a failed build still cleans up after
+        # itself.
+        if: always()
+        run: |
+          docker rmi "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+          docker builder prune -af >/dev/null 2>&1 || true

@@ -36,7 +36,7 @@
 # A skill is instructions the agent will follow, so a skill it acquires by
 # itself can tell it to do anything the sandbox permits — including working
 # around the allowed-projects permission list. That is why the bar is "did
-# this go through a merge request", not "does it look harmful".
+# this go through a pull request", not "does it look harmful".
 #
 # NOTE — removing a skill removes INSTRUCTIONS, not the ability behind them.
 # `openclaw skills install` is a CLI and stays in the image; the agent's exec

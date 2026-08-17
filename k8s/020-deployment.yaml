@@ -130,6 +130,9 @@ spec:
               mkdir -p /home/node/.openclaw/workspace
               mkdir -p /home/node/.openclaw/workspace/skills/developer
               mkdir -p /home/node/.openclaw/workspace/skills/tester
+              mkdir -p /home/node/.openclaw/workspace/skills/reviewer
+              mkdir -p /home/node/.openclaw/workspace/skills/projects
+              mkdir -p /home/node/.openclaw/workspace/skills/planning
               chown -R 1000:1000 /home/node/.openclaw
               chmod -R u+rwX,g+rwX /home/node/.openclaw
 
@@ -149,6 +152,25 @@ spec:
               else
                 echo "INTERNAL_CA_CERT not set — skipping internal CA trust"
               fi
+
+              # Hand the skill-load directories to root and make them
+              # read-only, so the agent cannot install itself a new skill at
+              # runtime. A skill is just instructions the agent will follow,
+              # so one it wrote for itself is the shortest way around every
+              # other control here — the allowed-projects list included.
+              #
+              # MUST run last: it is undone by any recursive
+              # `chown -R 1000:1000` of the state dir, and both chowns above
+              # are exactly that.
+              #
+              # Fails CLOSED. If the binary is missing the image is not the
+              # one we think it is, and starting anyway would leave the
+              # directories writable with nothing reporting it.
+              if [ ! -x /usr/local/bin/lock-skill-dirs ]; then
+                echo "FATAL: lock-skill-dirs missing from the image — refusing to start" >&2
+                exit 1
+              fi
+              /usr/local/bin/lock-skill-dirs
           volumeMounts:
             - name: workspace
               mountPath: /home/node/.openclaw
