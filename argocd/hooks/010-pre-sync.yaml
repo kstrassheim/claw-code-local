@@ -51,6 +51,9 @@ spec:
                 k8s/tools/TOOLS-terraform.md \
                 k8s/tools/TOOLS-vscode.md \
                 k8s/tools/TOOLS-debug.md \
+                k8s/tools/TOOLS-security.md \
+                k8s/tools/TOOLS-pentest.md \
+                k8s/tools/TOOLS-powershell.md \
                 > /tmp/tools-md/TOOLS.md
 
               echo "Assembled TOOLS.md: $(wc -c < /tmp/tools-md/TOOLS.md) bytes ($(wc -l < /tmp/tools-md/TOOLS.md) lines)."

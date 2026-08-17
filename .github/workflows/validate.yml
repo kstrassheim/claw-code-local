@@ -98,6 +98,19 @@ jobs:
       - name: Check
         run: python builder/tools/check-model-config.py
 
+  check-tools-docs:
+    name: Tools Documentation
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+    # Both ways a tools document can be written, merged and then never reach
+    # the agent: left out of the hook's hardcoded cat list, or silently
+    # truncated past the bootstrap cap.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Check
+        run: python builder/tools/check-tools-docs.py
+
   check-llm-secrets:
     name: LLM Secrets
     runs-on: ubuntu-latest
@@ -140,6 +153,7 @@ jobs:
       - function-coverage
       - check-python-names
       - check-model-config
+      - check-tools-docs
       - check-llm-secrets
       - verify-skills-locked
     runs-on: arc-runner-scale-claw-code-local

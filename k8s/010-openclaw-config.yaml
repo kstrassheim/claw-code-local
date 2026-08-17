@@ -47,8 +47,8 @@ data:
             "mistral/mistral-large-3-25-12": {},
             "mistral/mistral-medium-3-5-26-04": {}
           },
-          "bootstrapMaxChars": 30000,
-          "bootstrapTotalMaxChars": 120000
+          "bootstrapMaxChars": 200000,
+          "bootstrapTotalMaxChars": 400000
         }
       },
       "models": {
