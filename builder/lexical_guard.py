@@ -9,7 +9,7 @@ is written, a destructive-sounding request is put back to a human.
 
 WHY IT IS A MODULE AND NOT TWENTY LINES OF SHELL
 It was twenty lines of shell — embedded Python inside a double-quoted string
-inside fixer-runner-gitlab.sh, which is both untestable and a live quoting
+inside the issue-solver runner, which is both untestable and a live quoting
 hazard (a double quote in a comment there closes the surrounding string and
 bash parses the Python as shell; that has happened). It now has a second
 caller, the planner, and a rule with two copies is a rule with two behaviours.

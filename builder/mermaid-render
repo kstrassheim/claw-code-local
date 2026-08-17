@@ -2,10 +2,11 @@
 # mermaid-render: turn mermaid source into a PNG and print the path.
 #
 # WHY THIS EXISTS
-# Teams does not draw mermaid. Posting a mermaid block there shows the source
-# as a code block, which is worse than useless as a chart — it looks like the
-# answer failed. GitLab DOES render it in markdown, so the mermaid form stays
-# the right thing to put in an issue or a merge request; this is for the chat.
+# The chat channel does not draw mermaid. Posting a mermaid block there shows
+# the source as a code block, which is worse than useless as a chart — it
+# looks like the answer failed. The code forge DOES render it in markdown, so
+# the mermaid form stays the right thing to put in an issue or a pull request;
+# this is for the chat.
 #
 # WHAT IT IS NOT
 # Not a general renderer for anything a user pastes. The input this is built
@@ -20,7 +21,7 @@
 #   mermaid-render --theme dark --width 1400 chart.mmd
 #
 # Prints the PNG path on stdout and nothing else, so it composes:
-#   openclaw message send --channel msteams --target "$T" \
+#   openclaw message send --channel telegram --target "$T" \
 #     --media "$(planning burndown --format mermaid | mermaid-render)"
 set -uo pipefail
 

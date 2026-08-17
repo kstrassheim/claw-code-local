@@ -1,4 +1,4 @@
-"""issue_priority: read a priority label off an issue or merge request.
+"""issue_priority: read a priority label off an issue or pull request.
 
 Imported by heartbeat-issue-tick (issue solver) and reviewer-tick, so the two
 cannot drift on what a priority label is — same reasoning as
@@ -9,8 +9,9 @@ FIVE LEVELS, JIRA-SHAPED
     Very High · High · Medium · Low · Very Low
 
 Matched case-insensitively, with or without a scope prefix (`Priority::High`
-and `High` both work — GitLab scoped labels are the usual way to make a set
-mutually exclusive), and tolerant of the separator people actually type:
+and `High` both work — a `scope::value` label is the usual way to make a set
+mutually exclusive, though nothing here enforces that), and tolerant of the
+separator people actually type:
 `Very High`, `very-high`, `VeryHigh` all land on the same level.
 
 **Default is Medium.** An issue with no priority label is not urgent and not

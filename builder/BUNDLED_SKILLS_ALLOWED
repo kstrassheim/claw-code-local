@@ -57,8 +57,8 @@
 # ARE enabled, and they are kept deliberately:
 
 # The deployment tester's core loop is browser work: open the deployed app,
-# complete an Entra sign-in, smoke-test the flows (builder/tester-runner-
-# gitlab.sh). "browser" is in plugins.allow, so the plugin — the tooling — is
+# complete an Entra sign-in, smoke-test the flows
+# (builder/tester-runner.sh). "browser" is in plugins.allow, so the plugin — the tooling — is
 # enabled either way; this skill is the instructions for driving it. Dropping
 # it would leave the tool without its guidance, and whether TOOLS-entra.md and
 # the runner prompts cover the gap is not something a build can answer.

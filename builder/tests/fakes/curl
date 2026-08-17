@@ -1,17 +1,17 @@
 #!/bin/sh
-# Fake `curl` for the test suite: serves canned GitLab API responses from a
+# Fake `curl` for the test suite: serves canned API responses from a
 # fixture directory, and records every request.
 #
 # WHY
-# The runners reach GitLab through ~74 curl calls, and everything interesting
+# The runners reach the API through dozens of curl calls, and everything interesting
 # they do — the merge scope guard, the review gate, the On Hold lifecycle, the
 # note cursor — is a decision taken on a response body. None of it was
-# testable without a live GitLab, a token and a project to scribble on.
+# testable without a live server, a token and a repository to scribble on.
 #
 # HOW A RESPONSE IS CHOSEN
 # The request URL is reduced to a slug and looked up in $FAKE_CURL_DIR:
 #
-#     .../projects/g%2Fp/merge_requests/2  ->  projects_g_p_merge_requests_2
+#     .../repos/owner/name/pulls/2  ->  repos_owner_name_pulls_2
 #
 # The longest matching fixture wins, so a test can pin one specific endpoint
 # and leave the rest on a default. A missing fixture is NOT silently empty: it
@@ -57,8 +57,8 @@ path="${path#api/graphql}"
 slug=$(printf '%s' "$path" \
   | sed 's/[?#].*$//; s/%2F/_/g; s/%2f/_/g; s#[/.]#_#g; s/[^A-Za-z0-9_-]/_/g')
 
-# Longest match first: projects_g_p_merge_requests_2_notes beats
-# projects_g_p_merge_requests_2.
+# Longest match first: repos_owner_name_pulls_2_comments beats
+# repos_owner_name_pulls_2.
 candidate=""
 while [ -n "$slug" ]; do
   if [ -f "$DIR/${method}_${slug}" ]; then candidate="$DIR/${method}_${slug}"; break; fi

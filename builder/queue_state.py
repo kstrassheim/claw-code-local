@@ -1,12 +1,12 @@
 """Cross-subsystem queue visibility: does the bot still have issues to solve
-or merge requests to review, anywhere?
+or pull requests to review, anywhere?
 
 WHY
 ---
 "First solve and merge issues, then test" — the deployment tester is the most
 expensive of the three subsystems (its run is the longest by a wide margin)
 and the least urgent: re-testing a main commit while issues sit unassigned and
-merge requests sit unreviewed spends the token budget on the wrong thing.
+pull requests sit unreviewed spends the token budget on the wrong thing.
 
 The shared slot gate cannot express that. It only knows who is running RIGHT
 NOW, so a tester that wins the race starts anyway and then holds a slot for an

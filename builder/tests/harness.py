@@ -193,7 +193,7 @@ class ShellTestCase(unittest.TestCase):
     def extract_block(self, script: str, start: str, end: str) -> str:
         """Pull a self-contained block out of a runner and write it to a file.
 
-        The runner scripts are 2000 lines and demand a GitLab token, a repo and
+        The runner scripts are 2000 lines and demand an API token, a repo and
         a pod before they will do anything. The DECISIONS worth testing —
         which branch to check out, whether to wake the agent — sit in blocks
         that only need a few variables. Extracting the real lines (never a

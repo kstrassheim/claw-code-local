@@ -50,7 +50,7 @@ So the warning below reports throttling as a CONDITION with a beginning and
 an end, not as a fuel gauge.
 
   llm-quota --check   report the transition (started / recovered) once,
-                      to Teams, if warnings are on. Meant for a schedule.
+                      to chat, if warnings are on. Meant for a schedule.
   llm-quota warn on|off|status
 
 Usage:
@@ -183,10 +183,15 @@ def warnings_on(st: dict) -> bool:
 
 
 def notify(text: str) -> bool:
-    """Best-effort Teams DM, same channel the fixer and tester use."""
+    """Best-effort chat message, the same channel the solver and tester use.
+
+    Delegates to `telegram-notify`, which resolves the owner's chat from
+    openclaw's own state and fails open when nobody is paired yet. Nothing
+    here is worth failing a tick over.
+    """
     import subprocess
     try:
-        subprocess.run(["msteams-notify", text], timeout=30,
+        subprocess.run(["telegram-notify", text], timeout=30,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception:
