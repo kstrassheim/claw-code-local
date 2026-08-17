@@ -24,6 +24,61 @@
 # is exactly the case the store was built to handle. A replica set would add
 # election complexity and two more volumes to protect against an outage that
 # costs nothing.
+#
+# WHY THIS VOLUME IS PROVISIONED STATICALLY AND THE WORKSPACE IS NOT
+#
+# The `local-path-data` StorageClass aliases each volume to a directory named
+# after the PVC's NAMESPACE, not after the PVC. Every claim in a namespace
+# therefore resolves to the SAME directory on disk. With one claim per
+# namespace that is invisible; the second claim silently shares the first
+# one's data. This namespace now has two.
+#
+# Left alone, the database would have written its data files directly into the
+# agent's workspace — and the provisioner's teardown follows the alias symlink
+# and `rm -rf`s its target, so deleting either claim would have destroyed the
+# other's data. (Both volumes are Retain, which is what stops teardown running
+# at all; that is the only reason this was recoverable.)
+#
+# So this volume bypasses the dynamic provisioner entirely: an explicit path,
+# on the node the data lives on, with an explicit reclaim policy. The
+# workspace claim is left exactly as it is — it holds 90+ days of agent state
+# and re-provisioning it is a migration, not a manifest change.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: claw-code-mongodb
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  # Retain, so deleting the claim never deletes the database. Recovering a
+  # planning history is impossible; re-binding a Released volume is a minute's
+  # work.
+  persistentVolumeReclaimPolicy: Retain
+  # Empty, not omitted: an empty class is what marks a volume as statically
+  # provisioned. Omitting it lets the default class claim this volume and hand
+  # us the aliasing bug back.
+  storageClassName: ""
+  hostPath:
+    path: /data/pv-mongodb
+    # The kubelet creates the directory on first mount, root-owned. The
+    # Deployment's init container hands it to the database user.
+    type: DirectoryOrCreate
+  # The data is on ONE node's local disk, so the pod must land on that node.
+  # The Deployment's nodeSelector says the same thing, but saying it here is
+  # what makes the SCHEDULER refuse to place the pod anywhere else — a
+  # nodeSelector someone removes later would otherwise silently start the
+  # database on an empty directory.
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - datapi
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -32,7 +87,11 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: local-path-data
+  # Both fields are load-bearing: the empty class opts out of dynamic
+  # provisioning, and volumeName pins this claim to the volume above rather
+  # than letting the binder pick one.
+  storageClassName: ""
+  volumeName: claw-code-mongodb
   resources:
     requests:
       # Planning documents are small (~1 KB) and one per story, work event,
@@ -96,6 +155,30 @@ spec:
         runAsGroup: 999
         fsGroup: 999
         fsGroupChangePolicy: Always
+      initContainers:
+        # The kubelet creates the hostPath directory root-owned, and fsGroup
+        # alone does not make it writable by uid 999 — mongod then fails on
+        # `mongod.lock` with a permission error that reads like corruption
+        # rather than ownership. Runs as root explicitly, because the pod's
+        # securityContext would otherwise make this container uid 999 too and
+        # it could not chown anything.
+        - name: fix-perms
+          image: mongo:7
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              chown 999:999 /data/db
+              chmod 0700 /data/db
+              echo "data directory ready: $(stat -c '%U:%G %a' /data/db)"
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
       containers:
         - name: mongodb
           image: mongo:7
