@@ -1,26 +1,17 @@
 ---
-# Deny everything that is not explicitly allowed below.
+# NOTE ON THE DEFAULT-DENY BASELINE
 #
-# NetworkPolicy is additive: without a baseline like this, a pod carrying NO
-# policy is completely unrestricted, and a pod carrying one is restricted only
-# in the DIRECTIONS its policy names. That produced a namespace where the
-# agent's egress was carefully scoped and the CronJob pods — which hold the
-# same token and can exec into the agent — could reach anything at all in
-# either direction.
+# This namespace is already default-deny in BOTH directions, and that policy is
+# not declared here: a cluster-wide Kyverno policy generates a
+# `default-deny-all` NetworkPolicy into every namespace. Everything below is
+# additive on top of it.
 #
-# Everything the namespace actually needs is re-allowed in the policies that
-# follow. Read this file as a whole: this rule on its own would stop the pod
-# talking to anything, including DNS.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny-all
-  namespace: claw-code-local
-spec:
-  podSelector: {}
-  policyTypes:
-    - Ingress
-    - Egress
+# Declaring our own copy was tried and reverted. Two controllers then own one
+# object, they take turns rewriting it, and the application never reaches
+# Synced again — the symptom is a permanently OutOfSync app whose diff is
+# empty, which is a genuinely confusing thing to debug. If the cluster policy
+# is ever removed, add it back HERE and say so in this comment; until then the
+# absence is deliberate, not an oversight.
 ---
 # All-pods DNS egress to kube-system (resolves cluster service names
 # and external hostnames via CoreDNS).
