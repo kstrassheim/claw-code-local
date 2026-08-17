@@ -29,20 +29,37 @@ FROM ${BASE_IMAGE}
 # actually loadable in the image and fails the build on anything the allowlist
 # does not name. The SKILLS-LOCKED-ASSERT sentinel is what CI greps for, so
 # deleting this block is itself a CI failure rather than a quiet loss.
+#
+# SKILLS DO NOT ALL LIVE IN /app/skills. They also ship inside extensions, at
+# /app/extensions/<ext>/skills/<name>/, and again in the built mirror under
+# /app/dist/. An earlier version of this block removed only /app/skills/*/ and
+# reported every one of them stripped — while four skills carried on shipping
+# from the other two locations. The assertion is what caught it.
+#
+# So the removal and the assertion are now driven by THE SAME `find`. A skill
+# root is any directory `<...>/skills/<name>/` holding a SKILL.md, wherever it
+# is, and the two passes cannot disagree about what counts as one because
+# neither has its own opinion. node_modules is excluded: a dependency shipping
+# a SKILL.md is not something that gets loaded as a skill, and matching there
+# produced noise rather than findings.
 USER root
 COPY BUNDLED_SKILLS_ALLOWED /usr/local/share/BUNDLED_SKILLS_ALLOWED
 RUN set -eu; \
     sed 's/#.*//' /usr/local/share/BUNDLED_SKILLS_ALLOWED | awk 'NF' | sort -u > /tmp/allowed; \
-    for d in /app/skills/*/; do \
-      [ -d "$d" ] || continue; \
-      name="$(basename "$d")"; \
+    find /app -name SKILL.md -not -path '*/node_modules/*' 2>/dev/null \
+      | grep '/skills/' \
+      | sed -E 's#(.*/skills/[^/]+)/.*#\1#' | sort -u > /tmp/roots || true; \
+    while IFS= read -r root; do \
+      [ -n "$root" ] || continue; \
+      [ -d "$root" ] || continue; \
+      name="$(basename "$root")"; \
       if grep -qxF "$name" /tmp/allowed; then \
-        echo "keep   $name"; \
+        echo "keep   $name  ($root)"; \
       else \
-        echo "strip  $name"; \
-        rm -rf "$d"; \
+        echo "strip  $name  ($root)"; \
+        rm -rf "$root"; \
       fi; \
-    done; \
+    done < /tmp/roots; \
     echo "SKILLS-LOCKED-ASSERT: verifying nothing unlisted survived"; \
     find /app -name SKILL.md -not -path '*/node_modules/*' 2>/dev/null \
       | grep '/skills/' \
@@ -52,7 +69,7 @@ RUN set -eu; \
       cat /tmp/extra >&2; \
       exit 1; \
     fi; \
-    rm -f /tmp/allowed /tmp/remaining /tmp/extra; \
+    rm -f /tmp/allowed /tmp/roots /tmp/remaining /tmp/extra; \
     echo "SKILLS-LOCKED-ASSERT: ok"
 
 # git-lfs. Target repositories keep large binary assets under LFS, and without

@@ -100,10 +100,24 @@ else
         what the build actually consumes, or editing it changes nothing."
 fi
 
-if printf '%s\n' "$DOCKER_CODE" | grep -q 'rm -rf .*"$d"\|rm -rf .*/app/skills'; then
+# A removal has to exist, and it has to be driven by a SEARCH rather than by a
+# hardcoded directory. Skills ship in three places — /app/skills, inside
+# extensions, and again in the built mirror — and a loop over one of them
+# reports every skill it finds as stripped while the other two carry on
+# shipping. That is what happened.
+if printf '%s\n' "$DOCKER_CODE" | grep -q 'rm -rf'; then
   ok "$DOCKERFILE removes what the allowlist does not name"
 else
-  fail "$DOCKERFILE has no removal under /app/skills"
+  fail "$DOCKERFILE has no removal of unlisted skills at all"
+fi
+
+if printf '%s\n' "$DOCKER_CODE" | grep -q 'find /app -name SKILL.md'; then
+  ok "the removal is driven by a search for loadable skills, not one directory"
+else
+  fail "$DOCKERFILE does not locate skills with 'find /app -name SKILL.md'.
+        Skills ship in /app/skills, inside extensions, AND in the built mirror
+        under /app/dist. A loop over a single hardcoded directory removes one
+        of the three and reports success."
 fi
 
 if printf '%s\n' "$DOCKER_CODE" | grep -q "$ASSERT_SENTINEL"; then
