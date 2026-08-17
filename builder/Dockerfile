@@ -1,19 +1,15 @@
-# Custom openclaw image for claw-code coding agent.
-# Based on the k8s-openclaw builder/Dockerfile but WITHOUT:
-#   - JHora / PyJHora / pyswisseph (astrology)
-#   - Gmail MCP
-#   - Ollama / Whisper / Kokoro TTS / OpenWebUI
-#   - Second instance (olga)
-#   - gdrive / knowledge corpus
+# The coding agent's image: upstream openclaw plus the tools it works with.
 #
-# Differences from k8s-openclaw builder:
-#   - No Python astrology packages
-#   - No ollama / whisper / kokoro
-#   - No open-webui
-#   - No gdrive / knowledge mounts
-#   - Only Mistral Large default (optional MiniMax via secrets)
+# WHAT IS DELIBERATELY NOT HERE
+# No local model runtime, no speech or audio stack, no personal-data
+# integrations and no document corpus. This image exists to read code, run
+# tests and drive a browser; everything it carries is something one of the
+# three subsystems — solver, tester, reviewer — actually invokes. Anything
+# else is attack surface on a container that executes model output.
 #
-# Args come from .github/workflows/build.yml build step.
+# Every version is pinned in the VERSIONS file at the repository root and
+# arrives as a --build-arg, so what shipped is answerable from git alone.
+# The build args come from the image-build step in .github/workflows/.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
