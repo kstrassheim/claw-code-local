@@ -17,19 +17,34 @@ git).
 The container image (`builder/Dockerfile`) is `openclaw` upstream plus a
 curated set of CLIs and MCP servers for autonomous code / cloud work:
 
-- `git`, `gh` + `github-mcp-server`, `glab` + a GitLab MCP
-- `kubectl` + an in-house Kubernetes MCP (`builder/k8s-mcp`)
+- `git` (with `git-lfs`), `gh` + `github-mcp-server`
+- `kubectl` + `kubelogin` + an in-house Kubernetes MCP (`builder/k8s-mcp`)
 - `terraform` + the official Terraform MCP
 - `aws`, `gcloud`, `aliyun` CLIs each paired with a cloud-specific MCP
   (`builder/aws-mcp`, `builder/gcp-mcp`, `builder/alicloud-mcp`)
+- Code scanners — `semgrep`, `bandit`, `pip-audit`, `npm audit`,
+  `gitleaks`, `PSScriptAnalyzer` — behind `builder/security-mcp`
+- Live scanners — `nuclei` (pinned templates) and `testssl.sh` — behind
+  `builder/pentest-mcp`. Deliberately **not** on `$PATH`: the server
+  calls them by absolute path so no agent shell can invoke a scanner
+  outside the scope enforcement.
+- `pwsh` with Pester, the .NET SDK, SqlPackage, `sqlcmd`/`bcp` and four
+  `Az` modules for data-platform work
 - Entra ID TOTP helper (`builder/entra-totp`) for Azure CLI sign-in
   with MFA
 - A debug MCP (`builder/debug-mcp`)
 - `code-server` for an in-pod web IDE
+- `pymongo`, the only pip package, for the planning store
 
-The upstream `mcporter` and `skill-creator` skills are deliberately
-removed so the agent's surface area is exactly what's wired in
-`builder/` and described in `k8s/tools/`.
+Upstream's bundled skills are stripped against an **allowlist**
+(`builder/BUNDLED_SKILLS_ALLOWED`, currently empty), not a denylist of
+the known-dangerous ones — otherwise a new upstream skill ships to the
+agent silently. The build then asserts what is actually loadable in the
+finished image and fails on anything unlisted, because `rm -rf` on a
+path upstream has moved exits 0 and removes nothing. At runtime the
+skill directories are root-owned and read-only, so the agent's surface
+area is exactly what is wired in `builder/` and described in
+`k8s/tools/`.
 
 The full per-tool capability description lives in
 [`k8s/tools/`](k8s/tools/) — those `.md` files are concatenated at
@@ -40,11 +55,27 @@ the agent's "what can I do" answer matches the deployment exactly.
 
 ```
 builder/        Dockerfile and per-MCP source for the openclaw image
-  heartbeat-issue-tick.py   Issue-watcher planner (see below)
-  cron-issue-spawn.sh       Issue-watcher Job-spawner (see below)
+  heartbeat-issue-tick.py   Issue-solver planner
+  cron-issue-spawn.sh       Issue-solver spawner
+  fixer-runner.sh           Issue-solver runner
+  tester-tick.py            Deployment-tester planner
+  tester-runner.sh          Deployment-tester runner
+  reviewer-tick.py          Pull-request reviewer planner
+  reviewer-runner.sh        Pull-request reviewer runner
+  issue_status.py           The five-value status model
+  project-allow             The permission boundary (allowed repositories)
+  planning_store.py         Planning documents: spool, then MongoDB
+  agent-models/-limits/-thinking/-slot.sh   Runtime controls
+  tests/        Standard-library unittest suite (no pytest, no pip)
+  tools/        Repository checks run by CI
 k8s/            Kustomize bundle deployed by Argo CD
   tools/        TOOLS-*.md fragments concatenated into TOOLS.md
-  050-issue-watcher.yaml    Issue-watcher CronJob, RBAC, chat skill
+  006-mongodb.yaml          Planning database, own pod and volume
+  050-issue-watcher.yaml    Issue-solver CronJob, RBAC, chat skill
+  051-tester.yaml           Deployment-tester CronJob, RBAC, chat skill
+  052-reviewer.yaml         Reviewer CronJob, RBAC, chat skill
+  053-projects.yaml         Permission chat skill
+  054-planning.yaml         Planning / product-owner chat skill
 argocd/         Argo CD AppProject + Applications + PreSync hook
 .github/
   workflows/    image build, secret apply, validation, CodeQL
@@ -277,6 +308,132 @@ The full CronJob + chat skill for the tester is in
 the developer skill: `tester status`, `tester start`, `tester
 stop`, `tester list`, `tester logs <repo>`, `tester last <repo>`.
 
+## The permission boundary
+
+All three autonomous subsystems discover their own work from account-wide
+queries — issues assigned to the bot, pull requests it is asked to review,
+repositories it collaborates on. Without a second gate, **anyone who can
+assign the bot an issue can put it to work on any repository it can see**.
+
+`~/.openclaw/projects-allowed.list` on the workspace volume is that gate.
+Being assigned something is how a person *asks*; this list is where the owner
+*answers*. Every planner and every runner re-checks it, and it is read fresh
+on each tick, so a revoke takes effect within one tick without a redeploy.
+
+Manage it from chat (the `projects` skill) or with the CLI:
+
+```
+project-allow list
+project-allow add https://github.com/owner/repo --actor you
+project-allow revoke owner/repo --actor you
+project-allow check owner/repo          # exit 2 = not permitted
+```
+
+It **fails closed**: an unreadable or missing list permits nothing. `check`
+and `bootstrap` make no network call at all, so a GitHub outage can never
+become a permission decision, and the init container that seeds the list on
+first boot never overwrites an existing one — otherwise a revoke would last
+only until the next deploy.
+
+## Issue status on a platform with two states
+
+The solver needs five answers to "what is happening to this issue?", because
+each leads somewhere different on the next tick. GitHub issues have `open` and
+`closed`. The mapping:
+
+| Status | How it is stored |
+|---|---|
+| To do | open, no status label (the default) |
+| In progress | open, `status::in-progress` |
+| Done | closed, `state_reason=completed` |
+| Won't do | closed, `state_reason=not_planned` + `status::wont-do` |
+| Duplicate | closed, `state_reason=not_planned` + `status::duplicate` |
+
+The terminal pair uses GitHub's native close reason rather than a third label
+because it records the operator's intent at the moment of closing: a delivered
+issue and a revoked one stay distinguishable afterwards, instead of having to
+be re-derived from merge history. Nothing on GitHub enforces one value per
+label prefix, so the bot clears the previous status itself on every
+transition, and writes nothing at all when the status has not changed — the
+tick runs every five minutes and a no-op label write still appends a timeline
+event.
+
+## Autonomous pull-request reviewer
+
+A third planner/runner pair (`k8s/052-reviewer.yaml`, CronJob `pr-reviewer`).
+It lists open pull requests where the bot is a requested reviewer, and spawns
+only when the head commit's checks are green and that exact head has not
+already been reviewed. It reviews in its **own** checkout tree, and never
+edits code, pushes, files issues or merges.
+
+The verdict is one comment whose first line is
+`🔎 REVIEW RESULT: APPROVED (sha <sha>)` or `CHANGES REQUIRED (sha <sha>)`,
+followed by a real GitHub review. Three rules matter:
+
+- **Green is read from both check-runs and commit statuses**, and "no checks
+  at all" is kept distinct from "pending" — an empty combined status reports
+  itself as pending, and believing it would strand every repository without
+  CI forever.
+- **The already-reviewed key is the head SHA plus a fingerprint of the title
+  and body**, not the SHA alone, so a verdict about the *description* can be
+  cleared by editing the description instead of pushing an empty commit.
+- **A run that does not complete posts nothing** and retries next tick. A
+  provider outage must not wedge a pull request as "changes required".
+
+Security findings come from the code-scanning alerts for the pull request's
+own head, thresholded by `security-level` (default `high`). An unreadable
+threshold falls back to the default, never to `off`.
+
+Suspending the reviewer CronJob is supported: the solver then merges green
+pull requests directly, which is its pre-reviewer behaviour. The chat skill
+says so on every `stop`.
+
+## Planning, sprints and story points
+
+`k8s/006-mongodb.yaml` runs a small MongoDB with its own pod and volume, and
+`builder/planning_store.py` writes to it. Every write lands in an append-only
+spool on the workspace volume **first** and flushes opportunistically, and
+nothing in the store raises — a planning store that can kill a solver run
+costs more than it will ever be worth. Document ids are deterministic and
+every write is an upsert, so a document flushed twice is a no-op.
+
+An unconfigured or unreachable store is a supported state: work continues and
+spools. Query it through the `planning` CLI or the `planning` chat skill —
+never directly.
+
+Story size lives in an `SP::<n>` label and nowhere else. Sizing runs on the
+cheap planning model one tick before implementation, so the solver can route
+small stories to a cheaper model; a story at the split ceiling is parked
+rather than started.
+
+## What a pull request must pass
+
+`.github/workflows/validate.yml` runs on every pull request and every push to
+main:
+
+| Job | What it fails on |
+|---|---|
+| `unit-tests` | any test in `builder/tests/` |
+| `function-coverage` | a NEW untested function appearing |
+| `check-python-names` | a name loaded but never bound |
+| `check-model-config` | a silent regression in the model ConfigMap |
+| `check-tools-docs` | a tools document not assembled, or truncated past the bootstrap cap |
+| `check-llm-secrets` | no model provider configured |
+| `verify-skills-locked` | the agent could gain an unreviewed capability |
+| `verify-build` | the image not building, an unlisted bundled skill, or the runtime lockdown not holding |
+
+The cheap checks run on hosted runners and the image build depends on all of
+them, so a failing test costs about a minute rather than an arm64 image build
+on the single self-hosted scale set.
+
+The test suite is standard-library `unittest` — no pytest and no pip
+packages — because a suite that only runs where someone remembered to install
+a framework is a suite that stops being run. Run it with:
+
+```
+cd builder/tests && python3 -m unittest discover -s . -p 'test_*.py'
+```
+
 ## Prerequisites
 
 The deploy target is assumed to provide:
@@ -310,6 +467,8 @@ The deploy workflow `kubectl apply`s every secret listed here as a
 | `GITLAB_TOKEN`, `GITLAB_LOCAL_TOKEN` | GitLab.com and self-hosted GitLab PATs. |
 | `ENTRA_TENANT_ID`, `ENTRA_USERNAME`, `ENTRA_PASSWORD`, `ENTRA_TOTP_SEED` | Azure / Entra ID sign-in for the TOTP helper. |
 | `TESTER_ALLOWED_HOSTNAMES` | Optional. Comma-separated LAN hostnames the tester's browser plugin may navigate to (private-network deploy URLs). Injected into `browser.ssrfPolicy.allowedHostnames` at pod start; kept in the Secret so the internal DNS domain stays out of this public repo. |
+| `MOONSHOT_API_KEY` | Optional. Kimi Coding endpoint, the default model when present. |
+| `PROJECTS_ALLOWED_BOOTSTRAP` | Optional. Comma-separated `owner/repo` list used to SEED the allowed-projects list the FIRST time a workspace volume comes up. Ignored on every later start, so a revoke is never undone by a deploy. Empty means the bot starts permitted on nothing, which is the correct default. |
 | `INTERNAL_CA_CERT` | Optional. PEM of the internal CA that signs the cluster's HTTPS ingresses. The `fix-perms` init container imports it into Chromium's NSS store so the tester opens internal HTTPS deploy URLs without `ERR_CERT_AUTHORITY_INVALID`. Kept in the Secret so the internal CA stays out of this public repo. |
 
 Missing optional secrets are tolerated: openclaw config strips Mistral
