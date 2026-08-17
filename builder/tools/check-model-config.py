@@ -60,9 +60,9 @@ def load_template(path: str) -> dict:
     for doc in docs:
         if not doc:
             continue
-        if (doc.get("metadata") or {}).get("name") == "claw-code-config-template":
+        if (doc.get("metadata") or {}).get("name") == "openclaw-config-template":
             return json.loads(doc["data"]["openclaw.json"])
-    raise SystemExit("claw-code-config-template not found in " + path)
+    raise SystemExit("openclaw-config-template not found in " + path)
 
 
 def check(cfg: dict) -> list[str]:
@@ -82,15 +82,10 @@ def check(cfg: dict) -> list[str]:
                     problems.append(
                         f"provider {name}, model {model.get('id')}: "
                         f'api={api} needs "reasoning": true, or openclaw never '
-                        "asks for extended thinking (#13)")
+                        "asks for extended thinking")
 
     for field in ("model", "imageModel"):
         spec = defaults.get(field) or {}
-        if spec.get("fallbacks"):
-            problems.append(
-                f"agents.defaults.{field}.fallbacks is not empty — the policy "
-                "is exactly one automatic model, so a limit fails the turn "
-                "cleanly instead of burning another provider's quota")
         primary = spec.get("primary") or ""
         if primary:
             prov = primary.split("/")[0]
@@ -98,6 +93,31 @@ def check(cfg: dict) -> list[str]:
                 problems.append(
                     f"agents.defaults.{field}.primary is {primary!r} but "
                     f"provider {prov!r} is not declared")
+        # A fallback chain is deliberate here: a single provider outage should
+        # degrade the answer, not stop the bot. What must not happen is a
+        # fallback naming a provider that does not exist — the chain then ends
+        # early with a runtime key error instead of the model it promised, and
+        # nothing reports the difference.
+        for entry in spec.get("fallbacks") or []:
+            name = entry if isinstance(entry, str) else (entry or {}).get("primary", "")
+            if not name:
+                continue
+            prov = str(name).split("/")[0]
+            if prov not in providers:
+                problems.append(
+                    f"agents.defaults.{field} falls back to {name!r} but "
+                    f"provider {prov!r} is not declared — the chain ends here")
+        # A fallback that repeats the primary is not a fallback. It burns a
+        # second attempt on the model that just failed, which is exactly the
+        # wrong response to a rate limit.
+        chain = [primary] + [
+            (e if isinstance(e, str) else (e or {}).get("primary", ""))
+            for e in (spec.get("fallbacks") or [])]
+        chain = [c for c in chain if c]
+        if len(chain) != len(set(chain)):
+            problems.append(
+                f"agents.defaults.{field} repeats a model in its fallback "
+                f"chain: {chain}")
 
     if not defaults.get("thinkingDefault"):
         problems.append("agents.defaults.thinkingDefault is unset")

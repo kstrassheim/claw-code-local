@@ -35,6 +35,45 @@ test -n "$OPENCLAW_POD" || { echo "ERROR: no Running openclaw pod found in $NAME
 export OPENCLAW_POD
 echo "openclaw pod: $OPENCLAW_POD"
 
+# -- per-tick side jobs, all non-fatal --------------------------------
+#
+# Three chores that need to run OFTEN and inside the openclaw pod, where the
+# token, the model credentials and the planning store's connection live. This
+# tick already fires every five minutes and already execs into that pod, so
+# they ride along instead of becoming three more CronJobs to keep alive.
+#
+# Every one of them is tolerated as non-fatal, and that is the point rather
+# than laziness: they are bookkeeping ABOUT the work, and the tick's actual
+# job is spawning the work. Nothing here may become a reason the issue solver
+# stops running.
+
+# Quota / rate-limit watch. Reads the runners' own logs, which is why it runs
+# in the pod that has them.
+kubectl -n "$NAMESPACE" exec "$OPENCLAW_POD" -c openclaw -- \
+    llm-quota --check >/dev/null 2>&1 || true
+
+# Roll the sprint over if a scheduled boundary has passed.
+#
+# Asked every tick rather than scheduled at the boundary itself: a job firing
+# exactly at the boundary minute misses the rollover COMPLETELY if the pod
+# happens to be restarting then, and nothing would say so — the sprint would
+# never end, the next would never begin, and the first symptom would be
+# numbers that quietly stopped adding up. Asking every tick makes a late
+# rollover normal and self-healing. Idempotent: it rolls only when the running
+# sprint started before the most recent boundary, so a hundred ticks in a row
+# do nothing.
+kubectl -n "$NAMESPACE" exec "$OPENCLAW_POD" -c openclaw -- \
+    planning sprint-tick 2>&1 | grep -v '^$' || true
+
+# Record stories whose pull request has been merged, WHOEVER merged it.
+#
+# `mergedAt` is written by the solver's exit trap, which only runs if a solver
+# run happens after the merge — so a merge performed by a person is invisible
+# to every report built on that field. This sweep fills the gap; it only ever
+# fills an EMPTY field and never corrects one.
+kubectl -n "$NAMESPACE" exec "$OPENCLAW_POD" -c openclaw -- \
+    record-deliveries 2>&1 | grep -v '^$' || true
+
 PLAN=$(/usr/local/bin/heartbeat-issue-tick)
 echo "$PLAN" | python3 -c "
 import json, os, subprocess, sys, shlex
@@ -57,14 +96,38 @@ for r in plan['repos']:
         url = issue['url']
         title = issue['title']
 
+        # Size BEFORE implementation. An issue with no estimate is ESTIMATED
+        # this tick and implemented on a later one, because the model the
+        # solver gets is chosen from the size — sizing during the run that
+        # already picked a model would be circular.
+        #
+        # Costing a tick is deliberate and cheap: ticks are five minutes
+        # apart, the estimate is one short model call, and the delay leaves a
+        # window in which a human can overrule the number before any code is
+        # written.
+        if issue.get('needsEstimate'):
+            runner = '/usr/local/bin/estimate-runner'
+            runner_args = ' '.join(shlex.quote(a) for a in [repo, str(n)])
+            env_prefix = ''
+            what = 'estimate'
+        else:
+            runner = '/usr/local/bin/fixer-runner'
+            runner_args = ' '.join(shlex.quote(a) for a in [repo, str(n), url, title])
+            # The size travels to the runner, which picks solver vs
+            # solver.small from it. Absent means the solver defaults to 8 —
+            # the strong model — which is the safe direction.
+            env_prefix = 'STORY_POINTS=%s ' % shlex.quote(
+                str(issue.get('storyPoints') or ''))
+            what = 'fixer'
+
         # Build the exec command. setsid + redirected stdio detach the
-        # fixer-runner from the kubectl-exec connection so it survives
+        # runner from the kubectl-exec connection so it survives
         # past this script's exit (otherwise it would get SIGHUP'd).
         # Args are shell-escaped to survive the bash-c wrapper.
-        runner_args = ' '.join(shlex.quote(a) for a in [repo, str(n), url, title])
         remote_cmd = (
             f'setsid bash -c '
-            + shlex.quote(f'nohup /usr/local/bin/fixer-runner {runner_args} >/dev/null 2>&1 </dev/null &')
+            + shlex.quote(f'nohup env {env_prefix}{runner} {runner_args} '
+                          f'>/dev/null 2>&1 </dev/null &')
             + ' >/dev/null 2>&1 </dev/null &'
         )
 
@@ -76,9 +139,23 @@ for r in plan['repos']:
         if proc.returncode != 0:
             print(f'ERROR exec for {repo}#{n}: rc={proc.returncode} stderr={proc.stderr.strip()}', file=sys.stderr)
         else:
-            print(f'spawned fixer for {repo}#{n}: {title}')
+            print(f'spawned {what} for {repo}#{n}: {title}')
             spawned += 1
 
 deferred = sum(r.get('deferredDueToLimit', 0) for r in plan['repos'])
-print(f'tick done: spawned={spawned}, deferred_due_to_limit={deferred}')
+
+# Why a repository was skipped, in the planner's own vocabulary. The three
+# reasons are a contract, not prose: 'allowlist-unavailable' is a fault to
+# fix, 'allowlist-empty' and 'not-permitted' are the owner's decision, and a
+# tick that spawned nothing must be able to say which of the three it was
+# instead of merely looking idle.
+denied = [r['repo'] for r in plan['repos']
+          if str(r.get('reason', '')).startswith(('not-permitted', 'allowlist-'))]
+if plan.get('allowlistAvailable') is False:
+    print('WARNING: could not read the allowed-projects list — no issue was picked up. '
+          'Check the openclaw pod and ~/.openclaw/projects-allowed.list', file=sys.stderr)
+elif denied:
+    print(f'not permitted ({len(denied)}): ' + ', '.join(denied[:10]))
+print(f'tick done: spawned={spawned}, deferred_due_to_limit={deferred}, '
+      f'permitted={plan.get(\"allowedProjects\")}')
 "

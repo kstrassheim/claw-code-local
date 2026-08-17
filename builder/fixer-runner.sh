@@ -28,12 +28,66 @@
 #                             $GITHUB_TOKEN at startup via /user.
 #   FIXER_POLL_INTERVAL     — seconds between comment polls (default 300)
 #   FIXER_MAX_LIFETIME      — overall wall-clock cap, seconds (default 6h)
+#   STORY_POINTS            — the issue's size, passed by the spawner from the
+#                             plan. Picks solver vs solver.small. Absent means
+#                             unestimated, which defaults to 8 — the strong
+#                             model — because under-estimating is what makes a
+#                             run die half-finished.
+#   FIXER_SYNC_RETRY_CAP    — how many times an unresolved rebase conflict may
+#                             wake the agent while neither end has moved
+#                             (default 4)
 set -uo pipefail
 
 REPO="$1"
 ISSUE_NUM="$2"
 ISSUE_URL="$3"
 ISSUE_TITLE="$4"
+
+# -- permission gate ---------------------------------------------------
+# FIRST, ahead of the identity lookup, the lock and the clone — see
+# builder/project_allowlist.py. Being assigned an issue is how somebody ASKS
+# for work; the owner's allowed-projects list is the answer. A refused repo
+# must cost nothing and leave nothing behind, which it only can if the refusal
+# happens before anything is created.
+#
+# Exit 2 is the CLI's "not permitted"; anything else means the list could not
+# be read, which permits nothing either. Exit 0 from the runner, not a
+# failure: not being permitted is a normal answer, and a CronJob that reports
+# failures for it trains everyone to ignore its failures.
+if ! PERM_REASON="$(project-allow check "$REPO" 2>&1)"; then
+  echo "[permission] refusing to work on $REPO — ${PERM_REASON:-project-allow unavailable}" >&2
+  echo "[permission] Grant it from chat with:  projects add $REPO" >&2
+  exit 0
+fi
+
+# -- runtime knobs -----------------------------------------------------
+# The builder units are installed FLAT next to this script (/usr/local/bin in
+# the image), so the script's own directory is where the shell libraries and
+# the Python modules live. Resolved rather than hardcoded so a copy running
+# from a checkout finds its siblings instead of silently falling back to a
+# different deployment's version of them.
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+[ -n "$LIB_DIR" ] && [ -r "$LIB_DIR/agent-models.sh" ] || LIB_DIR="/usr/local/bin"
+CLAW_LIB_DIR="$LIB_DIR"
+export PYTHONPATH="$LIB_DIR:${PYTHONPATH:-}"
+
+# The shared shell libraries, installed WITHOUT their .sh suffix in the image;
+# the suffix is tried too so this runner also works from a checkout. A library
+# that is genuinely absent is not fatal: every call site below is guarded,
+# because a missing tuning knob must not stop an issue from being worked.
+_source_lib() {
+  for _c in "$1" "$1.sh"; do
+    if [ -r "$LIB_DIR/$_c" ]; then . "$LIB_DIR/$_c"; return 0; fi
+    if [ -r "/usr/local/bin/$_c" ]; then . "/usr/local/bin/$_c"; return 0; fi
+  done
+  return 1
+}
+_source_lib agent-limits || true
+_source_lib agent-models || true
+_source_lib agent-thinking || true
+_source_lib agent-slot || true
+_source_lib project-kind || true
+_source_lib project-instructions || true
 
 # Resolve bot identity from $GITHUB_TOKEN unless explicitly pinned via
 # FIXER_BOT_LOGIN. Hardcoding the login would couple the code to one
@@ -55,8 +109,36 @@ else
   fi
 fi
 POLL_INTERVAL="${FIXER_POLL_INTERVAL:-300}"
-MAX_LIFETIME_SECONDS="${FIXER_MAX_LIFETIME:-$((6 * 3600))}"
-AGENT_TURN_TIMEOUT=3500
+
+# How long a turn and a whole run may take. Runtime-adjustable through
+# `agent-limits` (the store lives on the workspace PVC and is read at the
+# START of every run), so a cap can be changed without a redeploy — which is
+# the moment you usually want to change one. Both fall back to the values that
+# were literals here before the store existed.
+_SOLVER_LIFETIME_DEFAULT="${FIXER_MAX_LIFETIME:-$((6 * 3600))}"
+_SOLVER_TURN_DEFAULT=3500
+if command -v agent_limit >/dev/null 2>&1; then
+  MAX_LIFETIME_SECONDS="$(agent_limit solver.lifetime "$_SOLVER_LIFETIME_DEFAULT")"
+  AGENT_TURN_TIMEOUT="$(agent_limit solver.turn "$_SOLVER_TURN_DEFAULT")"
+  agent_limit_note solver.lifetime "$_SOLVER_LIFETIME_DEFAULT" "$MAX_LIFETIME_SECONDS" 2>/dev/null || true
+  agent_limit_note solver.turn "$_SOLVER_TURN_DEFAULT" "$AGENT_TURN_TIMEOUT" 2>/dev/null || true
+else
+  MAX_LIFETIME_SECONDS="$_SOLVER_LIFETIME_DEFAULT"
+  AGENT_TURN_TIMEOUT="$_SOLVER_TURN_DEFAULT"
+fi
+
+# How hard this subsystem thinks. Empty means pass no --thinking and inherit
+# the deployment default.
+AGENT_THINKING=""
+if command -v agent_thinking >/dev/null 2>&1; then
+  AGENT_THINKING="$(agent_thinking solver 2>/dev/null || echo '')"
+  agent_thinking_note solver "$AGENT_THINKING" 2>/dev/null || true
+fi
+
+# The name this run holds its concurrency slot under. agent-slot reads it, and
+# an unnamed holder makes "who is holding the slots?" unanswerable in the log
+# at the exact moment somebody is asking it.
+SLOT_NAME="solver $REPO#$ISSUE_NUM"
 
 STATE_ROOT="${HOME:-/home/node}/.openclaw"
 PROJECTS_ROOT="$STATE_ROOT/projects"
@@ -74,7 +156,40 @@ ISSUE_STATE_DIR="$STATE_ROOT/issue-state"
 CURSOR_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.cursor"
 CI_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-fingerprint"
 
-mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$ISSUE_STATE_DIR" "$(dirname "$PROJECT_DIR")"
+# -- gate state that must OUTLIVE a single run -------------------------
+#
+# Every file here answers a question of the form "have I already done this?",
+# and every one of them is on the PVC rather than in memory because the answer
+# has to survive the run being killed. A run is killed by every deploy.
+#
+# The autonomous review requested for a head sha. One request per sha, so a
+# re-push asks again and a tick that changes nothing says nothing.
+AWAITING_REVIEW_MARKER="$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.awaiting-review"
+# The head sha a human sign-off was ASKED for, and the head sha it was GIVEN
+# for. Two files, because "I asked" and "they answered" are different facts
+# and collapsing them re-asks a question already answered.
+APPROVAL_ASKED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.approval-asked"
+APPROVAL_GRANTED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.approval-granted"
+# "<default-branch-sha>:<head-sha>" of the last rebase conflict handed to the
+# agent, plus how many times THAT pair has been handed over.
+#
+# The fingerprint alone is not enough, and the reason is the whole point of
+# this pair. It is written the moment a conflict is OBSERVED, before the agent
+# has done anything about it — so a woken run that then died (a 429, a deploy,
+# an OOM) spent the trigger for good. Every later tick found the stored and
+# current pair identical, declined to re-wake, and the pull request sat
+# conflicted forever while the log said, reasonably, "already handed to the
+# agent". A bounded retry budget is the answer, because detecting "the agent
+# did not finish" reliably is harder than simply trying again a few times.
+# Either end moving produces a new fingerprint, which RESETS the budget, so a
+# conflict that was actually resolved costs nothing extra.
+SYNC_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.sync-fp"
+SYNC_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.sync-retries"
+SYNC_RETRY_CAP="${FIXER_SYNC_RETRY_CAP:-4}"
+MERGE_CONFLICT_NEW=0
+
+mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$ISSUE_STATE_DIR" \
+         "$STATE_ROOT/issue-markers" "$(dirname "$PROJECT_DIR")"
 
 # Per-repo lock. A fixer killed without its EXIT trap firing (SIGKILL,
 # pod restart, lifetime cap) leaves an orphaned lock dir. The planner
@@ -112,6 +227,8 @@ WIPE_FULL_STATE=0
 wipe_issue_state() {
   rm -f "$CURSOR_FILE" 2>/dev/null
   rm -f "$CI_FP_FILE" 2>/dev/null
+  rm -f "$AWAITING_REVIEW_MARKER" "$APPROVAL_ASKED_FILE" \
+        "$APPROVAL_GRANTED_FILE" "$SYNC_FP_FILE" "$SYNC_RETRY_FILE" 2>/dev/null
   rm -f "$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.lexical-asked" 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.jsonl 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory.jsonl 2>/dev/null
@@ -119,13 +236,106 @@ wipe_issue_state() {
   echo "[cleanup] wiped local state for $REPO#$ISSUE_NUM (cursor + ci-fingerprint + lexical-asked + session files)"
 }
 
+# -- exit bookkeeping --------------------------------------------------
+#
+# Three things happen here, in this order, and the order matters.
+#
+# 1. A delivered story has to SAY it was delivered. `mergedAt` on the story
+#    document is what every report is built on — completed points, velocity,
+#    the burndown, the story timeline — so a sprint where nothing writes it
+#    reads as a sprint that shipped nothing, and a burndown line that never
+#    falls looks like a bot that never finishes anything.
+#
+#    Asked of GitHub rather than recorded at the merge call, because a pull
+#    request also lands by other routes: a human merges it, or a later tick
+#    does. Asking what is TRUE beats trusting the path that happened to run.
+#    Which pull request actually delivered the issue is delivering_pr.pick's
+#    decision, not a guess from "the newest related one" — see that module for
+#    what that guess costs.
+#
+# 2. Record what this run COST, so the estimator can be corrected by the
+#    difference between the size it predicted and the model calls it took.
+#
+# 3. Release the concurrency slot. Never leak one: a leaked slot throttles all
+#    three subsystems, and it looks exactly like a slot nobody wanted.
+record_delivery() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local prs created
+  prs="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=50" \
+    2>/dev/null || true)"
+  [ -n "$prs" ] || return 0
+  created="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('created_at') or '')" \
+    2>/dev/null || echo '')"
+  printf '%s' "$prs" | REPO="$REPO" ISSUE_NUM="$ISSUE_NUM" BRANCH="${BRANCH:-}" \
+    ISSUE_CREATED="$created" LIB="${CLAW_LIB_DIR:-/usr/local/bin}" python3 -c "
+import json, os, sys
+sys.path.insert(0, os.environ['LIB'])
+try:
+    import delivering_pr, planning_docs as docs, planning_store as store
+except Exception:
+    raise SystemExit(0)
+try:
+    prs = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+repo = os.environ['REPO']
+number = os.environ['ISSUE_NUM']
+pr = delivering_pr.pick(prs, number,
+                        branch=os.environ.get('BRANCH') or '',
+                        not_before=os.environ.get('ISSUE_CREATED') or '',
+                        repo=repo)
+if not pr:
+    raise SystemExit(0)
+doc_id = docs.story_pk('github', repo, number)
+rows = store.query({'id': doc_id, 'type': 'story'}, limit=1)
+if not rows:
+    raise SystemExit(0)   # never planned; inventing a story now would be worse
+doc = rows[0]
+if doc.get('mergedAt'):
+    raise SystemExit(0)   # already recorded — this only ever FILLS an empty field
+doc['mergedAt'] = pr.get('merged_at')
+doc['deliveredBy'] = '%s#%s' % (repo, pr.get('number'))
+if store.write(doc):
+    sys.stderr.write('[planning] story recorded as delivered (PR #%s merged)\n'
+                     % pr.get('number'))
+" 2>&1 | grep -E '^\[planning\]' || true
+}
+
 on_exit() {
+  record_delivery || true
+
+  # Never fatal — planning-record always exits 0, and it is called with `|| true`
+  # as well. A run that did its job must not be reported as failed because the
+  # planning store had a bad day.
+  if command -v planning-record >/dev/null 2>&1; then
+    planning-record --role solver --repo "$REPO" --issue "$ISSUE_NUM" \
+      --run-id "${SESSION_ID:-unknown}" --log "$LOG_FILE" \
+      --since-line "${PLANNING_LOG_MARK:-0}" \
+      --model "${AGENT_MODEL:-}" --worker "${BOT_LOGIN:-}" \
+      --started "${PLANNING_STARTED_AT:-}" \
+      --outcome "${RUN_OUTCOME:-}" || true
+  fi
+
+  command -v release_agent_slot >/dev/null 2>&1 && release_agent_slot
+
   if [ "$WIPE_FULL_STATE" = "1" ]; then
     wipe_issue_state
   fi
   rm -rf "$LOCK_DIR"
 }
 trap on_exit EXIT
+
+# What this run is recorded as having achieved. Set at the points that decide
+# it; empty means "nothing conclusive happened", which is the truth for the
+# overwhelming majority of ticks.
+RUN_OUTCOME=""
+PLANNING_STARTED_AT="$(date -Iseconds)"
+# The log is per ISSUE and accumulates across runs, so counting the whole file
+# would attribute every previous run's model calls to this one.
+PLANNING_LOG_MARK="$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)"
 
 rm -rf "$PROJECT_DIR/.fixer.lock" 2>/dev/null
 exec >> "$LOG_FILE" 2>&1

@@ -48,8 +48,9 @@ RUN set -eu; \
       fi; \
     done; \
     echo "SKILLS-LOCKED-ASSERT: verifying nothing unlisted survived"; \
-    find /app -name SKILL.md 2>/dev/null \
-      | sed -E 's#.*/([^/]+)/SKILL\.md$#\1#' | sort -u > /tmp/remaining || true; \
+    find /app -name SKILL.md -not -path '*/node_modules/*' 2>/dev/null \
+      | grep '/skills/' \
+      | sed -E 's#.*/skills/([^/]+)/.*#\1#' | sort -u > /tmp/remaining || true; \
     if [ -s /tmp/remaining ] && grep -vxF -f /tmp/allowed /tmp/remaining > /tmp/extra; then \
       echo "FATAL: bundled skills survived the strip that the allowlist does not name:" >&2; \
       cat /tmp/extra >&2; \

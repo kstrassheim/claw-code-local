@@ -273,17 +273,26 @@ PR_JSON="$(gh_get "/repos/$REPO/pulls/$PR_NUMBER" 2>/dev/null)"
 if [ -z "$PR_JSON" ]; then
   echo "FATAL: could not fetch pull request #$PR_NUMBER"; exit 1
 fi
-read -r PR_STATE PR_DRAFT HEAD_REF BASE_REF HEAD_SHA PR_URL PR_AUTHOR PR_MERGED <<EOF
+# One line, one field per column. Empty values are emitted as `-` and turned
+# back into "" below: `read` splits on whitespace, so a single empty field
+# would shift every later one along by a column — and the column that shifts
+# into HEAD_SHA decides what gets reviewed.
+read -r PR_STATE PR_DRAFT HEAD_REF BASE_REF HEAD_SHA PR_URL PR_AUTHOR <<EOF
 $(echo "$PR_JSON" | python3 -c "
 import sys, json
 p = json.load(sys.stdin)
-print(p.get('state',''), (1 if p.get('draft') else 0),
-      (p.get('head') or {}).get('ref',''), (p.get('base') or {}).get('ref',''),
-      (p.get('head') or {}).get('sha',''), p.get('html_url',''),
-      (p.get('user') or {}).get('login',''),
-      (1 if p.get('merged') else 0))
+def f(v):
+    v = str(v)
+    return v if v.strip() else '-'
+print(f(p.get('state','')), (1 if p.get('draft') else 0),
+      f((p.get('head') or {}).get('ref','')), f((p.get('base') or {}).get('ref','')),
+      f((p.get('head') or {}).get('sha','')), f(p.get('html_url','')),
+      f((p.get('user') or {}).get('login','')))
 ")
 EOF
+for _f in PR_STATE HEAD_REF BASE_REF HEAD_SHA PR_URL PR_AUTHOR; do
+  [ "${!_f}" = "-" ] && printf -v "$_f" '%s' ""
+done
 PR_TITLE="$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('title',''))")"
 PR_BODY="$(echo "$PR_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')")"
 

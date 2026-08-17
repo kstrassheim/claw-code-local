@@ -340,6 +340,21 @@ class WhatIsWorthRetrying(StoreTestCase):
         self.assertEqual(store.flush(), 0)
         self.assertEqual(store.spool_depth(), 1)
 
+    def test_the_line_between_permanent_and_transient(self):
+        # Stated as a table because this single predicate decides whether a
+        # document is kept or thrown away. Getting it wrong in one direction
+        # loses data; in the other it wedges the whole spool behind one
+        # unsendable document.
+        store = self.store(PLANNING_MONGO_URI=URI)
+        self.assertTrue(store._is_permanent(DocumentTooLarge("17 MB")))
+        self.assertTrue(store._is_permanent(OperationFailure("bad", code=121)))
+        self.assertFalse(store._is_permanent(
+            ServerSelectionTimeoutError("down")))
+        self.assertFalse(store._is_permanent(
+            OperationFailure("not authorized", code=13)))
+        self.assertFalse(store._is_permanent(
+            OperationFailure("auth failed", code=18)))
+
     def test_a_paused_flush_preserves_order(self):
         fake = FakeCollection(write_error=ServerSelectionTimeoutError("down"))
         store = self.store(fake, PLANNING_MONGO_URI=URI)

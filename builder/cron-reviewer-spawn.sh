@@ -39,11 +39,13 @@ import json, os, subprocess, sys, shlex
 plan = json.load(sys.stdin)
 
 OPENCLAW_POD = os.environ['OPENCLAW_POD']
-NAMESPACE = plan['namespace']
 
+# Error first: the earliest planner failures answer before they know the
+# namespace, so reading it up front would turn a clear message into a KeyError.
 if plan.get('error'):
     print(f\"planner error: {plan['error']}\", file=sys.stderr)
     sys.exit(1)
+NAMESPACE = plan['namespace']
 
 spawned = 0
 skipped = 0

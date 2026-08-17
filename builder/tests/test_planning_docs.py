@@ -51,6 +51,27 @@ class KeysAreHostAware(unittest.TestCase):
     def test_the_only_configured_host_is_github(self):
         self.assertEqual(self.d.HOSTS, ("github",))
 
+    def test_a_sprint_key_is_just_its_number(self):
+        # Sprints are global, so no host: sprint 4 is sprint 4 regardless of
+        # which repositories its stories came from.
+        self.assertEqual(self.d.sprint_pk(4), "sprint#4")
+
+    def test_a_worker_key_is_host_aware_like_the_others(self):
+        # User ids are only unique within one host.
+        self.assertEqual(self.d.worker_pk("github", 1234), "worker#github#1234")
+
+    def test_the_four_key_kinds_cannot_be_confused_for_each_other(self):
+        keys = {self.d.story_pk("github", "a/b", 1),
+                self.d.deploy_pk("github", "a/b", "abc123"),
+                self.d.sprint_pk(1),
+                self.d.worker_pk("github", 1)}
+        self.assertEqual(len(keys), 4)
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertIn(key.split("#", 1)[0],
+                              (self.d.STORY, self.d.DEPLOY, self.d.SPRINT,
+                               self.d.WORKER))
+
 
 class StoriesSpeakOfPullRequests(unittest.TestCase):
     def setUp(self):

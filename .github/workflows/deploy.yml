@@ -57,6 +57,7 @@ jobs:
           echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
           echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
           echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "PYMONGO_VERSION=${PYMONGO_VERSION}" >> "$GITHUB_ENV"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Log In To Registry
@@ -117,6 +118,7 @@ jobs:
             --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
             --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
             --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            --build-arg "PYMONGO_VERSION=${PYMONGO_VERSION}" \
             --cache-from "${IMAGE_NAME}:buildcache-final" \
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             -t "${IMAGE_NAME}:latest" \

@@ -179,6 +179,7 @@ jobs:
           echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
           echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
           echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "PYMONGO_VERSION=${PYMONGO_VERSION}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         # DOCKER_HOST is set by the dind sidecar to a TLS socket.
@@ -266,6 +267,7 @@ jobs:
             --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
             --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
             --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            --build-arg "PYMONGO_VERSION=${PYMONGO_VERSION}" \
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             builder/
 

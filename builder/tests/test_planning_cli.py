@@ -193,6 +193,115 @@ class DeferringToTheNextSprint(CliTestCase):
             self.assertEqual(self.cli.clear_next_sprint_labels(), 0)
 
 
+class TheRolloverTick(unittest.TestCase):
+    """`planning sprint-tick`, which is what makes sprints autonomous."""
+
+    def setUp(self):
+        os.makedirs(TMP_ROOT, exist_ok=True)
+        self.dir = tempfile.mkdtemp(prefix="tick-", dir=TMP_ROOT)
+        self.marker = os.path.join(self.dir, "sprint-current.json")
+        self.spool = os.path.join(self.dir, "spool.jsonl")
+        env = temp_env(PLANNING_MONGO_URI=None,
+                       PLANNING_SPOOL=self.spool,
+                       GITHUB_TOKEN=None,
+                       SPRINT_CURRENT_FILE=self.marker,
+                       SPRINT_SCHEDULE_CONF=os.path.join(self.dir, "sched.conf"))
+        env.__enter__()
+        self.addCleanup(env.__exit__, None, None, None)
+        load("planning_store")
+        load("sprint_current")
+        load("sprint_schedule")
+        self.cli = load_script("planning")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def tick(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.cli.main(["sprint-tick"])
+        return rc, out.getvalue()
+
+    def spooled(self):
+        import json
+        if not os.path.exists(self.spool):
+            return []
+        with open(self.spool, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def test_the_first_tick_opens_sprint_one_without_being_asked(self):
+        rc, text = self.tick()
+        self.assertEqual(rc, 0)
+        self.assertIn("sprint 1 started", text)
+        self.assertEqual(load("sprint_current").number(), 1)
+
+    def test_the_sprint_document_is_written_even_with_no_store(self):
+        # Guarding this behind enabled() would mean the document is never
+        # created at all while the output promises it has been kept: the
+        # sprint would exist in the local marker, every runner would log work
+        # against it, and no sprint document would exist for any report to
+        # attach that work to.
+        self.tick()
+        sprints = [d for d in self.spooled() if d.get("type") == "sprint"]
+        self.assertEqual(len(sprints), 1)
+        self.assertEqual(sprints[0]["number"], 1)
+        self.assertEqual(sprints[0]["state"], "active")
+
+    def test_ticking_again_does_nothing(self):
+        # It runs every few minutes. A hundred ticks in a row must not open a
+        # hundred sprints.
+        self.tick()
+        rc, text = self.tick()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("started", text)
+        self.assertEqual(load("sprint_current").number(), 1)
+        self.assertEqual(
+            len([d for d in self.spooled() if d.get("type") == "sprint"]), 1)
+
+    def test_the_marker_is_written_before_anything_that_can_fail(self):
+        # It is what every runner reads, and it cannot fail on a network. A
+        # sprint that exists locally but not yet in the store is far better
+        # than the reverse, where work events carry a number nothing resolves.
+        self.tick()
+        self.assertTrue(os.path.exists(self.marker))
+
+    def test_the_schedule_is_reported_in_words(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.cli.main(["schedule"])
+        self.assertEqual(rc, 0)
+        self.assertIn("Automatic sprints", out.getvalue())
+
+    def test_a_schedule_it_cannot_read_is_refused(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.cli.main(["schedule", "sometime"])
+        self.assertEqual(rc, 2)
+        self.assertIn("could not find", out.getvalue())
+
+
+class ResolvingWhichSprintIsMeant(CliTestCase):
+    def test_a_missing_sprint_is_a_sentence_and_not_an_exception(self):
+        # `current` and `last` are how sprints are named in chat far more
+        # often than by number; int("current") would raise, and to a chat
+        # agent a traceback reads as "the reporting tool is broken".
+        for which in (None, "current", "last", "4", "nonsense"):
+            with self.subTest(which=which):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertIsNone(self.cli.resolve_sprint(which))
+                self.assertTrue(out.getvalue().strip())
+
+    def test_next_sprint_is_answered_without_inventing_a_document(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(self.cli.resolve_sprint("next"))
+        self.assertIn("has not started yet", out.getvalue())
+
+    def test_the_stories_of_a_sprint_are_asked_for_by_sprint_id(self):
+        self.assertEqual(self.cli._stories_in_sprint(4), [])
+
+
 class SprintDateArithmetic(CliTestCase):
     def test_the_days_of_a_sprint_are_inclusive_of_both_ends(self):
         days = self.cli._days("2026-08-08T13:00:00+00:00",
