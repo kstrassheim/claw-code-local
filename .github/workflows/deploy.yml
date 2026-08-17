@@ -108,13 +108,38 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
         run: |
+          # A CORRUPT CACHE MUST NOT BE ABLE TO FAIL THE BUILD.
+          #
+          # `--cache-from` against a layer whose blob is truncated does not
+          # degrade to a cache miss — it aborts with
+          # `failed to compute cache key: short read ... unexpected EOF`, and
+          # every build then fails identically until someone deletes the tag
+          # by hand. That happened: three consecutive deploys failed this way,
+          # and the error names a cache key rather than anything the change
+          # touched, so it reads like a broken build.
+          #
+          # A truncated blob is written whenever a push is interrupted, which
+          # on this registry is a routine event (it shares a disk that has
+          # filled before). So the cache is treated as a hint: use it if it
+          # works, discard it and build cold if it does not.
           docker pull "${IMAGE_NAME}:buildcache-base" 2>/dev/null || true
-          docker build \
+          if ! docker build \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
             --cache-from "${IMAGE_NAME}:buildcache-base" \
             -t "openclaw-base:${UPSTREAM_REF}" \
             -t "${IMAGE_NAME}:buildcache-base" \
-            _openclaw_src
+            _openclaw_src; then
+            echo "::warning::base build failed with the registry cache; retrying without it"
+            docker rmi "${IMAGE_NAME}:buildcache-base" 2>/dev/null || true
+            docker build \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --no-cache \
+              -t "openclaw-base:${UPSTREAM_REF}" \
+              -t "${IMAGE_NAME}:buildcache-base" \
+              _openclaw_src
+          fi
+          # Pushing a freshly built cache is what REPLACES a corrupt one, so
+          # the recovery is self-healing rather than one-shot.
           docker push "${IMAGE_NAME}:buildcache-base" || true
 
       - name: Extend Image with Python Packages
@@ -122,46 +147,67 @@ jobs:
         env:
           DOCKER_BUILDKIT: "1"
         run: |
+          # Build arguments are collected once so the cached and uncached
+          # attempts below cannot drift apart. Two hand-maintained copies of a
+          # thirty-entry list is how one of them quietly loses a pin.
+          BUILD_ARGS=(
+            "BUILDKIT_INLINE_CACHE=1 "
+            "BASE_IMAGE=openclaw-base:${UPSTREAM_REF}"
+            "EPHE_FETCH_NONCE=${IMAGE_TAG}"
+            "GH_CLI_VERSION=${GH_CLI_VERSION}"
+            "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}"
+            "GLAB_VERSION=${GLAB_VERSION}"
+            "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}"
+            "TERRAFORM_VERSION=${TERRAFORM_VERSION}"
+            "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}"
+            "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}"
+            "AWS_CLI_VERSION=${AWS_CLI_VERSION}"
+            "GCLOUD_VERSION=${GCLOUD_VERSION}"
+            "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}"
+            "PYMONGO_VERSION=${PYMONGO_VERSION}"
+            "GIT_LFS_VERSION=${GIT_LFS_VERSION}"
+            "KUBELOGIN_VERSION=${KUBELOGIN_VERSION}"
+            "SEMGREP_VERSION=${SEMGREP_VERSION}"
+            "SEMGREP_MCP_VERSION=${SEMGREP_MCP_VERSION}"
+            "BANDIT_VERSION=${BANDIT_VERSION}"
+            "PIP_AUDIT_VERSION=${PIP_AUDIT_VERSION}"
+            "GITLEAKS_VERSION=${GITLEAKS_VERSION}"
+            "PWSH_VERSION=${PWSH_VERSION}"
+            "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}"
+            "PESTER_VERSION=${PESTER_VERSION}"
+            "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}"
+            "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}"
+            "AZ_ACCOUNTS_VERSION=${AZ_ACCOUNTS_VERSION}"
+            "AZ_AUTOMATION_VERSION=${AZ_AUTOMATION_VERSION}"
+            "AZ_DATAFACTORY_VERSION=${AZ_DATAFACTORY_VERSION}"
+            "AZ_SYNAPSE_VERSION=${AZ_SYNAPSE_VERSION}"
+            "NUCLEI_VERSION=${NUCLEI_VERSION}"
+            "NUCLEI_TEMPLATES_VERSION=${NUCLEI_TEMPLATES_VERSION}"
+            "TESTSSL_VERSION=${TESTSSL_VERSION}"
+          )
+          ARGS=()
+          for a in "${BUILD_ARGS[@]}"; do ARGS+=(--build-arg "$a"); done
+
+          # Same reasoning as the base build: a truncated cache blob aborts
+          # the build instead of missing, so the cache is a hint and never a
+          # dependency. Pushing the fresh cache afterwards replaces the
+          # corrupt one, so this heals rather than needing a manual delete.
           docker pull "${IMAGE_NAME}:buildcache-final" 2>/dev/null || true
-          docker build \
-            --build-arg BUILDKIT_INLINE_CACHE=1 \
-            --build-arg "BASE_IMAGE=openclaw-base:${UPSTREAM_REF}" \
-            --build-arg "EPHE_FETCH_NONCE=${IMAGE_TAG}" \
-            --build-arg "GH_CLI_VERSION=${GH_CLI_VERSION}" \
-            --build-arg "GITHUB_MCP_SERVER_VERSION=${GITHUB_MCP_SERVER_VERSION}" \
-            --build-arg "GLAB_VERSION=${GLAB_VERSION}" \
-            --build-arg "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" \
-            --build-arg "TERRAFORM_VERSION=${TERRAFORM_VERSION}" \
-            --build-arg "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" \
-            --build-arg "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" \
-            --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
-            --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
-            --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
-            --build-arg "PYMONGO_VERSION=${PYMONGO_VERSION}" \
-            --build-arg "GIT_LFS_VERSION=${GIT_LFS_VERSION}" \
-            --build-arg "KUBELOGIN_VERSION=${KUBELOGIN_VERSION}" \
-            --build-arg "SEMGREP_VERSION=${SEMGREP_VERSION}" \
-            --build-arg "SEMGREP_MCP_VERSION=${SEMGREP_MCP_VERSION}" \
-            --build-arg "BANDIT_VERSION=${BANDIT_VERSION}" \
-            --build-arg "PIP_AUDIT_VERSION=${PIP_AUDIT_VERSION}" \
-            --build-arg "GITLEAKS_VERSION=${GITLEAKS_VERSION}" \
-            --build-arg "PWSH_VERSION=${PWSH_VERSION}" \
-            --build-arg "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}" \
-            --build-arg "PESTER_VERSION=${PESTER_VERSION}" \
-            --build-arg "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}" \
-            --build-arg "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}" \
-            --build-arg "AZ_ACCOUNTS_VERSION=${AZ_ACCOUNTS_VERSION}" \
-            --build-arg "AZ_AUTOMATION_VERSION=${AZ_AUTOMATION_VERSION}" \
-            --build-arg "AZ_DATAFACTORY_VERSION=${AZ_DATAFACTORY_VERSION}" \
-            --build-arg "AZ_SYNAPSE_VERSION=${AZ_SYNAPSE_VERSION}" \
-            --build-arg "NUCLEI_VERSION=${NUCLEI_VERSION}" \
-            --build-arg "NUCLEI_TEMPLATES_VERSION=${NUCLEI_TEMPLATES_VERSION}" \
-            --build-arg "TESTSSL_VERSION=${TESTSSL_VERSION}" \
+          if ! docker build "${ARGS[@]}" \
             --cache-from "${IMAGE_NAME}:buildcache-final" \
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             -t "${IMAGE_NAME}:latest" \
             -t "${IMAGE_NAME}:buildcache-final" \
-            builder/
+            builder/; then
+            echo "::warning::image build failed with the registry cache; retrying without it"
+            docker rmi "${IMAGE_NAME}:buildcache-final" 2>/dev/null || true
+            docker build "${ARGS[@]}" \
+              --no-cache \
+              -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+              -t "${IMAGE_NAME}:latest" \
+              -t "${IMAGE_NAME}:buildcache-final" \
+              builder/
+          fi
 
       - name: Push Image
         if: steps.skip.outputs.skip != 'true'
