@@ -57,6 +57,26 @@ jobs:
           echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
           echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
           echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
+          echo "PYMONGO_VERSION=${PYMONGO_VERSION}" >> "$GITHUB_ENV"
+          echo "GIT_LFS_VERSION=${GIT_LFS_VERSION}" >> "$GITHUB_ENV"
+          echo "KUBELOGIN_VERSION=${KUBELOGIN_VERSION}" >> "$GITHUB_ENV"
+          echo "SEMGREP_VERSION=${SEMGREP_VERSION}" >> "$GITHUB_ENV"
+          echo "SEMGREP_MCP_VERSION=${SEMGREP_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "BANDIT_VERSION=${BANDIT_VERSION}" >> "$GITHUB_ENV"
+          echo "PIP_AUDIT_VERSION=${PIP_AUDIT_VERSION}" >> "$GITHUB_ENV"
+          echo "GITLEAKS_VERSION=${GITLEAKS_VERSION}" >> "$GITHUB_ENV"
+          echo "PWSH_VERSION=${PWSH_VERSION}" >> "$GITHUB_ENV"
+          echo "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}" >> "$GITHUB_ENV"
+          echo "PESTER_VERSION=${PESTER_VERSION}" >> "$GITHUB_ENV"
+          echo "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}" >> "$GITHUB_ENV"
+          echo "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}" >> "$GITHUB_ENV"
+          echo "AZ_ACCOUNTS_VERSION=${AZ_ACCOUNTS_VERSION}" >> "$GITHUB_ENV"
+          echo "AZ_AUTOMATION_VERSION=${AZ_AUTOMATION_VERSION}" >> "$GITHUB_ENV"
+          echo "AZ_DATAFACTORY_VERSION=${AZ_DATAFACTORY_VERSION}" >> "$GITHUB_ENV"
+          echo "AZ_SYNAPSE_VERSION=${AZ_SYNAPSE_VERSION}" >> "$GITHUB_ENV"
+          echo "NUCLEI_VERSION=${NUCLEI_VERSION}" >> "$GITHUB_ENV"
+          echo "NUCLEI_TEMPLATES_VERSION=${NUCLEI_TEMPLATES_VERSION}" >> "$GITHUB_ENV"
+          echo "TESTSSL_VERSION=${TESTSSL_VERSION}" >> "$GITHUB_ENV"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Log In To Registry
@@ -117,6 +137,26 @@ jobs:
             --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
             --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
             --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \
+            --build-arg "PYMONGO_VERSION=${PYMONGO_VERSION}" \
+            --build-arg "GIT_LFS_VERSION=${GIT_LFS_VERSION}" \
+            --build-arg "KUBELOGIN_VERSION=${KUBELOGIN_VERSION}" \
+            --build-arg "SEMGREP_VERSION=${SEMGREP_VERSION}" \
+            --build-arg "SEMGREP_MCP_VERSION=${SEMGREP_MCP_VERSION}" \
+            --build-arg "BANDIT_VERSION=${BANDIT_VERSION}" \
+            --build-arg "PIP_AUDIT_VERSION=${PIP_AUDIT_VERSION}" \
+            --build-arg "GITLEAKS_VERSION=${GITLEAKS_VERSION}" \
+            --build-arg "PWSH_VERSION=${PWSH_VERSION}" \
+            --build-arg "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}" \
+            --build-arg "PESTER_VERSION=${PESTER_VERSION}" \
+            --build-arg "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}" \
+            --build-arg "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}" \
+            --build-arg "AZ_ACCOUNTS_VERSION=${AZ_ACCOUNTS_VERSION}" \
+            --build-arg "AZ_AUTOMATION_VERSION=${AZ_AUTOMATION_VERSION}" \
+            --build-arg "AZ_DATAFACTORY_VERSION=${AZ_DATAFACTORY_VERSION}" \
+            --build-arg "AZ_SYNAPSE_VERSION=${AZ_SYNAPSE_VERSION}" \
+            --build-arg "NUCLEI_VERSION=${NUCLEI_VERSION}" \
+            --build-arg "NUCLEI_TEMPLATES_VERSION=${NUCLEI_TEMPLATES_VERSION}" \
+            --build-arg "TESTSSL_VERSION=${TESTSSL_VERSION}" \
             --cache-from "${IMAGE_NAME}:buildcache-final" \
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             -t "${IMAGE_NAME}:latest" \
@@ -226,6 +266,13 @@ jobs:
           # can open internal deploy URLs without ERR_CERT_AUTHORITY_INVALID.
           # Optional; kept in the Secret so the internal CA stays out of git.
           INTERNAL_CA_CERT:                ${{ secrets.INTERNAL_CA_CERT }}
+          # Comma-separated `owner/repo` list used to SEED the bot's
+          # allowed-projects list the first time a workspace volume comes up.
+          # After that the list belongs to the `projects` chat skill and lives
+          # on the volume, and this value is ignored — so a revoke is never
+          # undone by a deploy. Optional: an empty list means the bot starts
+          # permitted on nothing, which is the correct default.
+          PROJECTS_ALLOWED_BOOTSTRAP:      ${{ secrets.PROJECTS_ALLOWED_BOOTSTRAP }}
         run: |
           kubectl create secret generic openclaw-secrets \
             --namespace claw-code-local \
@@ -245,5 +292,6 @@ jobs:
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
             --from-literal=GOOGLE_APPLICATION_CREDENTIALS="/etc/openclaw/secrets/gcp-service-account.json" \
             --from-literal=TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+            --from-literal=PROJECTS_ALLOWED_BOOTSTRAP="$PROJECTS_ALLOWED_BOOTSTRAP" \
             -o yaml \
           | kubectl apply -f -

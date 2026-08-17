@@ -21,3 +21,8 @@ env/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Test sandboxes: the shell half of the suite runs bash, which cannot see
+# the system temp directory in every environment this repo is developed in,
+# so builder/tests/harness.py puts its throwaway HOMEs under the checkout.
+.test-tmp/

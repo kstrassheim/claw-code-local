@@ -11,17 +11,30 @@ data:
   SKILL.md: |
     ---
     name: tester
-    description: Toggle and inspect the autonomous deployment-tester that runs as a subprocess inside this pod.
+    # The description is the only thing that decides whether this file gets
+    # read, so it has to name what the body actually answers — including the
+    # three scan switches, which are the questions users ask about most.
+    description: >-
+      Control the autonomous deployment tester: start, stop and inspect it,
+      and toggle its three optional scan passes — the static scan (SAST),
+      the live security scan (pen test) and the AI code review.
     user-invocable: true
     ---
 
     # tester — control the autonomous deployment tester
 
     A CronJob `tester` (namespace `claw-code-local`) ticks every 10
-    minutes. On each tick it lists repos the bot collaborates on,
-    fetches their default-branch HEAD SHA, and **spawns a
-    `tester-runner` subprocess inside this very pod** for each
-    repo whose HEAD differs from the last-tested SHA on disk.
+    minutes, at :04, :14, :24 … — offset from the issue-watcher and the
+    pull-request reviewer so no two planners fire in the same minute.
+    On each tick it takes the **allowed-projects list** as its candidate
+    list (`projects list`; a repository that is not on it is never
+    tested), fetches each one's default-branch HEAD SHA, and **spawns a
+    `tester-runner` subprocess inside this very pod** for each repo whose
+    HEAD differs from the last-tested SHA on disk.
+
+    It holds back entirely while the issue solver or the reviewer still
+    have queued work — "first solve and merge, then test". A tick that
+    did nothing says which it was: `tester held back — …`.
 
     The tester is a different role from the issue-fixer:
     - It does NOT edit code, push commits, or open PRs.
@@ -30,7 +43,20 @@ data:
       collects errors from the browser + cloud-side logs.
     - It STAGES issue drafts during the run; the wrapper creates
       real GitHub issues with the right assignee AFTER the agent
-      exits. Tester-created issues carry the label `tester`.
+      exits, dropping any draft that duplicates an already-open
+      issue. Tester-created issues carry the label `tester`.
+    - Findings from every pass are consolidated into ONE issue per
+      root cause, not one per symptom.
+
+    On top of the functional test it can run **three optional passes**,
+    each toggled from chat and each **OFF BY DEFAULT** (see the
+    `sast` / `pentest` / `codereview` commands below):
+
+    | Pass | Switch | What it does |
+    |---|---|---|
+    | SAST | `tester sast on` | static scan of the whole tree at the tested commit |
+    | pen test | `tester pentest on` | live scan of the deployed app — **also needs the repo's own `PENTEST_ALLOWED_HOSTS` file** |
+    | AI code review | `tester codereview on` | reads the whole repository and reasons about it |
 
     **Concurrency: per-repo, capped at 1**, same as the fixer but
     on a separate lock dir (`~/.openclaw/.tester-locks/<owner>__<name>/`)
@@ -50,6 +76,15 @@ data:
     | `tester list`, `what's being tested?`, `active testers` | the list command |
     | `tester logs <repo>` | tail the tester log for that repo |
     | `tester last <repo>` | print the last test-run summary for that repo |
+    | `tester sast status`, `is the static scan on?` | the sast status command |
+    | `tester sast on`, `enable sast`, `enable static scanning` | the sast on command |
+    | `tester sast off`, `disable sast`, `stop static scanning` | the sast off command |
+    | `tester pentest status`, `is the pen test on?` | the pentest status command |
+    | `tester pentest on`, `enable pen tests` | the pentest on command |
+    | `tester pentest off`, `disable pen tests`, `stop pen testing` | the pentest off command |
+    | `tester codereview status`, `is the code review on?` | the codereview status command |
+    | `tester codereview on`, `enable the ai code review` | the codereview on command |
+    | `tester codereview off`, `disable the ai code review` | the codereview off command |
 
     ## Commands (run via your `exec` tool — kubectl is in PATH)
 
@@ -61,6 +96,15 @@ data:
     ```
 
     Report `suspended=true` as **stopped**, `false` as **running**.
+
+    Then run all three switch-status commands below and report **every
+    one of them** on the same line, e.g.
+
+    > running · SAST off · pen test off · AI code review off
+
+    Never report the tester's state without the three switches: "running"
+    on its own reads as "everything is being scanned", and by default
+    none of the three passes is.
 
     ### start
 
@@ -124,12 +168,146 @@ data:
 
     If no summary exists yet, report "no test runs for this repo".
 
+    ### sast status / on / off
+
+    The tester can run a STATIC scan (SAST) over the WHOLE tree at the
+    tested commit: semgrep plus the `security` MCP tools — bandit,
+    pip-audit, npm audit, PSScriptAnalyzer, and gitleaks over **both** the
+    working tree and the git history (a credential that was committed and
+    later "removed" is still recoverable, so history is its own scan).
+
+    Unlike the pen test it needs **no per-repository authorisation**: it
+    only reads the repository's own source, and never touches a running
+    system. It is **OFF BY DEFAULT**; the switch is a flag file whose
+    presence means on.
+
+    **status**
+
+    ```
+    test -f $HOME/.openclaw/.sast-enabled && echo "SAST: ON" || echo "SAST: OFF (default)"
+    ```
+
+    **on** — run the static scan on every tested commit:
+
+    ```
+    touch $HOME/.openclaw/.sast-enabled
+    ```
+
+    **off** (the default; functional testing, pen test and AI code review
+    are unaffected):
+
+    ```
+    rm -f $HOME/.openclaw/.sast-enabled
+    ```
+
+    Then run the status command and confirm the new state.
+
+    ### pentest status / on / off
+
+    The tester can run a LIVE SECURITY SCAN (pen test) of the deployed app
+    through the `pentest` MCP. It is **OFF BY DEFAULT**, and it is
+    **TRIPLE-GATED** — all three of these must hold or the scan is
+    skipped, and the run states which one was missing:
+
+    1. **the deploy checks for the tested commit succeeded** — otherwise
+       there is no verified deployment of that commit to scan;
+    2. **the target repository authorised it**, by committing a
+       `PENTEST_ALLOWED_HOSTS` file to its ROOT naming its own host(s),
+       one host or URL per line, `#` comments allowed;
+    3. **this switch is on**.
+
+    Point 2 is not a formality, and this switch cannot substitute for it.
+    `PENTEST_ALLOWED_HOSTS` is a **human-only file in the target
+    repository**: the runner sets the scanner's host allowlist from that
+    file and from nothing else, so turning the pen test on here can never
+    authorise a repository that did not opt in. Actively scanning a host
+    nobody authorised can be illegal — if it isn't sure, it doesn't scan.
+
+    **status** — is the pen test switched on?
+
+    ```
+    test -f $HOME/.openclaw/.pentest-enabled && echo "pen test: ON (runs only where the repo authorises it)" || echo "pen test: OFF (default)"
+    ```
+
+    **on** — switch the pen test on (it then runs for any repository that
+    ships a `PENTEST_ALLOWED_HOSTS` file in its root and whose deploy
+    checks are green):
+
+    ```
+    touch $HOME/.openclaw/.pentest-enabled
+    ```
+
+    Then run the status command and confirm **ON**. Remind the user that a
+    repository still only gets scanned if it authorised it with a
+    `PENTEST_ALLOWED_HOSTS` file in its root, and that the scan only ever
+    targets the host(s) listed there.
+
+    **off** — switch the pen test back off for every repository (this is
+    the default; functional testing continues, only the live scan stops):
+
+    ```
+    rm -f $HOME/.openclaw/.pentest-enabled
+    ```
+
+    Then run the status command and confirm **OFF**. In-flight tester runs
+    already past the scan step won't be interrupted; the next tick honours
+    the switch.
+
+    ### codereview status / on / off
+
+    The tester can additionally do an **AI CODE REVIEW**: it reads the
+    whole checked-out repository itself and reasons about it, rather than
+    pattern-matching. It is a FULL review — security **and** general code
+    quality:
+
+    - security a ruleset cannot find: broken authorization, IDOR, missing
+      server-side validation behind a validating UI, privilege escalation,
+      tenant or data leakage, secrets reaching logs or the client bundle,
+      SSRF, races, business-logic flaws;
+    - correctness and robustness, API/data integrity, performance traps
+      (N+1, unbounded queries), and maintainability problems that will
+      cause the next bug.
+
+    It runs AFTER SAST and the pen test so it can build on them, but does
+    **not** depend on either — with both off (the default) it is the only
+    look anyone takes at this code, and it does the security reasoning
+    itself. Its findings become issues like any other: security ones
+    titled with the `🔒 Security:` prefix, the rest as ordinary issues,
+    all with the same duplicate check.
+
+    It is **OFF BY DEFAULT** because it reads the entire repository, so it
+    is the slowest and most token-expensive pass of a run.
+
+    **status**
+
+    ```
+    test -f $HOME/.openclaw/.codereview-enabled && echo "AI code review: ON" || echo "AI code review: OFF (default)"
+    ```
+
+    **on**
+
+    ```
+    touch $HOME/.openclaw/.codereview-enabled
+    ```
+
+    **off** (the default):
+
+    ```
+    rm -f $HOME/.openclaw/.codereview-enabled
+    ```
+
+    Then run the status command and confirm the new state. When switching
+    it ON, warn the user that each tester run will take noticeably longer
+    and use considerably more tokens.
+
     ## Reporting style
 
-    Keep replies terse. One line per piece of state. Example:
+    Keep replies terse. One line per piece of state, and always all three
+    switches. Example:
 
-    > Tester: **running** · schedule `*/10 * * * *` · last fired
-    > 2026-05-20T19:30:00Z · 0 testers active.
+    > Tester: **running** · SAST **off** · pen test **off** · AI code
+    > review **off** · schedule `4-59/10 * * * *` · last fired
+    > 2026-05-20T19:34:00Z · 0 testers active.
 ---
 # ServiceAccount for the tester CronJob. Same pattern as
 # issue-watcher: scoped to this namespace, only used to exec into
@@ -206,7 +384,14 @@ spec:
   # Slower schedule than the issue-watcher. Tester runs only fire
   # work when the default-branch HEAD changes per repo, so 10 min
   # is fine; running more often just burns API calls.
-  schedule: "*/10 * * * *"
+  #
+  # OFFSET by 4 minutes from the issue-watcher (*/5) and by 2 from the
+  # pull-request reviewer (2-59/5), so no two planners spawn in the same
+  # minute: "4-59/10" fires at :04, :14, :24 … Same 10-minute cadence,
+  # shifted start. Three planners landing together is how the reviewer
+  # took a 429 on its first model call, run after run — see the
+  # concurrency-gate header in builder/agent-slot.sh.
+  schedule: "4-59/10 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
