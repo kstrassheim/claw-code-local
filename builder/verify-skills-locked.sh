@@ -120,6 +120,27 @@ else
         of the three and reports success."
 fi
 
+# The CI re-check of the finished image must ask the IMAGE what is loadable,
+# not search the filesystem itself. When it had its own search it drifted from
+# the build's: it did not exclude node_modules, and two npm dependencies that
+# ship a SKILL.md failed a build in which nothing was wrong. One definition,
+# one implementation.
+# Comments stripped before matching, for the same reason as the Dockerfile
+# above: a guard you can satisfy by writing prose about it is not a guard.
+# This exact check passed on a workflow that had been changed back to its own
+# search, because the comment explaining why it should not still named the
+# script.
+WORKFLOW_CODE="$(cat .github/workflows/*.yml 2>/dev/null | sed 's/#.*//' | awk 'NF')"
+if printf '%s\n' "$WORKFLOW_CODE" | grep -q 'list-loadable-skills'; then
+  ok "the image re-check uses the image's own skill lister"
+elif printf '%s\n' "$WORKFLOW_CODE" | grep -q 'name SKILL.md'; then
+  fail "a workflow searches for SKILL.md itself instead of running
+        list-loadable-skills in the image. Two implementations of one
+        definition drift, and the drift fails builds that are fine."
+else
+  fail "no workflow re-checks the finished image for unlisted skills"
+fi
+
 if printf '%s\n' "$DOCKER_CODE" | grep -q "$ASSERT_SENTINEL"; then
   ok "$DOCKERFILE still asserts the removal took effect ($ASSERT_SENTINEL)"
 else

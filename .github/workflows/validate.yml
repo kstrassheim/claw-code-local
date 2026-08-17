@@ -312,14 +312,20 @@ jobs:
       - name: Only allowlisted bundled skills may ship
         # An upstream skill that survives the strip is a capability the agent
         # can load at runtime, outside the static MCP allowlist. The strip
-        # itself cannot be trusted to have worked: `rm -rf` on a path that
-        # moved in an upstream release exits 0 and does nothing, so this
-        # enumerates what is actually loadable in the finished image and
-        # diffs it against the allowlist.
+        # cannot be trusted to have worked — `rm -rf` on a path that moved in
+        # an upstream release exits 0 and does nothing — so this asks the
+        # FINISHED image what is loadable in it and diffs that against the
+        # allowlist.
+        #
+        # It asks by running the image's own `list-loadable-skills`, rather
+        # than by searching the filesystem itself. An earlier version did its
+        # own search and got a different answer from the one the build used:
+        # it did not exclude node_modules, so two npm dependencies that happen
+        # to ship a SKILL.md failed a build in which nothing was actually
+        # wrong. One definition, one implementation, every caller runs it.
         run: |
-          docker run --rm --entrypoint sh "${IMAGE_NAME}:${IMAGE_TAG}" -c \
-            'find /app -name SKILL.md 2>/dev/null | grep /skills/ || true' \
-            | sed -E 's#.*/skills/([^/]+)/.*#\1#' | sort -u > /tmp/shipped-skills.txt
+          docker run --rm --entrypoint list-loadable-skills \
+            "${IMAGE_NAME}:${IMAGE_TAG}" > /tmp/shipped-skills.txt
           grep -vE '^\s*(#|$)' builder/BUNDLED_SKILLS_ALLOWED | sort -u > /tmp/allowed-skills.txt
           if ! extra=$(comm -23 /tmp/shipped-skills.txt /tmp/allowed-skills.txt) || [ -n "$extra" ]; then
             echo "::error::bundled skills shipped that BUNDLED_SKILLS_ALLOWED does not list:"

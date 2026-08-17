@@ -44,6 +44,7 @@ FROM ${BASE_IMAGE}
 # produced noise rather than findings.
 USER root
 COPY BUNDLED_SKILLS_ALLOWED /usr/local/share/BUNDLED_SKILLS_ALLOWED
+COPY --chmod=0755 list-loadable-skills.sh /usr/local/bin/list-loadable-skills
 RUN set -eu; \
     sed 's/#.*//' /usr/local/share/BUNDLED_SKILLS_ALLOWED | awk 'NF' | sort -u > /tmp/allowed; \
     find /app -name SKILL.md -not -path '*/node_modules/*' 2>/dev/null \
@@ -61,9 +62,7 @@ RUN set -eu; \
       fi; \
     done < /tmp/roots; \
     echo "SKILLS-LOCKED-ASSERT: verifying nothing unlisted survived"; \
-    find /app -name SKILL.md -not -path '*/node_modules/*' 2>/dev/null \
-      | grep '/skills/' \
-      | sed -E 's#.*/skills/([^/]+)/.*#\1#' | sort -u > /tmp/remaining || true; \
+    /usr/local/bin/list-loadable-skills > /tmp/remaining; \
     if [ -s /tmp/remaining ] && grep -vxF -f /tmp/allowed /tmp/remaining > /tmp/extra; then \
       echo "FATAL: bundled skills survived the strip that the allowlist does not name:" >&2; \
       cat /tmp/extra >&2; \
