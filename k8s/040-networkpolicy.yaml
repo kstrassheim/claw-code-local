@@ -1,4 +1,27 @@
 ---
+# Deny everything that is not explicitly allowed below.
+#
+# NetworkPolicy is additive: without a baseline like this, a pod carrying NO
+# policy is completely unrestricted, and a pod carrying one is restricted only
+# in the DIRECTIONS its policy names. That produced a namespace where the
+# agent's egress was carefully scoped and the CronJob pods — which hold the
+# same token and can exec into the agent — could reach anything at all in
+# either direction.
+#
+# Everything the namespace actually needs is re-allowed in the policies that
+# follow. Read this file as a whole: this rule on its own would stop the pod
+# talking to anything, including DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: claw-code-local
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
 # All-pods DNS egress to kube-system (resolves cluster service names
 # and external hostnames via CoreDNS).
 apiVersion: networking.k8s.io/v1
@@ -21,33 +44,26 @@ spec:
   policyTypes:
     - Egress
 ---
-# openclaw needs:
-# - TCP/443  outbound HTTPS to model providers (Mistral, MiniMax),
-#            Telegram Bot API, GitHub, etc.
-# - TCP/6443 outbound to the K8s API server (the render-config init
-#            container calls `kubectl create cm | kubectl apply`).
-# No destination restriction — the egress targets are public APIs
-# (and the in-cluster API server on 443) and pinning them by CIDR
-# would just add maintenance for no benefit.
+# The agent reaches the planning store.
+#
+# HTTPS egress is NOT repeated here — allow-https-egress below covers every
+# pod in the namespace, and a second copy would only be another place to
+# forget when it changes.
+#
+# Scoped to the database pod rather than opened as a bare port: an egress rule
+# carrying only `ports` and no `to` permits that port to ANY destination,
+# which would quietly turn a database allowance into general outbound access
+# on 27017.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: openclaw-egress-dns-internet
+  name: openclaw-egress-mongodb
   namespace: claw-code-local
 spec:
   podSelector:
     matchLabels:
       app: openclaw
   egress:
-    - ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 6443
-    # The planning store. Scoped to the database pod rather than opened as a
-    # bare port: a NetworkPolicy egress rule with only `ports` and no `to`
-    # permits that port to ANY destination, which would quietly turn a
-    # database allowance into general outbound access on 27017.
     - to:
         - podSelector:
             matchLabels:
@@ -80,5 +96,63 @@ spec:
       ports:
         - protocol: TCP
           port: 27017
+  policyTypes:
+    - Ingress
+---
+# HTTPS egress for every pod in the namespace.
+#
+# The CronJob pods (issue-watcher, tester, pr-reviewer) need this as much as
+# the agent does: each one calls the GitHub API and `kubectl exec`s into the
+# agent pod, which is the in-cluster API server on 443/6443. Before the
+# default-deny baseline they were unrestricted and this went unnoticed;
+# with it, omitting them would silently stop every planner at the first
+# request and the only symptom would be a CronJob log nobody reads.
+#
+# No destination restriction: the targets are public provider APIs and the
+# in-cluster API server, and pinning those by CIDR would be maintenance
+# without benefit.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: claw-code-local
+spec:
+  podSelector: {}
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+  policyTypes:
+    - Egress
+---
+# Ingress to the agent's gateway and bridge ports.
+#
+# Deliberately unrestricted as to SOURCE, which preserves exactly the reach
+# these ports had before the default-deny baseline — an ingress controller in
+# another namespace, a port-forward, or a direct ClusterIP call all keep
+# working. Narrowing this is a separate, testable change: get it wrong and the
+# chat surface goes dark after a sync, with the pod reporting itself healthy.
+#
+# What the baseline DOES buy here is that these are now the ONLY ports
+# reachable on the agent pod. Everything else it happens to listen on —
+# code-server, a dev server the tester leaves running, an MCP server bound
+# wider than intended — is no longer reachable from anywhere in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: claw-code-local
+spec:
+  podSelector:
+    matchLabels:
+      app: openclaw
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 18789
+        - protocol: TCP
+          port: 18790
   policyTypes:
     - Ingress
