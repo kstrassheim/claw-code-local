@@ -59,6 +59,39 @@ RUN set -eu; \
     rm -f /tmp/allowed /tmp/remaining /tmp/extra; \
     echo "SKILLS-LOCKED-ASSERT: ok"
 
+# git-lfs. Target repositories keep large binary assets under LFS, and without
+# the client a clone hands the agent ~130-byte pointer files instead of the
+# content. That does not fail loudly: it looks like corrupt data, and any
+# commit touching such a file overwrites the pointer with whatever the agent
+# thought it was editing, quietly destroying the object for everyone.
+#
+# It has to be in the IMAGE, not installed at runtime. The agent runs as uid
+# 1000 and cannot write to /usr/local/bin, so a runtime install lands in some
+# directory that is not on PATH and `git lfs` still reports "not a git command".
+#
+# `git lfs install --system` writes the clean/smudge/filter-process entries
+# into /etc/gitconfig, so every repository the agent clones is covered without
+# a per-repo or per-user step it has to remember. The final `git config
+# --system --get` is the verification: it fails the BUILD if the filters did
+# not actually land, rather than leaving the first LFS clone to discover it.
+ARG GIT_LFS_VERSION
+USER root
+RUN set -eu; \
+    ARCH="$(dpkg --print-architecture)"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/git-lfs.tar.gz \
+      "https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${ARCH}-v${GIT_LFS_VERSION}.tar.gz"; \
+    tar -xzf /tmp/git-lfs.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/git-lfs-${GIT_LFS_VERSION}/git-lfs" /usr/local/bin/git-lfs; \
+    rm -rf /tmp/git-lfs.tar.gz "/tmp/git-lfs-${GIT_LFS_VERSION}"; \
+    apt-get purge -y --auto-remove curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    git lfs install --system; \
+    git lfs version; \
+    git config --system --get filter.lfs.process
+
 # gh CLI + GitHub MCP server, installed for autonomous git/github work.
 # Image is arm64-only (AKS uses ARM); upstream release archives use `arm64`.
 ARG GH_CLI_VERSION
@@ -107,8 +140,10 @@ RUN apt-get update \
 
 # MongoDB driver for the planning store (builder/planning_store.py).
 #
-# The ONLY pip package in this image, and it is here rather than vendored
-# because the alternative is speaking the MongoDB wire protocol by hand.
+# The only pip package installed into the image's SYSTEM python — the security
+# scanners further down get their own virtualenvs — and it is here rather than
+# vendored because the alternative is speaking the MongoDB wire protocol by
+# hand.
 #
 # --break-system-packages: the base is Debian and its python3 is
 # externally-managed (PEP 668), so pip refuses to install into it without
@@ -222,18 +257,41 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && chromium --version
 
-# kubectl + podman
+# kubectl + kubelogin + podman
+#
+# kubelogin is the credential plugin kubectl EXECS when a kubeconfig comes from
+# `az aks get-credentials` against an Entra-integrated AKS cluster — which is
+# what builder/aks-login produces. kubectl on its own cannot authenticate to
+# such a cluster at all: the first call dies with
+# `exec: "kubelogin": executable file not found in $PATH`. Talking to this
+# pod's OWN cluster goes through the in-cluster ServiceAccount and does not
+# need it; reaching any OTHER cluster as the bot's Entra identity does.
+ARG KUBELOGIN_VERSION
 USER root
 RUN ARCH=$(dpkg --print-architecture) \
  && KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)" \
- && curl -fsSL -o /usr/local/bin/kubectl \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /usr/local/bin/kubectl \
       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
  && chmod 0755 /usr/local/bin/kubectl \
  && /usr/local/bin/kubectl version --client=true --output=yaml | head -3 \
  && apt-get update \
+ # unzip is BUILD-ONLY here and purged again below, exactly as the aws-cli and
+ # terraform layers do — it is deliberately not in the shipped image, so it
+ # cannot be assumed present from an earlier layer.
+ && apt-get install -y --no-install-recommends unzip \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/kubelogin.zip \
+      "https://github.com/Azure/kubelogin/releases/download/v${KUBELOGIN_VERSION}/kubelogin-linux-${ARCH}.zip" \
+ # The per-platform zip still nests the binary under bin/<os>_<arch>/.
+ && unzip -q -j /tmp/kubelogin.zip "bin/linux_${ARCH}/kubelogin" -d /usr/local/bin \
+ && chmod 0755 /usr/local/bin/kubelogin \
+ && rm -f /tmp/kubelogin.zip \
+ && apt-get purge -y --auto-remove unzip \
  && apt-get install -y --no-install-recommends \
       podman buildah fuse-overlayfs uidmap slirp4netns \
  && rm -rf /var/lib/apt/lists/* \
+ && /usr/local/bin/kubelogin --version \
  && podman --version
 RUN install -d -o 1000 -g 1000 /home/node/.config/containers \
  && cat > /home/node/.config/containers/storage.conf <<'STORAGE'
@@ -270,6 +328,279 @@ RUN chown -R 1000:1000 /opt/debug-mcp \
  && cd /opt/debug-mcp \
  && su node -c "cd /opt/debug-mcp && npm install --omit=dev --no-audit --no-fund --loglevel=error" \
  && chmod +x /opt/debug-mcp/debug-mcp.mjs
+
+# Code scanners behind mcp.servers.security and mcp.servers.semgrep — see
+# k8s/tools/TOOLS-security.md for the tool surface these have to provide:
+#   - semgrep + semgrep-mcp (the official MCP server) — multi-language SAST
+#   - bandit (Python SAST) + pip-audit (Python dependency CVEs)
+#   - gitleaks (secrets in a working tree AND in git history)
+#   - pwsh 7 + PSScriptAnalyzer (PowerShell lint incl. the security rules)
+# npm audit, the sixth tool, is already available via the base image's node.
+#
+# TWO VIRTUALENVS, NOT ONE, AND NOT THE SYSTEM PYTHON. Debian's python3 is
+# externally managed (PEP 668), so nothing here belongs in it — and semgrep and
+# semgrep-mcp cannot share an environment with each other either: they pin
+# INCOMPATIBLE exact versions of the `mcp` package (semgrep wants mcp==1.23.3,
+# semgrep-mcp wants mcp==1.12.2), so a single venv cannot resolve. semgrep-mcp
+# therefore gets /opt/semgrep-venv to itself — the exact path
+# k8s/010-openclaw-config.yaml starts it from — and it reaches the semgrep CLI
+# as a subprocess resolved from PATH, which the symlink below provides.
+ARG SEMGREP_VERSION
+ARG SEMGREP_MCP_VERSION
+ARG BANDIT_VERSION
+ARG PIP_AUDIT_VERSION
+ARG GITLEAKS_VERSION
+ARG PWSH_VERSION
+ARG PSSCRIPTANALYZER_VERSION
+USER root
+RUN ARCH=$(dpkg --print-architecture) \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends python3-venv python3-pip \
+ # libicu is versioned per Debian release (libicu72 on bookworm, ...) and both
+ # pwsh and the .NET SDK below hard-require it — resolve whatever this base
+ # ships instead of hardcoding a soname that breaks on the next base bump.
+ && apt-get install -y --no-install-recommends \
+      "$(apt-cache search --names-only '^libicu[0-9]+$' | awk '{print $1}' | sort -V | tail -1)" \
+ && python3 -m venv /opt/security-venv \
+ && /opt/security-venv/bin/pip install --no-cache-dir \
+      "semgrep==${SEMGREP_VERSION}" \
+      "bandit==${BANDIT_VERSION}" \
+      "pip-audit==${PIP_AUDIT_VERSION}" \
+ && python3 -m venv /opt/semgrep-venv \
+ && /opt/semgrep-venv/bin/pip install --no-cache-dir \
+      "semgrep-mcp==${SEMGREP_MCP_VERSION}" \
+ # security-mcp shells out to these by bare name, and TOOLS-security.md
+ # documents them as CLI fallbacks, so they must resolve on PATH.
+ && ln -sf /opt/security-venv/bin/semgrep    /usr/local/bin/semgrep \
+ && ln -sf /opt/security-venv/bin/bandit     /usr/local/bin/bandit \
+ && ln -sf /opt/security-venv/bin/pip-audit  /usr/local/bin/pip-audit \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/gitleaks.tar.gz \
+      "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz" \
+ && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+ && chmod 0755 /usr/local/bin/gitleaks \
+ && rm /tmp/gitleaks.tar.gz \
+ && mkdir -p /opt/microsoft/powershell/7 \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/pwsh.tar.gz \
+      "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-${ARCH}.tar.gz" \
+ && tar -xzf /tmp/pwsh.tar.gz -C /opt/microsoft/powershell/7 \
+ && chmod 0755 /opt/microsoft/powershell/7/pwsh \
+ && ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh \
+ && rm /tmp/pwsh.tar.gz \
+ && mkdir -p /usr/local/share/powershell/Modules \
+ # Bootstrap the NuGet package provider EXPLICITLY. Save-Module otherwise
+ # prompts for it on first use, and a prompt in a -NonInteractive shell is an
+ # error, not a default-yes. -Scope AllUsers so the provider is in the image
+ # for the Az/Pester layer below rather than in some transient HOME.
+ && pwsh -NoProfile -NonInteractive -Command \
+      "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force | Out-Null; \
+       Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+       Save-Module -Name PSScriptAnalyzer -RequiredVersion ${PSSCRIPTANALYZER_VERSION} -Path /usr/local/share/powershell/Modules" \
+ && rm -rf /var/lib/apt/lists/* \
+ # Verify here, so a broken scanner fails the BUILD instead of the first tool
+ # call of the first review that needed it.
+ && /usr/local/bin/semgrep --version \
+ && test -x /opt/semgrep-venv/bin/semgrep-mcp \
+ # No pipes in these: `cmd | head` reports HEAD's exit status, so a scanner
+ # that failed to install would still pass the guard.
+ && /usr/local/bin/bandit --version \
+ && /usr/local/bin/pip-audit --version \
+ && /usr/local/bin/gitleaks version \
+ && pwsh -NoProfile -NonInteractive -Command "(Get-Module -ListAvailable PSScriptAnalyzer).Version.ToString()"
+
+# Azure data-platform tooling — see k8s/tools/TOOLS-powershell.md:
+#   - Pester — the PowerShell test framework. The solver is required to make
+#     a runbook's unit tests pass locally before it opens a pull request.
+#   - Az.Accounts / Az.Automation / Az.DataFactory / Az.Synapse — ONLY these
+#     four, never the Az meta-module, which is several hundred MB of provider
+#     surface nothing here touches.
+#   - msodbcsql18 + sqlcmd — so the AGENT can apply .sql files and run ad-hoc
+#     queries in its own shell.
+# Everything authenticates as the bot's Entra identity through the shared
+# ~/.azure token cache; nothing here accepts a connection string or key.
+#
+# The Microsoft signing key was already dearmoured into /etc/apt/keyrings by
+# the Entra layer above, and gnupg was purged with it — so this reuses that
+# keyring rather than resurrecting gnupg to write a second copy. The `test -s`
+# turns a missing keyring into an obvious failure on this line instead of an
+# unsigned-repository error twenty lines later.
+ARG PESTER_VERSION
+ARG AZ_ACCOUNTS_VERSION
+ARG AZ_AUTOMATION_VERSION
+ARG AZ_DATAFACTORY_VERSION
+ARG AZ_SYNAPSE_VERSION
+USER root
+RUN . /etc/os-release \
+ && test -s /etc/apt/keyrings/microsoft.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/debian/${VERSION_ID}/prod ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/mssql-release.list \
+ && apt-get update \
+ && ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
+      msodbcsql18 mssql-tools18 unixodbc \
+ && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
+ && ln -sf /opt/mssql-tools18/bin/bcp    /usr/local/bin/bcp \
+ && pwsh -NoProfile -NonInteractive -Command \
+      "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force | Out-Null; \
+       Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+       Save-Module -Name Pester         -RequiredVersion ${PESTER_VERSION}         -Path /usr/local/share/powershell/Modules; \
+       Save-Module -Name Az.Accounts    -RequiredVersion ${AZ_ACCOUNTS_VERSION}    -Path /usr/local/share/powershell/Modules; \
+       Save-Module -Name Az.Automation  -RequiredVersion ${AZ_AUTOMATION_VERSION}  -Path /usr/local/share/powershell/Modules; \
+       Save-Module -Name Az.DataFactory -RequiredVersion ${AZ_DATAFACTORY_VERSION} -Path /usr/local/share/powershell/Modules; \
+       Save-Module -Name Az.Synapse     -RequiredVersion ${AZ_SYNAPSE_VERSION}     -Path /usr/local/share/powershell/Modules" \
+ && rm -rf /var/lib/apt/lists/* \
+ # Fail the build loudly rather than ship an image whose agent silently cannot
+ # reach a database or load the modules its runbook tests import.
+ && sqlcmd -? >/dev/null 2>&1 \
+ && pwsh -NoProfile -NonInteractive -Command \
+      "@('Pester','Az.Accounts','Az.Automation','Az.DataFactory','Az.Synapse') | ForEach-Object { \
+         if (-not (Get-Module -ListAvailable \$_)) { throw \"missing module: \$_\" }; \
+         '{0} {1}' -f \$_, (Get-Module -ListAvailable \$_).Version[0] }"
+
+# .NET SDK + SqlPackage — SSDT/dacpac database projects.
+#
+# A project whose schema lives in a `.sqlproj` (MSBuild.Sdk.SqlProj) is gated
+# in CI by `dotnet build …sqlproj` followed by a `sqlpackage /a:Publish` onto a
+# throwaway SQL Server. The issue solver has to be able to run that same gate
+# BEFORE it pushes — otherwise it edits schema blind and every mistake costs a
+# full pipeline round-trip. sqlpackage is a .NET global tool, so it needs the
+# SDK anyway.
+#
+# Installed via Microsoft's dotnet-install.sh, NOT apt: packages.microsoft.com
+# publishes no dotnet-sdk-8.0 for arm64 (the only arch this image is built
+# for), so an apt install fails outright. The script is arch-agnostic and takes
+# a CHANNEL, which is what a project's global.json needs — a `rollForward:
+# latestFeature` pin on 8.0.x stays inside 8.0 and will NOT accept a 10.0 SDK.
+#
+# The .NET ICU dependency is already satisfied by the libicu the scanner layer
+# above installs version-agnostically.
+#
+# sqlpackage goes to a shared tool root rather than ~/.dotnet/tools so it
+# survives the PVC-mounted home the pod runs with.
+ARG DOTNET_SDK_VERSION
+ARG SQLPACKAGE_VERSION
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_TOOLS=/opt/dotnet-tools \
+    PATH=/usr/share/dotnet:/opt/dotnet-tools:$PATH
+USER root
+RUN curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/dotnet-install.sh "https://dot.net/v1/dotnet-install.sh" \
+ && chmod +x /tmp/dotnet-install.sh \
+ && /tmp/dotnet-install.sh --channel "${DOTNET_SDK_VERSION}" \
+      --install-dir "$DOTNET_ROOT" --no-path \
+ && rm -f /tmp/dotnet-install.sh \
+ && chmod -R a+rX "$DOTNET_ROOT" \
+ && dotnet --version \
+ && dotnet tool install --tool-path "$DOTNET_TOOLS" \
+      microsoft.sqlpackage --version "${SQLPACKAGE_VERSION}" \
+ && chmod -R a+rX "$DOTNET_TOOLS" \
+ # Fail the build rather than ship an image whose solver silently cannot
+ # validate a schema change.
+ && sqlpackage /version
+# Debian's /etc/profile OVERWRITES PATH outright ("/usr/local/bin:/usr/bin:
+# /bin:...") before it sources /etc/profile.d, so a LOGIN shell loses the two
+# directories set by ENV PATH above and `dotnet` / `sqlpackage` become
+# "command not found". Every other tool in this image lives in /usr/local/bin
+# and survives that reset, which is exactly why the gap is easy to miss — it
+# hits only these two, and only in a login shell.
+#
+# The drop-in is sourced AFTER the reset (profile.d is the last thing
+# /etc/profile does), so it wins. Idempotent, so re-sourcing a profile does not
+# stack duplicate entries onto PATH.
+RUN printf '%s\n' \
+      '# Re-add the .NET paths that /etc/profile drops (see builder/Dockerfile).' \
+      'case ":$PATH:" in' \
+      '  *":/usr/share/dotnet:"*) ;;' \
+      '  *) PATH="/usr/share/dotnet:/opt/dotnet-tools:$PATH" ;;' \
+      'esac' \
+      'export PATH' \
+      > /etc/profile.d/10-dotnet.sh \
+ && chmod 0644 /etc/profile.d/10-dotnet.sh \
+ # Prove the fix in the shell that was actually broken.
+ && bash -lc 'command -v dotnet && command -v sqlpackage'
+
+# security-mcp — the in-house wrapper exposing the scanners above as MCP tools.
+# Started by k8s/010-openclaw-config.yaml as /opt/security-mcp/security-mcp.mjs.
+COPY security-mcp /opt/security-mcp
+RUN chown -R 1000:1000 /opt/security-mcp \
+ && su node -c "cd /opt/security-mcp && npm install --omit=dev --no-audit --no-fund --loglevel=error" \
+ && chmod +x /opt/security-mcp/security-mcp.mjs
+
+# Live DAST scanners behind mcp.servers.pentest — see TOOLS-pentest.md:
+#   - nuclei     — template-based web DAST (CVEs, exposures, misconfig,
+#                  default creds, security headers). The community templates
+#                  are baked in at /opt/nuclei-templates so a scan is
+#                  reproducible and needs no fetch at run time.
+#   - testssl.sh — TLS/SSL posture of the deployed endpoint (a bash script;
+#                  it uses the system openssl already present).
+#
+# The binaries are installed OUTSIDE $PATH (nuclei in /opt/pentest-bin,
+# testssl in /opt/testssl) and are deliberately NOT symlinked into
+# /usr/local/bin. Only pentest-mcp invokes them, by absolute path — so no
+# agent's exec shell can run `nuclei` / `testssl.sh` by name, and the pen-test
+# capability is reachable ONLY through the (tester-gated, fail-closed) MCP.
+# Moving either onto PATH would silently hand every agent a live scanner.
+ARG NUCLEI_VERSION
+ARG NUCLEI_TEMPLATES_VERSION
+ARG TESTSSL_VERSION
+USER root
+# NOTE: this RUN must NOT end in `|| true`. `A && B && … && Z || true` parses
+# as `(A && … && Z) || true`, so one trailing `|| true` swallows a failure
+# ANYWHERE in the chain — which is precisely how a template-less scanner ships
+# unnoticed and then reports a clean scan it never performed. The templates are
+# baked from a PINNED static release tarball rather than fetched with
+# `nuclei -update-templates`, because that resolves the version through a
+# GitHub API call which can silently no-op in CI (exit 0, download nothing).
+# The guards below are hard and unmasked for the same reason.
+RUN ARCH=$(dpkg --print-architecture) \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends unzip bsdmainutils dnsutils \
+ && mkdir -p /opt/pentest-bin \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/nuclei.zip \
+      "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_${ARCH}.zip" \
+ && unzip -q /tmp/nuclei.zip -d /tmp/nuclei \
+ && mv /tmp/nuclei/nuclei /opt/pentest-bin/nuclei \
+ && chmod 0755 /opt/pentest-bin/nuclei \
+ && rm -rf /tmp/nuclei.zip /tmp/nuclei \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/nuclei-templates.tar.gz \
+      "https://github.com/projectdiscovery/nuclei-templates/archive/refs/tags/v${NUCLEI_TEMPLATES_VERSION}.tar.gz" \
+ && mkdir -p /opt/nuclei-templates \
+ && tar -xzf /tmp/nuclei-templates.tar.gz -C /opt/nuclei-templates --strip-components=1 \
+ && rm /tmp/nuclei-templates.tar.gz \
+ && chown -R 1000:1000 /opt/nuclei-templates /opt/pentest-bin \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 20 \
+      -o /tmp/testssl.tar.gz \
+      "https://github.com/testssl/testssl.sh/archive/refs/tags/v${TESTSSL_VERSION}.tar.gz" \
+ && mkdir -p /opt/testssl \
+ && tar -xzf /tmp/testssl.tar.gz -C /opt/testssl --strip-components=1 \
+ && chmod 0755 /opt/testssl/testssl.sh \
+ && rm /tmp/testssl.tar.gz \
+ # Hard guards (no `|| true`): fail the build if either binary is missing or
+ # the template tree holds no template at all.
+ && test -x /opt/pentest-bin/nuclei \
+ && test -d /opt/nuclei-templates \
+ && test -n "$(find /opt/nuclei-templates -name '*.yaml' -print -quit)" \
+ && test -x /opt/testssl/testssl.sh \
+ && apt-get purge -y --auto-remove unzip \
+ && rm -rf /var/lib/apt/lists/*
+# Informational only — isolated in its own layer so a version print can never
+# mask a failure in the install RUN above.
+RUN /opt/pentest-bin/nuclei -version 2>&1 | head -2 || true; \
+    /opt/testssl/testssl.sh --version 2>&1 | head -2 || true
+
+# pentest-mcp — the in-house wrapper: nuclei + testssl.sh as MCP tools, with
+# the host allowlist enforced in code. Started by k8s/010-openclaw-config.yaml
+# as /opt/pentest-mcp/pentest-mcp.mjs.
+COPY pentest-mcp /opt/pentest-mcp
+RUN chown -R 1000:1000 /opt/pentest-mcp \
+ && su node -c "cd /opt/pentest-mcp && npm install --omit=dev --no-audit --no-fund --loglevel=error" \
+ && chmod +x /opt/pentest-mcp/pentest-mcp.mjs
+ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
 
 # Issue-watcher scripts invoked by the issue-watcher CronJob.
 #   heartbeat-issue-tick — read-only planner: emits JSON of repos +

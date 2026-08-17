@@ -26,7 +26,84 @@ AWS_CLI_VERSION=2.34.45
 GCLOUD_VERSION=567.0.0
 ALIYUN_CLI_VERSION=3.3.14
 
-# MongoDB driver for the planning store — the only pip package in the image.
+# git-lfs. Target repositories keep large binary assets under LFS, and without
+# the client a clone hands the agent ~130-byte pointer files instead of the
+# content. That does not fail loudly — it looks like corrupt data, and any
+# commit touching such a file overwrites the pointer and destroys the object
+# for everyone. Baked into the IMAGE because the agent runs as uid 1000 and
+# cannot write to /usr/local/bin at runtime.
+# Bump hazard: the release asset is named git-lfs-linux-<arch>-v<version>, and
+# the tarball unpacks into a git-lfs-<version>/ directory — both carry the
+# version, so a wrong value 404s and a renamed layout breaks the install path.
+GIT_LFS_VERSION=3.7.1
+
+# kubelogin — the Entra credential plugin kubectl execs when a kubeconfig comes
+# from `az aks get-credentials` against an Entra-integrated AKS cluster (see
+# builder/aks-login). kubectl alone cannot authenticate to those clusters: every
+# call dies with `exec: "kubelogin": executable file not found in $PATH`.
+# Bump hazard: the per-platform zip nests the binary under bin/linux_<arch>/,
+# so the unzip path has to keep matching that layout.
+KUBELOGIN_VERSION=0.2.19
+
+# Code scanners behind mcp.servers.security + mcp.servers.semgrep — SAST,
+# dependency CVEs, secret detection and PowerShell lint for the reviewer.
+#
+# Bump hazard (semgrep / semgrep-mcp): the two pin INCOMPATIBLE exact versions
+# of the `mcp` package (semgrep 1.172.0 wants mcp==1.23.3, semgrep-mcp 0.9.0
+# wants mcp==1.12.2), so they can never resolve in one environment. They are
+# installed into two separate virtualenvs for that reason; bumping either one
+# alone is safe, merging the venvs is not.
+SEMGREP_VERSION=1.172.0
+SEMGREP_MCP_VERSION=0.9.0
+BANDIT_VERSION=1.9.4
+PIP_AUDIT_VERSION=2.10.1
+# gitleaks release assets are gitleaks_<version>_linux_<arch>.tar.gz — note the
+# version appears WITHOUT the leading v inside the filename but WITH it in the
+# tag path.
+GITLEAKS_VERSION=8.30.1
+# PowerShell 7 + PSScriptAnalyzer. The pwsh tarball is
+# powershell-<version>-linux-arm64.tar.gz; the x86_64 asset is spelled
+# `linux-x64`, not `linux-amd64`, so an arch-substituted URL is not symmetric.
+PWSH_VERSION=7.6.4
+PSSCRIPTANALYZER_VERSION=1.25.0
+
+# Azure data-platform tooling: PowerShell runbooks with Pester tests, and
+# SSDT/dacpac database projects the solver must be able to build and publish
+# BEFORE it pushes. Only the four Az modules actually used are installed, not
+# the Az meta-module (several hundred MB of provider surface never touched).
+PESTER_VERSION=5.7.1
+# DOTNET_SDK_VERSION is a dotnet-install.sh CHANNEL, not an exact version — it
+# must match the major.minor a project's global.json pins (`rollForward:
+# latestFeature` on 8.0.x stays inside 8.0 and rejects a 10.0 SDK). Installed
+# by script rather than apt because packages.microsoft.com ships no
+# dotnet-sdk-8.0 for arm64 at all — an apt install fails outright.
+DOTNET_SDK_VERSION=8.0
+# SqlPackage is a .NET global tool from nuget.org; the pin is the NuGet package
+# version of microsoft.sqlpackage and must be supported by the SDK channel
+# above.
+SQLPACKAGE_VERSION=170.4.83
+AZ_ACCOUNTS_VERSION=4.0.2
+AZ_AUTOMATION_VERSION=1.11.1
+AZ_DATAFACTORY_VERSION=1.18.5
+AZ_SYNAPSE_VERSION=3.0.2
+
+# Live DAST scanners behind mcp.servers.pentest, used by the deployment tester
+# against the project's own authorised dev deployment only.
+NUCLEI_VERSION=3.11.0
+# nuclei community templates, baked in as a PINNED static release tarball
+# fetched from codeload. They are deliberately NOT fetched with
+# `nuclei -update-templates`: that resolves the version through a GitHub API
+# call which can silently no-op in CI — exiting 0 having downloaded nothing —
+# and ships a template-less scanner that reports a clean scan it never
+# performed. The build fails hard if the extracted tree holds no templates.
+# Bump hazard: this is the nuclei-templates repo's OWN version line (10.x),
+# unrelated to NUCLEI_VERSION above; they are bumped independently.
+NUCLEI_TEMPLATES_VERSION=10.4.7
+# testssl.sh is a bash script, installed from the tag's source tarball.
+TESTSSL_VERSION=3.2.4
+
+# MongoDB driver for the planning store — the only pip package installed into
+# the image's SYSTEM python (the scanners above live in their own virtualenvs).
 # Installed by builder/Dockerfile with --break-system-packages (Debian's
 # python3 is externally managed). Keep the ARG default in that pip layer equal
 # to this value. arm64 wheels must exist for the pinned release, or the build
