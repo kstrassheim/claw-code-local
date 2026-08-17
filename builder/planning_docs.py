@@ -1,36 +1,49 @@
-"""Document shapes for the planning store (#8).
+"""Document shapes for the planning store.
 
-Pure functions: no I/O, no Cosmos, no clock of their own. Everything that
-touches the network lives in planning_store.py, so these can be tested
-offline and the shapes can be argued about without an Azure account existing.
+Pure functions: no I/O, no database, no clock of their own. Everything that
+touches the network lives in planning_store.py, so these can be tested offline
+and the shapes can be argued about before any store exists.
 
 THE KEY SCHEME
 --------------
-One Cosmos container, partitioned on /pk, holding four `type`s:
+One MongoDB collection holding five `type`s, grouped by a `pk` field:
 
-    pk = story#<host>#<project-path>#<iid>
+    pk = story#<host>#<owner/repo>#<issue-number>
          type=story   the story itself
          type=work    append-only, one per runner invocation
 
-    pk = sprint#<n>       type=sprint
-    pk = worker#<host>#<id>  type=worker
+    pk = deploy#<host>#<owner/repo>#<sha12>
+         type=deploy  one tested commit of the default branch
+         type=work    the tester run for that commit
 
-A story and all of its work events share a partition, so "everything about
-this story" is one single-partition query. That is the closest thing Cosmos
-offers to a join, and it is why these live in one container: there is no
-cross-container join in the SQL API at all.
+    pk = sprint#<n>              type=sprint
+    pk = worker#<host>#<id>      type=worker
 
-The host is part of the key because GitHub support is half-present in the
-code already. Without it, `owner/repo#12` on gitlab and on github would
-collide the day the GitHub path is switched on.
+`pk` is not a database requirement — MongoDB needs no partition key — it is a
+GROUPING key, and it is what makes "everything about this story" a single
+indexed query over one field instead of an $or across four shapes. A story and
+all of its work events share one pk for exactly that reason.
+
+The host is part of every key on purpose. A repository is addressed as
+`owner/repo` on github.com and on a self-hosted GitHub Enterprise instance
+alike, so without the host segment `acme/web#12` on two hosts is one key, and
+the day a second host is configured every report silently merges them.
 
 WHY WORK EVENTS ARE APPEND-ONLY
 -------------------------------
 The solver and the reviewer write concurrently, and a runner flushes its call
 count repeatedly during a run. If they all advanced one shared story document
-we would need ETags and retry loops on every flush. Inserting a new event
-never collides, and it also makes the local spool trivial: a spool line is a
-document, not a patch to reconcile.
+we would need optimistic-concurrency retries on every flush. Writing a new
+event never collides, and it also makes the local spool trivial: a spool line
+is a whole document, not a patch to reconcile.
+
+DOCUMENT IDS ARE DETERMINISTIC
+------------------------------
+Every `id` here is derived from what the document IS — a story from its key, a
+work event from runId+role — never from a clock or a counter. The store writes
+that id into MongoDB's `_id` and upserts, so flushing the same spool line twice
+replaces the document instead of duplicating it. That single property is what
+lets the spool be a plain append-only file with no two-phase commit.
 """
 
 from __future__ import annotations
@@ -43,20 +56,22 @@ SPRINT = "sprint"
 WORKER = "worker"
 # The deployment tester's unit of work, which is NOT a story.
 #
-# Verified against the runner: the tester keys on (project, HEAD sha of the
-# default branch) and keeps a `<repo>.last-head` marker. It knows nothing
-# about issues or merge requests — it tests the RANGE priorHead..headSha and
-# turns findings into new issues. So its work events have no story partition
-# to live in, and forcing one would mean inventing a story that does not
-# exist.
+# The tester keys on (repo, HEAD sha of the default branch) and keeps a
+# `<repo>.last-head` marker. It knows nothing about issues or pull requests —
+# it tests the RANGE priorHead..headSha and turns findings into new issues. So
+# its work events have no story to live under, and inventing one would put a
+# document in the store describing work on an issue that does not exist.
 #
-# It gets its own partition per tested commit instead, and records which
-# stories that commit contained. That is the honest shape: a deploy covers
-# many stories, and a story can be covered by several deploys (a re-test after
-# a fix), so the relationship is many-to-many and neither side owns the other.
+# It gets its own key per tested commit instead, and records which stories that
+# commit contained. That is the honest shape: a deploy covers many stories, and
+# a story can be covered by several deploys (a re-test after a fix), so the
+# relationship is many-to-many and neither side owns the other.
 DEPLOY = "deploy"
 
-HOSTS = ("gitlab", "github")
+# One host today. The KEYS stay host-aware anyway — see the module docstring:
+# adding a second host later must not silently merge two repositories that
+# happen to share an `owner/repo` path.
+HOSTS = ("github",)
 
 # Roles that produce work events. The tester is here even though it does not
 # work a story: it opens them, and its cost is part of what a sprint spent.
@@ -92,12 +107,18 @@ _SAFE = re.compile(r"[^A-Za-z0-9._/#-]")
 
 
 def _clean(value: str) -> str:
-    """Keys go into a URL path and a SQL parameter. Keep them boring."""
+    """Keys are compared, indexed and printed. Keep them boring."""
     return _SAFE.sub("-", str(value or "").strip())
 
 
-def story_pk(host: str, project: str, iid) -> str:
-    return f"{STORY}#{_clean(host)}#{_clean(project)}#{_clean(iid)}"
+def story_pk(host: str, repo: str, number) -> str:
+    """`story#<host>#<owner/repo>#<issue-number>`.
+
+    Callers must build keys through here rather than by formatting a string,
+    so a repository name containing anything `_clean` rewrites is normalised
+    identically on the write path and on every query that goes looking for it.
+    """
+    return f"{STORY}#{_clean(host)}#{_clean(repo)}#{_clean(number)}"
 
 
 def sprint_pk(number) -> str:
@@ -108,20 +129,20 @@ def worker_pk(host: str, user_id) -> str:
     return f"{WORKER}#{_clean(host)}#{_clean(user_id)}"
 
 
-def deploy_pk(host: str, project: str, sha) -> str:
-    """One partition per tested commit of a project's default branch."""
-    return f"{DEPLOY}#{_clean(host)}#{_clean(project)}#{_clean(str(sha)[:12])}"
+def deploy_pk(host: str, repo: str, sha) -> str:
+    """One key per tested commit of a repository's default branch."""
+    return f"{DEPLOY}#{_clean(host)}#{_clean(repo)}#{_clean(str(sha)[:12])}"
 
 
 def story_doc(
     *,
     host: str,
-    project: str,
-    iid,
+    repo: str,
+    number,
     title: str,
     url: str = "",
     host_url: str = "",
-    gitlab_type: str = "issue",
+    issue_type: str = "issue",
     origin: str = "human",
     origin_ref: str = "",
     category: str = "",
@@ -142,16 +163,16 @@ def story_doc(
     defaults is not the same sprint as one that was estimated. From the number
     alone, six weeks later, nobody can tell them apart.
     """
-    pk = story_pk(host, project, iid)
+    pk = story_pk(host, repo, number)
     return {
         "id": pk,
         "pk": pk,
         "type": STORY,
         "host": host,
         "hostUrl": host_url,
-        "project": project,
-        "iid": iid,
-        "gitlabType": gitlab_type,
+        "repo": repo,
+        "number": number,
+        "issueType": issue_type,
         "title": title,
         "url": url,
         "category": category,
@@ -175,14 +196,11 @@ def story_doc(
         # Filled in as the story moves. Absent is meaningful: it has not
         # happened yet, which is different from happening at an unknown time.
         "startedAt": None,
-        "mrOpenedAt": None,
+        "prOpenedAt": None,
         "reviewRequestedAt": None,
         "mergedAt": None,
-        "mrUrl": None,
+        "prUrl": None,
         "summary": None,
-        # Story documents are kept indefinitely; only work events expire.
-        # -1 opts this document out of the container's default TTL.
-        "ttl": -1,
         "updatedAt": now,
     }
 
@@ -190,8 +208,8 @@ def story_doc(
 def work_doc(
     *,
     host: str,
-    project: str,
-    iid,
+    repo: str,
+    number,
     run_id: str,
     role: str,
     worker: str = "",
@@ -203,22 +221,27 @@ def work_doc(
     ended_at: str = "",
     outcome: str = "",
     sprint_id=None,
-    ttl_seconds: int | None = None,
+    expires_at: str = "",
     now: str = "",
 ) -> dict:
     """One runner invocation. Append-only — never updated in place.
 
     `model` and `provider` sit here rather than on the worker because they
     vary per run: the model can be switched between two runs of the same
-    story. Recording them per run is also what makes #10 measurable — whether
-    the cheaper model really performed comparably at low story points becomes
-    a query instead of an opinion.
+    story. Recording them per run is what makes "did the cheaper model really
+    perform comparably on small stories" a query instead of an opinion.
+
+    `expires_at` is an ISO timestamp for a TTL index to act on. Work events are
+    the bulk of the volume and the least valuable once their sprint is closed;
+    everything else here is kept indefinitely and therefore carries no such
+    field at all, which is precisely how a MongoDB TTL index skips a document.
     """
-    return {
-        # The run id makes this idempotent: a retried flush overwrites its own
-        # document rather than appending a duplicate of the same run.
+    doc = {
+        # The run id makes this idempotent: a retried flush replaces its own
+        # document rather than appending a duplicate of the same run. It is
+        # also why planning-record can be called on a timer during a long run.
         "id": f"{WORK}#{_clean(run_id)}#{_clean(role)}",
-        "pk": story_pk(host, project, iid),
+        "pk": story_pk(host, repo, number),
         "type": WORK,
         "runId": run_id,
         "role": role,
@@ -231,11 +254,11 @@ def work_doc(
         "endedAt": ended_at,
         "outcome": outcome,
         "sprintId": sprint_id,
-        # Work events are the bulk of the volume and the least valuable once
-        # their sprint is closed. None means "keep" (-1).
-        "ttl": -1 if ttl_seconds is None else int(ttl_seconds),
         "updatedAt": now,
     }
+    if expires_at:
+        doc["expiresAt"] = expires_at
+    return doc
 
 
 def sprint_doc(
@@ -251,10 +274,10 @@ def sprint_doc(
     """A sprint, written once at start and closed at the end.
 
     `committedStories` is an explicit SNAPSHOT, not something to recompute.
-    Querying `WHERE sprintId = n` at the end returns the mid-sprint additions
-    too, which makes committed identical to final scope and erases the one
-    difference worth measuring. The tester opens issues during a sprint and
-    they get worked; that is scope growth, and it has to stay visible.
+    Asking for every story with this sprintId at the end returns the mid-sprint
+    additions too, which makes committed identical to final scope and erases
+    the one difference worth measuring. The tester opens issues during a sprint
+    and they get worked; that is scope growth, and it has to stay visible.
 
     `capacitySnapshot` is frozen here for the same reason: computing velocity
     against the CURRENT worker document would rewrite history every time
@@ -281,7 +304,6 @@ def sprint_doc(
         "actualLlmCalls": 0,
         "velocity": None,
         "closedAt": None,
-        "ttl": -1,
         "updatedAt": now,
     }
 
@@ -309,7 +331,6 @@ def worker_doc(
         "username": username,
         "role": role,
         "weeklyCapacityPoints": int(weekly_capacity_points or 0),
-        "ttl": -1,
         "updatedAt": now,
     }
 
@@ -330,7 +351,7 @@ def derive_scope(*, sprint_started_at: str, entered_at: str,
 
     Returning "unknown" rather than assuming "committed" is the point. A
     guessed commitment inflates the sprint's committed scope, which then makes
-    the team look like it under-delivered against a plan it never made.
+    the bot look like it under-delivered against a plan it never made.
     """
     if came_from_sprint:
         return "carried"
@@ -362,24 +383,24 @@ def enter_sprint(doc: dict, *, sprint_id, scope: str, at: str) -> dict:
 def deploy_doc(
     *,
     host: str,
-    project: str,
+    repo: str,
     sha: str,
     prior_sha: str = "",
     tested_at: str = "",
     outcome: str = "",
     covered_stories=None,
-    merge_requests=None,
+    pull_requests=None,
     sprint_id=None,
     findings: int = 0,
     now: str = "",
 ) -> dict:
-    """One tested commit of a project's default branch.
+    """One tested commit of a repository's default branch.
 
     `coveredStories` is what makes the tester's cost attributable at all. The
     tester tests a RANGE (prior_sha..sha); the stories in that range are the
-    merge requests that landed in it. Resolving them is the caller's job — it
-    needs the host API — but the list belongs here, because it is a fact about
-    that commit and does not change afterwards.
+    pull requests that landed in it. Resolving them is the caller's job — it
+    needs the GitHub API — but the list belongs here, because it is a fact
+    about that commit and does not change afterwards.
 
     THE COST IS RECORDED ONCE, HERE, AND NOT ON EACH STORY.
     A deploy usually covers several stories. Charging its full cost to every
@@ -388,13 +409,13 @@ def deploy_doc(
     the exact opposite of the truth. Sprint reporting should therefore sum
     testing as its own line rather than folding it into story points.
     """
-    pk = deploy_pk(host, project, sha)
+    pk = deploy_pk(host, repo, sha)
     return {
         "id": pk,
         "pk": pk,
         "type": DEPLOY,
         "host": host,
-        "project": project,
+        "repo": repo,
         "sha": sha,
         "priorSha": prior_sha,
         "testedAt": tested_at,
@@ -404,10 +425,9 @@ def deploy_doc(
         # default branch outside the bot's flow (a human push, a revert), and
         # that is worth being able to see.
         "coveredStories": list(covered_stories or []),
-        "mergeRequests": list(merge_requests or []),
+        "pullRequests": list(pull_requests or []),
         "findings": int(findings or 0),
         "sprintId": sprint_id,
-        "ttl": -1,
         "updatedAt": now,
     }
 
@@ -415,7 +435,7 @@ def deploy_doc(
 def tester_work_doc(
     *,
     host: str,
-    project: str,
+    repo: str,
     sha: str,
     run_id: str,
     worker: str = "",
@@ -427,17 +447,17 @@ def tester_work_doc(
     ended_at: str = "",
     outcome: str = "",
     sprint_id=None,
-    ttl_seconds: int | None = None,
+    expires_at: str = "",
     now: str = "",
 ) -> dict:
-    """A tester run, living in the DEPLOY partition rather than a story's.
+    """A tester run, grouped under the DEPLOY key rather than under a story.
 
     Same shape as work_doc so a sprint can sum both without special-casing;
-    only the partition differs.
+    only the key differs.
     """
-    return {
+    doc = {
         "id": f"{WORK}#{_clean(run_id)}#tester",
-        "pk": deploy_pk(host, project, sha),
+        "pk": deploy_pk(host, repo, sha),
         "type": WORK,
         "runId": run_id,
         "role": "tester",
@@ -450,16 +470,18 @@ def tester_work_doc(
         "endedAt": ended_at,
         "outcome": outcome,
         "sprintId": sprint_id,
-        "ttl": -1 if ttl_seconds is None else int(ttl_seconds),
         "updatedAt": now,
     }
+    if expires_at:
+        doc["expiresAt"] = expires_at
+    return doc
 
 
 def validate(doc: dict) -> list[str]:
     """Problems with a document, or an empty list.
 
-    Called before a write. A malformed document that reaches Cosmos is worse
-    than one rejected here: it is queryable, it looks like data, and it
+    Called before a write. A malformed document that reaches the store is
+    worse than one rejected here: it is queryable, it looks like data, and it
     quietly skews every report built on it.
     """
     problems: list[str] = []
@@ -471,24 +493,24 @@ def validate(doc: dict) -> list[str]:
             problems.append(f"missing {field}")
     pk = doc.get("pk") or ""
     if t == STORY and not pk.startswith(STORY + "#"):
-        problems.append(f"story must live in a story partition, got {pk!r}")
+        problems.append(f"story must live under a story key, got {pk!r}")
     if t == DEPLOY and not pk.startswith(DEPLOY + "#"):
-        problems.append(f"deploy must live in a deploy partition, got {pk!r}")
+        problems.append(f"deploy must live under a deploy key, got {pk!r}")
     if t == WORK and not (pk.startswith(STORY + "#")
                           or pk.startswith(DEPLOY + "#")):
         # A work event belongs with the thing it was work ON: a story for the
         # solver and the reviewer, a tested commit for the tester. Anywhere
         # else and the sprint arithmetic silently misses it.
         problems.append(
-            f"work must live in a story or deploy partition, got {pk!r}")
+            f"work must live under a story or deploy key, got {pk!r}")
     if t == SPRINT and not pk.startswith(SPRINT + "#"):
-        problems.append(f"sprint must live in a sprint partition, got {pk!r}")
+        problems.append(f"sprint must live under a sprint key, got {pk!r}")
     if t == WORKER and not pk.startswith(WORKER + "#"):
-        problems.append(f"worker must live in a worker partition, got {pk!r}")
+        problems.append(f"worker must live under a worker key, got {pk!r}")
     if t == WORK:
         if doc.get("role") == "tester" and not pk.startswith(DEPLOY + "#"):
             problems.append(
-                "a tester work event belongs in a deploy partition: the tester "
+                "a tester work event belongs under a deploy key: the tester "
                 "works on a tested commit, not on a story")
         if doc.get("role") not in ROLES:
             problems.append(f"role {doc.get('role')!r} is not one of {ROLES}")

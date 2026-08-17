@@ -104,6 +104,32 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && /usr/bin/az --version | head -3
 
+# MongoDB driver for the planning store (builder/planning_store.py).
+#
+# The ONLY pip package in this image, and it is here rather than vendored
+# because the alternative is speaking the MongoDB wire protocol by hand.
+#
+# --break-system-packages: the base is Debian and its python3 is
+# externally-managed (PEP 668), so pip refuses to install into it without
+# this. That is the correct override here — the image IS the environment,
+# there is no venv for a bash runner to activate, and every module is imported
+# by bare name from /usr/local/bin.
+#
+# planning_store imports it LAZILY, inside the functions that reach the
+# server. If this layer ever fails or is removed, planning documents still
+# spool to the workspace volume and flush once a driver exists; nothing that
+# solves an issue breaks.
+#
+# The default mirrors PYMONGO_VERSION in the root VERSIONS file and must be
+# kept equal to it. It exists so the image still builds when the build is
+# invoked without --build-arg: an empty ARG here would expand to `pymongo==`,
+# which pip rejects, and the whole image would fail on a missing variable
+# rather than on anything to do with the driver.
+ARG PYMONGO_VERSION=4.17.0
+USER root
+RUN pip install --no-cache-dir --break-system-packages "pymongo==${PYMONGO_VERSION}" \
+ && python3 -c "import pymongo; print('pymongo', pymongo.__version__)"
+
 # k8s-mcp + azure-mcp
 COPY --chown=1000:1000 k8s-mcp /opt/k8s-mcp
 COPY --chown=1000:1000 azure-mcp /opt/azure-mcp
@@ -264,6 +290,72 @@ COPY --chmod=0755 tester-tick.py                /usr/local/bin/tester-tick
 COPY --chmod=0755 cron-tester-spawn.sh          /usr/local/bin/cron-tester-spawn
 COPY --chmod=0755 tester-runner.sh              /usr/local/bin/tester-runner
 COPY --chmod=0755 tester-upload-screenshots.py  /usr/local/bin/tester-upload-screenshots
+
+# Reviewer subsystem — the third planner/runner pair, same shape again. See
+# k8s/052-reviewer.yaml.
+COPY --chmod=0755 reviewer-tick.py         /usr/local/bin/reviewer-tick
+COPY --chmod=0755 cron-reviewer-spawn.sh   /usr/local/bin/cron-reviewer-spawn
+COPY --chmod=0755 reviewer-runner.sh       /usr/local/bin/reviewer-runner
+
+# Estimation — sizes a story on the cheap planning model one tick before the
+# solver picks it up, so the solver can route by size.
+COPY --chmod=0755 estimate-runner.sh       /usr/local/bin/estimate-runner
+
+# Shared Python modules. Installed FLAT and extension-less alongside the
+# scripts because that is how they are imported at runtime — by bare name,
+# from /usr/local/bin, which is on sys.path for a script living there. The
+# test suite imports them the same way so it tests this arrangement and not
+# another one.
+#
+# A module that is merged but not listed here is deployed and then absent:
+# the code that imports it raises ImportError on every tick, in a CronJob log
+# nobody reads. `test_shipped_modules` exists to fail the build instead.
+COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
+COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
+COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py
+COPY --chmod=0644 story_estimate.py     /usr/local/bin/story_estimate.py
+COPY --chmod=0644 lexical_guard.py      /usr/local/bin/lexical_guard.py
+COPY --chmod=0644 review_subject.py     /usr/local/bin/review_subject.py
+COPY --chmod=0644 security_reports.py   /usr/local/bin/security_reports.py
+COPY --chmod=0644 queue_state.py        /usr/local/bin/queue_state.py
+COPY --chmod=0644 delivering_pr.py      /usr/local/bin/delivering_pr.py
+COPY --chmod=0644 project_allowlist.py  /usr/local/bin/project_allowlist.py
+COPY --chmod=0644 planning_docs.py      /usr/local/bin/planning_docs.py
+COPY --chmod=0644 planning_store.py     /usr/local/bin/planning_store.py
+COPY --chmod=0644 sprint_current.py     /usr/local/bin/sprint_current.py
+COPY --chmod=0644 sprint_schedule.py    /usr/local/bin/sprint_schedule.py
+
+# Runtime controls. The `.sh` halves are SOURCED by the runners and must sit
+# next to the CLI that shares their name — agent-models sources
+# agent-models.sh from its own directory, exactly as the tests arrange it.
+COPY --chmod=0755 agent-limits          /usr/local/bin/agent-limits
+COPY --chmod=0644 agent-limits.sh       /usr/local/bin/agent-limits.sh
+COPY --chmod=0755 agent-models          /usr/local/bin/agent-models
+COPY --chmod=0644 agent-models.sh       /usr/local/bin/agent-models.sh
+COPY --chmod=0755 agent-thinking        /usr/local/bin/agent-thinking
+COPY --chmod=0644 agent-thinking.sh     /usr/local/bin/agent-thinking.sh
+COPY --chmod=0644 agent-slot.sh         /usr/local/bin/agent-slot.sh
+COPY --chmod=0755 security-level        /usr/local/bin/security-level
+COPY --chmod=0755 llm-quota             /usr/local/bin/llm-quota
+
+# Permission boundary. Nothing the bot does autonomously touches a repository
+# outside this list.
+COPY --chmod=0755 project-allow          /usr/local/bin/project-allow
+COPY --chmod=0644 project-kind.sh        /usr/local/bin/project-kind.sh
+COPY --chmod=0644 project-instructions.sh /usr/local/bin/project-instructions.sh
+
+# Planning / reporting surface.
+COPY --chmod=0755 planning              /usr/local/bin/planning
+COPY --chmod=0755 planning-record       /usr/local/bin/planning-record
+COPY --chmod=0755 record-deliveries     /usr/local/bin/record-deliveries
+
+# Notification and rendering helpers.
+COPY --chmod=0755 telegram-notify       /usr/local/bin/telegram-notify
+COPY --chmod=0755 mermaid-render        /usr/local/bin/mermaid-render
+COPY --chmod=0644 mermaid-theme.json    /usr/local/share/mermaid-theme.json
+
+# The skills lockdown, run as root by the fix-perms init container.
+COPY --chmod=0755 lock-skill-dirs.sh    /usr/local/bin/lock-skill-dirs
 
 # Timezone: Europe/Zurich. Without this, libc time + Node Date default
 # to UTC, so chat timestamps, heartbeat log lines, and the runtime

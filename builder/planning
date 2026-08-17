@@ -6,27 +6,27 @@ The planning data is only worth collecting if somebody can interrogate it in
 the terms they actually think in — "how is the sprint going", "what did that
 story really cost", "how much of this sprint was rework the tester found".
 This is the command behind the `planning` chat skill, so those questions can
-be asked in chat rather than by writing Cosmos SQL.
+be asked in chat rather than by writing MongoDB queries by hand.
 
 `schema` and `query` exist for the agent rather than for a human: the skill
 tells it to read the schema first, then compose its own query for anything the
 canned reports do not cover. That is what makes the store USABLE by openclaw
 instead of merely written to by it.
 
-Every report degrades rather than fails. Cosmos may not be provisioned yet, in
-which case this says so plainly instead of raising — the store is designed to
-spool locally and flush later, so "no data yet" is a normal state and not an
-error to be alarmed by.
+Every report degrades rather than fails. The store may not be provisioned yet,
+in which case this says so plainly instead of raising — writes spool locally
+and flush later, so "no data yet" is a normal state and not an error to be
+alarmed by.
 
 Usage:
-    planning status                 is the store reachable, how far behind
-    planning schema                 the document shapes, for composing queries
-    planning sprint [<n>]           one sprint: commitment, scope growth, cost
-    planning velocity [--last N]    completed points per sprint
-    planning story <project>#<iid>  everything about one story
-    planning deploys [--last N]     what the tester tested, and what it cost
-    planning rework [<n>]           how much of a sprint was tester findings
-    planning query "<SQL>"          raw, cross-partition
+    planning status                  is the store reachable, how far behind
+    planning schema                  the document shapes, for composing queries
+    planning sprint [<n>]            one sprint: commitment, scope growth, cost
+    planning velocity [--last N]     completed points per sprint
+    planning story <owner/repo>#<n>  everything about one story
+    planning deploys [--last N]      what the tester tested, and what it cost
+    planning rework [<n>]            how much of a sprint was tester findings
+    planning query '<json filter>'   raw find, or --pipeline for an aggregation
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ sys.stdout.reconfigure(errors="replace")
 def _offline(what: str) -> None:
     print(f"The planning store is not reachable, so {what} cannot be answered.")
     st = store.status()
-    print(f"  endpoint : {st['endpoint'] or '(not configured yet)'}")
-    print(f"  spooled  : {st['spoolDepth']} document(s) waiting locally")
+    print(f"  store   : {st['uri'] or '(not configured yet)'}")
+    print(f"  spooled : {st['spoolDepth']} document(s) waiting locally")
     if not st["enabled"]:
         print("  Nothing is lost — writes are still being spooled to the")
         print("  workspace volume and will flush once the store exists.")
@@ -71,43 +71,50 @@ def cmd_status(args) -> int:
         # planning_store.probe().
         state = "NO - configured but not answering"
     print("Planning store")
-    print(f"  reachable : {state}")
-    print(f"  endpoint  : {st['endpoint'] or '-'}")
-    print(f"  database  : {st['database']} / {st['container']}")
-    print(f"  auth      : {st['auth']}")
-    # Why the preferred path was not used. This is what distinguishes "the
-    # identity lacks a role" from "this process cannot read the token file",
-    # which look identical from a 403 alone and lead to opposite fixes.
-    if st.get("authNote"):
-        print(f"  auth note : workload identity not used — {st['authNote']}")
+    print(f"  reachable  : {state}")
+    print(f"  store      : {st['uri'] or '-'}")
+    print(f"  collection : {st['database']}/{st['collection']}")
+    # An absent driver and an unreachable server produce the same symptom and
+    # need opposite fixes, and only one of them is visible from a server log.
+    print(f"  driver     : {st['driver'] or 'pymongo IS NOT INSTALLED here'}")
     if st["reason"]:
-        print(f"  why not   : {st['reason']}")
-    print(f"  spooled   : {st['spoolDepth']} document(s) waiting to flush")
+        print(f"  why not    : {st['reason']}")
+    print(f"  spooled    : {st['spoolDepth']} document(s) waiting to flush")
     if st["reachable"]:
         n = store.document_count()
-        print(f"  documents : {'unknown' if n is None else n}")
+        print(f"  documents  : {'unknown' if n is None else n}")
     return 0
 
 
 def cmd_schema(args) -> int:
     """The shapes, in enough detail that the agent can compose a query."""
-    print(f"""One Cosmos container, partition key /pk, five document `type`s.
-There are NO cross-container joins in Cosmos, which is why everything lives
-together; a partition read is the closest thing to a join available.
+    print(f"""One MongoDB collection, five document `type`s, grouped by a `pk`
+field. `pk` is an ordinary indexed field, not a database requirement: it is
+what makes "everything about this story" one equality match instead of an $or
+across four shapes.
 
-  pk = story#<host>#<project>#<iid>
+IDS
+  Every document's `_id` is deterministic and is repeated in `id`:
+      story / deploy / sprint / worker : `_id` == its own `pk`
+      work                             : work#<runId>#<role>
+  Every write is replace_one(upsert=True) on that `_id`, so re-sending a
+  document is a no-op. That is why a runner can record its running cost every
+  two minutes without producing two hundred rows.
+
+  pk = story#<host>#<owner/repo>#<issue-number>
        type=story   the work item: storyPoints, pointsDefaulted, sprintId,
                     sprintScope ({' | '.join(docs.SCOPES)}),
-                    origin ({' | '.join(docs.ORIGINS)}), priority, category,
-                    startedAt / mrOpenedAt / reviewRequestedAt / mergedAt,
-                    sprintHistory[], summary, url, mrUrl
+                    origin ({' | '.join(docs.ORIGINS)}),
+                    priority, category, repo, number, sprintHistory[],
+                    startedAt / prOpenedAt / reviewRequestedAt / mergedAt,
+                    summary, url, prUrl
        type=work    one per runner invocation, role=solver|reviewer:
                     runId, model, provider, llmCalls, secondsOn429,
                     startedAt, endedAt, outcome
 
-  pk = deploy#<host>#<project>#<sha12>
+  pk = deploy#<host>#<owner/repo>#<sha12>
        type=deploy  a tested commit of the default branch: sha, priorSha,
-                    coveredStories[], mergeRequests[], findings, outcome
+                    coveredStories[], pullRequests[], findings, outcome
        type=work    the tester run, role=tester
 
        The tester has no story — it tests a RANGE of commits — so its cost is
@@ -127,47 +134,30 @@ together; a partition read is the closest thing to a join available.
                     retroactively when somebody edits a worker.
 
 Notes that change how you should query:
-  - A story and its work events share one partition: ask for both at once.
-  - Sprint queries fan out across partitions (WHERE c.sprintId = @n). That is
-    fine at this volume and is the deliberate trade for carry-over working.
+  - A story and its work events share one `pk`: ask for both at once with
+    {{"pk": "story#github#owner/repo#42"}} and split them by `type` yourself.
+  - A WORK document carries no repo or number of its own — only the `pk` that
+    encodes both. Match work by pk (or by a ^-anchored $regex on it), never by
+    a repo field, which it does not have.
   - `pointsDefaulted` marks an estimate that was never judged. A sprint whose
     added scope is all defaulted 8s is not the same sprint as one estimated.
   - `sprintScope` distinguishes committed / added / carried / unknown. Counting
     a carried story as committed makes the new sprint look over-committed and
     hides the previous one's shortfall.
-  - NO cross-partition ORDER BY, and NO aggregates (COUNT / SUM / AVG) unless
-    the query is scoped to ONE partition. The REST gateway cannot serve either
-    without a query-plan round trip this store deliberately does not make, and
-    it fails into an EMPTY RESULT rather than an error — which reads exactly
-    like "there is no data". Fetch the rows and sort or total them yourself;
-    that is what every built-in report here does.
+  - Sorting, limiting and aggregating are all done by the server here, so
+    `--sort`, `--limit` and `--pipeline` are cheap and correct. Use $group in a
+    pipeline for totals rather than pulling every row back.
+  - Work events are the only documents that ever expire (a TTL index on
+    `expiresAt`); everything else carries no such field and is kept.
 
-Query with:  planning query "SELECT * FROM c WHERE c.type='story' AND ..."
-Parameters are not supported here; inline literals and keep them simple.""")
+Query with:
+  planning query '{{"type": "story", "sprintId": 4}}' --limit 20
+  planning query '{{"pk": "story#github#owner/repo#42"}}'
+  planning query --pipeline '[{{"$match": {{"type": "work"}}}},
+                              {{"$group": {{"_id": "$role",
+                                           "calls": {{"$sum": "$llmCalls"}}}}}}]'
+The filter is JSON, so use double quotes inside and single quotes around it.""")
     return 0
-
-
-def _by_number_desc(rows: list) -> list:
-    """Sprints newest first — sorted HERE, never by the store.
-
-    `ORDER BY c.number DESC` on a cross-partition query cannot be served by the
-    REST gateway: it fails into an EMPTY RESULT rather than an error. Sprint
-    documents live one per partition, so every sprint query is cross-partition,
-    and five reports were permanently answering "nothing recorded yet" against
-    a store that had the data —
-
-        planning velocity · planning chart · planning deploys
-        planning sprint last · the `next` resolution
-
-    The schema note this file prints warns about exactly this, and this file
-    was the thing violating it.
-    """
-    def key(row):
-        try:
-            return int(row.get("number") or 0)
-        except (TypeError, ValueError):
-            return 0
-    return sorted(rows, key=key, reverse=True)
 
 
 def _nothing_to_draw(args, text: str) -> None:
@@ -190,10 +180,9 @@ def _note(args, text: str) -> None:
     """A human-facing remark that must never land in machine-read output.
 
     In `--format mermaid` the whole of stdout is the diagram: it gets piped
-    into a renderer, and anything else in it is parsed as chart syntax. The
-    burndown printed its "points arrived after the sprint started" note
-    unconditionally and velocity printed its legend INSIDE the mermaid branch,
-    so the first real render died with
+    into a renderer, and anything else in it is parsed as chart syntax. A
+    burndown that printed its "points arrived after the sprint started" note
+    unconditionally would die with
 
         Lexical error on line 7. Unrecognized text.  ..., 0, 0]```  74 points
 
@@ -208,9 +197,7 @@ def _note(args, text: str) -> None:
 
 
 def _stories_in_sprint(n) -> list[dict]:
-    return store.query(
-        "SELECT * FROM c WHERE c.type='story' AND c.sprintId=@n",
-        [{"name": "@n", "value": n}])
+    return store.query({"type": "story", "sprintId": n})
 
 
 def resolve_sprint(which):
@@ -222,22 +209,20 @@ def resolve_sprint(which):
     """
     which = (str(which).lower() if which is not None else "current")
     if which in ("current", "active", "this", ""):
-        rows = store.query(
-            "SELECT * FROM c WHERE c.type='sprint' AND c.state='active'")
+        rows = store.query({"type": "sprint", "state": "active"})
         if not rows:
             print("No sprint is running.")
             return None
         return rows[0]
     if which in ("last", "previous", "prev"):
-        rows = _by_number_desc(store.query(
-            "SELECT * FROM c WHERE c.type='sprint' AND c.state!='active'"))
+        rows = store.query({"type": "sprint", "state": {"$ne": "active"}},
+                           sort=[("number", -1)], limit=1)
         if not rows:
             print("No finished sprint yet.")
             return None
         return rows[0]
     if which == "next":
-        rows = _by_number_desc(
-            store.query("SELECT * FROM c WHERE c.type='sprint'"))
+        rows = store.query({"type": "sprint"}, sort=[("number", -1)], limit=1)
         n = (rows[0].get("number", 0) + 1) if rows else 1
         print(f"Sprint {n} has not started yet — nothing is recorded for it.")
         print("Planning for it happens against the backlog, not the store.")
@@ -247,8 +232,7 @@ def resolve_sprint(which):
     except ValueError:
         print(f"Not a sprint: {which!r}. Use current, last, next or a number.")
         return None
-    rows = store.query("SELECT * FROM c WHERE c.type='sprint' AND c.number=@n",
-                       [{"name": "@n", "value": n}])
+    rows = store.query({"type": "sprint", "number": n})
     if not rows:
         print(f"No sprint {n}.")
         return None
@@ -291,8 +275,7 @@ def _forecast(sprint: dict, stories: list[dict]) -> dict:
     rate = (done_pts / elapsed) if elapsed > 0 else 0.0
     projected_by_rate = done_pts + rate * remaining_days
 
-    finished = store.query("SELECT * FROM c WHERE c.type='sprint' "
-                           "AND c.state!='active'")
+    finished = store.query({"type": "sprint", "state": {"$ne": "active"}})
     hist = sorted(int(s.get("completedPoints") or 0) for s in finished)
     median = hist[len(hist) // 2] if hist else None
 
@@ -414,7 +397,7 @@ def cmd_sprint(args) -> int:
         return 0
     # resolve_sprint, NOT int(): sprints are named `current` and `last` far
     # more often than by number — the skill documents exactly that — and
-    # int("current") raised a ValueError traceback, which to a chat agent
+    # int("current") raises a ValueError traceback, which to a chat agent
     # reads as "the reporting tool is broken" rather than "wrong argument".
     s = resolve_sprint(args.number)
     if s is None:
@@ -453,8 +436,8 @@ def cmd_velocity(args) -> int:
     if not store.enabled():
         _offline("velocity")
         return 0
-    sprints = _by_number_desc(
-        store.query("SELECT * FROM c WHERE c.type='sprint'"))[:args.last]
+    sprints = store.query({"type": "sprint"}, sort=[("number", -1)],
+                          limit=args.last)
     if not sprints:
         print("No sprints recorded yet.")
         return 0
@@ -474,13 +457,11 @@ def cmd_history(args) -> int:
     """Past estimates against what the work actually cost.
 
     Written for the ESTIMATOR to read, not for a person: it is fed straight
-    into the estimation prompt so a new story is sized against this project's
-    own measured history instead of the model's prior about software in
-    general. Issue #8 asks for exactly this — estimate from the text first,
-    then check it against previous sprints.
+    into the estimation prompt so a new story is sized against this repo's own
+    measured history instead of the model's prior about software in general.
 
     Compact on purpose. A long table would crowd out the issue text it is
-    supposed to inform, and the signal here is coarse: whether this project's
+    supposed to inform, and the signal here is coarse: whether this repo's
     3-pointers really cost 3 points.
     """
     if not store.enabled():
@@ -488,28 +469,28 @@ def cmd_history(args) -> int:
         # "the store is unreachable" would read to the model as information
         # about the story it is sizing.
         return 0
+    import re
     limit = max(1, int(args.last or 8))
     stories = store.query(
-        "SELECT c.pk, c.iid, c.title, c.storyPoints, c.pointsDefaulted "
-        "FROM c WHERE c.type='story' AND c.project=@p AND c.host=@h",
-        [{"name": "@p", "value": args.project}, {"name": "@h", "value": args.host}])
+        {"type": "story", "repo": args.repo, "host": args.host},
+        projection={"pk": 1, "number": 1, "title": 1, "storyPoints": 1,
+                    "pointsDefaulted": 1})
     if not stories:
         return 0
-    # Matched on the PARTITION KEY, not on c.project — a work document has no
-    # project or host field of its own, only the pk that encodes both. Asking
-    # for c.project on a work document matches nothing, so this report was
-    # permanently empty and the estimator it feeds never received a single
-    # calibration point. That is the likely reason estimates kept coming in
-    # low: the correction loop existed and had no input.
+    # Matched on the GROUPING key, not on a repo field — a work document has
+    # no repo or host of its own, only the pk that encodes both. Asking for
+    # repo on a work document matches nothing, so this report would be
+    # permanently empty and the estimator it feeds would never receive a
+    # single calibration point: the correction loop would exist with no input.
+    #
+    # The prefix is built with story_pk so host and repo are normalised
+    # exactly as they were when the key was written; assembling the string by
+    # hand would drift the moment a repo name contains anything _clean
+    # rewrites.
+    prefix = docs.story_pk(args.host, args.repo, "")
     work = store.query(
-        "SELECT c.pk, c.role, c.llmCalls FROM c "
-        "WHERE c.type='work' AND STARTSWITH(c.pk, @prefix)",
-        # Built with story_pk so host and project are normalised exactly as
-        # they were when the key was written; assembling the string by hand
-        # would drift the moment a project path contains anything _clean
-        # rewrites.
-        [{"name": "@prefix",
-          "value": docs.story_pk(args.host, args.project, "")}])
+        {"type": "work", "pk": {"$regex": "^" + re.escape(prefix)}},
+        projection={"pk": 1, "role": 1, "llmCalls": 1})
 
     calls_by_pk: dict[str, int] = {}
     for w in work:
@@ -525,31 +506,34 @@ def cmd_history(args) -> int:
         if not calls or s.get("pointsDefaulted"):
             continue
         required = sp.points_for_calls(calls) if sp else None
-        rows.append((s.get("iid"), s.get("title") or "", s.get("storyPoints"),
-                     required, calls))
+        rows.append((s.get("number"), s.get("title") or "",
+                     s.get("storyPoints"), required, calls))
     if not rows:
         return 0
     rows = rows[-limit:]
-    print("Previous stories in this project, estimated vs what they cost:")
-    for iid, title, est, required, calls in rows:
+    print("Previous stories in this repository, estimated vs what they cost:")
+    for number, title, est, required, calls in rows:
         flag = "" if est == required else "   <- estimate was off"
-        print(f"  #{iid} {title[:44]:<44} est {est}  actual {required} "
+        print(f"  #{number} {title[:44]:<44} est {est}  actual {required} "
               f"({calls} calls){flag}")
     return 0
 
 
 def cmd_story(args) -> int:
+    # Same as cmd_query: the reference is checked before the store, so a
+    # mistyped argument is reported as one rather than as an outage.
+    ref = args.ref
+    if "#" not in ref:
+        print("Give a story as <owner/repo>#<number>, e.g. acme/web#156")
+        return 1
     if not store.enabled():
         _offline("story history")
         return 0
-    ref = args.ref
-    if "#" not in ref:
-        print("Give a story as <project>#<iid>, e.g. 601/ai/web-test#156")
-        return 1
-    project, iid = ref.rsplit("#", 1)
-    pk = docs.story_pk(args.host, project, iid)
-    rows = store.query("SELECT * FROM c WHERE c.pk=@pk",
-                       [{"name": "@pk", "value": pk}], pk=pk)
+    repo, number = ref.rsplit("#", 1)
+    pk = docs.story_pk(args.host, repo, number)
+    # One equality match returns the story AND every run against it: that is
+    # what grouping them under a shared pk is for.
+    rows = store.query({"pk": pk})
     if not rows:
         print(f"Nothing recorded for {pk}")
         return 0
@@ -563,7 +547,7 @@ def cmd_story(args) -> int:
         print(f"  estimate  {est}{mark}   priority {story.get('priority')}   "
               f"origin {story.get('origin')}")
         print(f"  sprint    {story.get('sprintId')} ({story.get('sprintScope')})")
-        for label, key in (("started", "startedAt"), ("MR opened", "mrOpenedAt"),
+        for label, key in (("started", "startedAt"), ("PR opened", "prOpenedAt"),
                            ("review", "reviewRequestedAt"), ("merged", "mergedAt")):
             if story.get(key):
                 print(f"  {label:<9} {story[key]}")
@@ -584,9 +568,8 @@ def cmd_deploys(args) -> int:
     if not store.enabled():
         _offline("deployment tests")
         return 0
-    rows = sorted(store.query("SELECT * FROM c WHERE c.type='deploy'"),
-                  key=lambda d: str(d.get("testedAt") or ""),
-                  reverse=True)[:args.last]
+    rows = store.query({"type": "deploy"}, sort=[("testedAt", -1)],
+                       limit=args.last)
     if not rows:
         print("No deployment tests recorded yet.")
         return 0
@@ -607,8 +590,7 @@ def cmd_rework(args) -> int:
         return 0
     n = args.number
     if n is None:
-        active = store.query(
-            "SELECT * FROM c WHERE c.type='sprint' AND c.state='active'")
+        active = store.query({"type": "sprint", "state": "active"})
         if not active:
             print("No active sprint.")
             return 0
@@ -704,8 +686,8 @@ def _ascii_chart(dates, series, labels, height=12) -> str:
 
 
 def _mermaid_chart(dates, series, labels, title) -> str:
-    """Mermaid xychart — GitLab renders it in markdown, so a burndown can be
-    posted straight into an issue or a merge request instead of screenshotted.
+    """Mermaid xychart — GitHub renders it in markdown, so a burndown can be
+    posted straight into an issue or a pull request instead of screenshotted.
     """
     lines = ["```mermaid", "xychart-beta", f'    title "{title}"',
              "    x-axis [" + ", ".join(d[5:] for d in dates) + "]",
@@ -755,8 +737,8 @@ def cmd_chart(args) -> int:
     if not store.enabled():
         _offline("a velocity chart")
         return 0
-    sprints = _by_number_desc(
-        store.query("SELECT * FROM c WHERE c.type='sprint'"))[:args.last]
+    sprints = store.query({"type": "sprint"}, sort=[("number", -1)],
+                          limit=args.last)
     if not sprints:
         _nothing_to_draw(args, "No sprints recorded yet.")
         return 0
@@ -782,14 +764,40 @@ def cmd_chart(args) -> int:
     return 0
 
 
+# The spellings people and models actually write for "not this sprint". The
+# label is matched loosely and REMOVED by its literal name — see
+# next_sprint_labels.
+_NEXT_SPRINT = ("nextsprint", "next-sprint", "next sprint")
+
+
+def next_sprint_labels(labels) -> list[str]:
+    """The labels on an issue that mean "defer this to the next sprint".
+
+    Returns the EXACT spellings found, because GitHub deletes a label by its
+    literal name: sending "nextsprint" would not remove a label written
+    "Next Sprint", and the deferral would quietly become permanent.
+    """
+    out = []
+    for label in labels or []:
+        name = str(label if isinstance(label, str) else label.get("name", ""))
+        squashed = name.lower().replace("_", "-").strip()
+        # A scoped label such as `sprint::next sprint` carries the meaning in
+        # its value half.
+        squashed = squashed.rsplit("::", 1)[-1].strip()
+        if squashed.replace("-", " ") in ("next sprint", "nextsprint") \
+                or squashed in _NEXT_SPRINT:
+            out.append(name)
+    return out
+
+
 def clear_next_sprint_labels() -> int:
     """Remove the next-sprint label from the bot's ASSIGNED open issues.
 
     Scoped to assignments deliberately. The label on somebody else's backlog
     item is their planning note, not an instruction to this bot, and stripping
-    it instance-wide would edit issues nobody asked us to touch.
+    it repository-wide would edit issues nobody asked us to touch.
 
-    Best-effort throughout: a sprint must roll over even when GitLab is down.
+    Best-effort throughout: a sprint must roll over even when GitHub is down.
     A label that failed to clear costs one sprint of deferral and is corrected
     on the next rollover; a rollover that aborted half-way would leave the
     marker and the store disagreeing about which sprint is running.
@@ -797,58 +805,56 @@ def clear_next_sprint_labels() -> int:
     import urllib.parse
     import urllib.request
 
-    token = os.environ.get("GITLAB_API_TOKEN", "")
-    base = os.environ.get("GITLAB_URL", "").rstrip("/")
-    if not (token and base):
-        return 0
-    try:
-        import story_estimate
-    except ImportError:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    if not token:
         return 0
 
-    def api(path, method="GET", params=None):
-        url = f"{base}/api/v4{path}"
-        if params and method == "GET":
-            url += "?" + urllib.parse.urlencode(params)
-        data = urllib.parse.urlencode(params).encode() if (
-            params and method != "GET") else None
+    def api(path, method="GET"):
         req = urllib.request.Request(
-            url, data=data, headers={"PRIVATE-TOKEN": token}, method=method)
+            base + path, method=method, headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            })
         with urllib.request.urlopen(req, timeout=20) as r:
             body = r.read()
             return json.loads(body) if body else {}
 
     cleared = 0
     try:
-        issues = api("/issues", params={
-            "scope": "assigned_to_me", "state": "opened", "per_page": 100})
+        issues = api("/issues?filter=assigned&state=open&per_page=100")
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"[planning] could not list issues to clear the "
                          f"next-sprint label: {str(e)[:100]}\n")
         return 0
 
     for issue in issues if isinstance(issues, list) else []:
-        labels = issue.get("labels") or []
-        present = story_estimate.next_sprint_labels(labels)
+        present = next_sprint_labels(issue.get("labels") or [])
         if not present:
             continue
-        try:
-            api(f"/projects/{issue['project_id']}/issues/{issue['iid']}",
-                method="PUT", params={"remove_labels": ",".join(present)})
-            cleared += 1
-        except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"[planning] could not clear the next-sprint "
-                             f"label on #{issue.get('iid')}: {str(e)[:80]}\n")
+        repo = (issue.get("repository") or {}).get("full_name")
+        number = issue.get("number")
+        if not (repo and number):
+            continue
+        for name in present:
+            try:
+                api(f"/repos/{repo}/issues/{number}/labels/"
+                    + urllib.parse.quote(name, safe=""), method="DELETE")
+                cleared += 1
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"[planning] could not clear the next-sprint "
+                                 f"label on {repo}#{number}: {str(e)[:80]}\n")
     return cleared
 
 
 def cmd_sprint_tick(args) -> int:
     """Roll the sprint over if a boundary has passed. Safe to run every tick.
 
-    This is what makes sprints autonomous. It is called from the 5-minute
-    planner tick rather than from a cron at the boundary, so a pod that was
-    restarting at 13:00 on Saturday catches up on its next tick instead of
-    losing the rollover entirely.
+    This is what makes sprints autonomous. It is called from the planner tick
+    rather than from a cron at the boundary, so a pod that was restarting at
+    13:00 on Saturday catches up on its next tick instead of losing the
+    rollover entirely.
 
     Idempotent by construction: it rolls only when the running sprint started
     before the most recent boundary, so a hundred ticks in a row do nothing.
@@ -870,7 +876,7 @@ def cmd_sprint_tick(args) -> int:
     number = int(active.get("number") or 0) + 1
 
     # The marker first: it is what every runner reads, it cannot fail on a
-    # network, and a sprint that exists locally but not yet in Cosmos is far
+    # network, and a sprint that exists locally but not yet in the store is far
     # better than the reverse — work events would otherwise carry a sprint
     # number nothing can resolve.
     current.write(number, started, ends)
@@ -889,9 +895,7 @@ def cmd_sprint_tick(args) -> int:
     # the next tick that can read it.
     prev = active.get("number")
     if store.enabled() and prev:
-        rows = store.query(
-            "SELECT * FROM c WHERE c.type='sprint' AND c.number=@n",
-            [{"name": "@n", "value": int(prev)}])
+        rows = store.query({"type": "sprint", "number": int(prev)})
         if rows:
             closing = rows[0]
             closing["state"] = "closed"
@@ -900,12 +904,11 @@ def cmd_sprint_tick(args) -> int:
             print(f"  sprint {prev} closed")
 
     # The NEW sprint is written unconditionally. store.write() spools to the
-    # workspace volume first and flushes when Cosmos can be reached, which is
-    # exactly the case this used to skip: guarded behind enabled(), the
-    # document was never created at all, while the message below promised it
-    # had been kept. Sprint 1 was lost that way — it existed in the local
-    # marker, every runner logged work against it, and no sprint document
-    # existed for any report to attach that work to.
+    # workspace volume first and flushes when the store can be reached. Putting
+    # this behind enabled() would mean the document is never created at all
+    # while the message below promises it has been kept — the sprint would
+    # exist in the local marker, every runner would log work against it, and no
+    # sprint document would exist for any report to attach that work to.
     store.write(docs.sprint_doc(number=number, started_at=started,
                                 ends_at=ends, now=now.isoformat()))
     if not store.enabled():
@@ -963,8 +966,7 @@ def cmd_schedule(args) -> int:
                   f"({direction}; it was {was}).")
             if store.enabled():
                 rows = store.query(
-                    "SELECT * FROM c WHERE c.type='sprint' AND c.number=@n",
-                    [{"name": "@n", "value": int(active["number"])}])
+                    {"type": "sprint", "number": int(active["number"])})
                 if rows:
                     doc = rows[0]
                     doc["endsAt"] = r["endsAt"]
@@ -977,10 +979,43 @@ def cmd_schedule(args) -> int:
 
 
 def cmd_query(args) -> int:
+    """Run a raw query, so the agent is not limited to the reports above.
+
+    The filter is JSON rather than a bespoke syntax on purpose: it is exactly
+    what the driver takes, which means anything written against the MongoDB
+    documentation works here unchanged and `schema` does not have to teach a
+    second language.
+    """
+    # The ARGUMENT is checked before the store is, on purpose. A malformed
+    # filter is malformed whether or not the store exists, and reporting the
+    # outage instead would send the reader to provision a database over a
+    # missing quotation mark.
+    try:
+        body = json.loads(args.filter) if args.filter else {}
+    except ValueError as e:
+        # Say what was wrong with the JSON. A silent empty result here reads
+        # exactly like "there is no such data", which is the one wrong lesson
+        # to draw from a typo.
+        print(f"That is not valid JSON: {e}")
+        return 2
+    if args.pipeline and not isinstance(body, list):
+        print("A pipeline must be a JSON array of stages.")
+        return 2
+    if not args.pipeline and not isinstance(body, dict):
+        print("A filter must be a JSON object. For an aggregation pass "
+              "--pipeline with an array of stages.")
+        return 2
     if not store.enabled():
         _offline("that query")
         return 0
-    rows = store.query(args.sql)
+    if args.pipeline:
+        rows = store.query(pipeline=body)
+    else:
+        sort = None
+        if args.sort:
+            field, _, direction = args.sort.partition(":")
+            sort = [(field, -1 if direction.lower().startswith("d") else 1)]
+        rows = store.query(body, sort=sort, limit=args.limit)
     print(json.dumps(rows, indent=2, default=str)[:20000])
     print(f"\n{len(rows)} row(s)")
     return 0
@@ -988,7 +1023,8 @@ def cmd_query(args) -> int:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="planning", description=__doc__)
-    ap.add_argument("--host", default="gitlab", help="gitlab|github")
+    ap.add_argument("--host", default="github",
+                    help="which host the keys were written for")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
@@ -1003,11 +1039,11 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("story"); p.add_argument("ref")
     p.set_defaults(fn=cmd_story)
 
-    # Read by estimate-runner-gitlab, which pastes it into the estimation
-    # prompt. Prints NOTHING when there is no measured history — the output
-    # is prompt text, and an explanation would be read as being about the
-    # story under estimation.
-    p = sub.add_parser("history"); p.add_argument("project")
+    # Read by the estimator, which pastes it into the estimation prompt.
+    # Prints NOTHING when there is no measured history — the output is prompt
+    # text, and an explanation would be read as being about the story under
+    # estimation.
+    p = sub.add_parser("history"); p.add_argument("repo")
     p.add_argument("--last", type=int, default=8)
     p.set_defaults(fn=cmd_history)
 
@@ -1017,7 +1053,15 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("rework"); p.add_argument("number", nargs="?")
     p.set_defaults(fn=cmd_rework)
 
-    p = sub.add_parser("query"); p.add_argument("sql")
+    p = sub.add_parser("query")
+    p.add_argument("filter", nargs="?", default="{}",
+                   help="a JSON filter, or a JSON array of stages with "
+                        "--pipeline")
+    p.add_argument("--pipeline", action="store_true",
+                   help="treat the argument as an aggregation pipeline")
+    p.add_argument("--sort", default="",
+                   help="field:asc or field:desc")
+    p.add_argument("--limit", type=int, default=100)
     p.set_defaults(fn=cmd_query)
 
     p = sub.add_parser("forecast"); p.add_argument("number", nargs="?")

@@ -1,22 +1,22 @@
-"""Which sprint is running right now — answerable without reaching Cosmos.
+"""Which sprint is running right now — answerable without reaching the store.
 
 WHY A LOCAL MARKER AND NOT A QUERY
 Every runner needs the sprint number: it goes on every work event, and an
-event with no sprint is invisible to every report that matters. But asking
-Cosmos for it at the start of each run would make the planning store a
+event with no sprint is invisible to every report that matters. But querying
+the planning store for it at the start of each run would make that store a
 DEPENDENCY of the issue solver — one more thing whose outage stops work.
 
 The store is deliberately built the other way round: writes spool locally and
-flush when they can, so a Cosmos outage makes reporting late rather than
-stopping the bot. Reading the sprint number over the network would undo that
-in one line.
+flush when they can, so an outage makes reporting late rather than stopping the
+bot. Reading the sprint number over the network would undo that in one line.
 
 So the rollover writes a small marker on the workspace volume, and everything
 else reads that. It survives a pod restart, it costs nothing, and it is
-readable while the store does not exist at all — which is its state today.
+readable while the store does not exist at all — which is its state until one
+is provisioned.
 
 The marker is a CACHE OF A DECISION, not a second source of truth. The sprint
-documents in Cosmos remain authoritative; this says which one is current.
+documents in the store remain authoritative; this says which one is current.
 """
 
 from __future__ import annotations

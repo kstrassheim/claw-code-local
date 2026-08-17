@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 # agent-thinking: how hard does each subsystem think?
 #
-# Sourced by the three GitLab runners, exactly like agent-limits.sh and
-# agent-models.sh, and written by /usr/local/bin/agent-thinking, which the
-# chat skills call.
+# Sourced by the three runners — fixer, tester, reviewer — exactly like
+# agent-limits.sh and agent-models.sh, and written by
+# /usr/local/bin/agent-thinking, which the chat skills call.
 #
 # WHY A PER-SUBSYSTEM SETTING
 # `openclaw agent --thinking <level>` is a per-run override, so the reviewer

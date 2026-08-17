@@ -20,8 +20,8 @@
 #   solver.small    implementing a small story, when set
 #   planning        story-point estimation and sprint planning
 #   tester          the deployment tester's run
-#   reviewer        the MR reviewer's run
-#   reviewer.small  reviewing a small story's MR, when set
+#   reviewer        the pull-request reviewer's run
+#   reviewer.small  reviewing a small story's pull request, when set
 #
 # A model id is what `openclaw models list` prints: kimi/k3,
 # minimax/MiniMax-M3, mistral/mistral-large-latest. The word `default` hands
@@ -47,9 +47,9 @@ LIB="$(dirname "$0")/agent-models.sh"
 # on its own — when the Kimi quota is spent, planning has to keep working on
 # another provider even though nothing else changed.
 #
-# `solver.small` and `reviewer.small` are the cheap lane (#10, #20): a story
-# estimated at or below solver.small.max_points (default 3) is implemented on
-# `solver.small` INSTEAD of `solver`, and its MR is reviewed on
+# `solver.small` and `reviewer.small` are the cheap lane: a story estimated at
+# or below solver.small.max_points (default 3) is implemented on
+# `solver.small` INSTEAD of `solver`, and its pull request is reviewed on
 # `reviewer.small` INSTEAD of `reviewer`.
 #
 # ONE threshold governs both, and it keeps the `solver.` name it shipped with.
@@ -70,8 +70,8 @@ KEYS='solver|the issue solver'"'"'s implementation turns
 solver.small|implementing small stories (<= solver.small.max_points), when set
 planning|story-point estimation and sprint planning
 tester|the deployment tester'"'"'s run
-reviewer|the MR reviewer'"'"'s run
-reviewer.small|reviewing small stories'"'"' MRs (same threshold), when set'
+reviewer|the pull-request reviewer'"'"'s run
+reviewer.small|reviewing small stories'"'"' pull requests (same threshold), when set'
 
 _known() { printf '%s\n' "$KEYS" | cut -d'|' -f1 | grep -qx "$1"; }
 _desc_for() { printf '%s\n' "$KEYS" | awk -F'|' -v k="$1" '$1==k{print $2}'; }

@@ -11,6 +11,7 @@ resources:
   - 040-networkpolicy.yaml
   - 050-issue-watcher.yaml
   - 051-tester.yaml
+  - 052-reviewer.yaml
   - 060-runner-rbac.yaml
   # openclaw-secrets is no longer in git. The Deploy workflow's
   # publish-secrets job `kubectl apply`s it directly each run via

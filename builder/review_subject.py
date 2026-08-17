@@ -1,31 +1,29 @@
 """What a review was ABOUT — not merely which commit it looked at.
 
 WHY THIS EXISTS
-The autonomous reviewer judges a merge request, and a merge request is more
-than its diff. It reviews the description too: whether the MR claims to close
-an issue it only half-fixes, whether the stated scope matches the change.
-Those verdicts are real, and they are answered by editing prose, not by
-pushing a commit.
+The autonomous reviewer judges a pull request, and a pull request is more than
+its diff. It reviews the description too: whether the pull request claims to
+close an issue it only half-fixes, whether the stated scope matches the change.
+Those verdicts are real, and they are answered by editing prose, not by pushing
+a commit.
 
-Everything downstream was keyed on the head SHA alone: the planner skipped an
-MR whose SHA it had already reviewed, the runner recorded only that SHA, and
-the solver's verdict fingerprint was `verdict:sha`. So a CHANGES verdict about
-the description could never be cleared. Observed on common/openclaw-aks!5
-(2026-08-11): the reviewer asked for the `Closes #5` line to go, the solver
-removed it within six minutes, and nothing looked again — the solver started
-and exited on every tick for an hour, 0 model calls, until its retry budget
-ran out and it asked for a human. The author did the right thing and it
-counted for nothing.
+Keyed on the head SHA alone, everything downstream broke on exactly that case:
+the planner skipped a pull request whose SHA it had already reviewed, the runner
+recorded only that SHA, and the solver's verdict fingerprint was `verdict:sha`.
+So a CHANGES REQUIRED verdict about the description could never be cleared. The
+reviewer asks for a `Closes #5` line to go, the author removes it within
+minutes, and nothing looks again — the solver starts and exits on every tick,
+zero model calls, until its retry budget runs out and it asks for a human. The
+author did the right thing and it counted for nothing.
 
 So the record of "I reviewed this" carries the SHA *and* a digest of the prose
 that was reviewed. Either moving means there is something new to look at.
 
 ONE MODULE, TWO CALLERS, BECAUSE THEY MUST AGREE
 The reader is Python (reviewer-tick.py, in the cron pod) and the writer is
-shell (reviewer-runner-gitlab.sh, in the claw-code pod). If the two computed
-this differently by so much as a strip(), every MR would look changed forever
-and the reviewer would re-review on a loop. Same reason lexical_guard and
-merge_approval are modules.
+shell (reviewer-runner.sh, in the openclaw pod). If the two computed this
+differently by so much as a strip(), every pull request would look changed
+forever and the reviewer would re-review on a loop.
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ DIGEST_LEN = 12
 def fingerprint(title: str | None, description: str | None) -> str:
     """A stable digest of the prose a reviewer judges.
 
-    Line endings are normalised and the ends are stripped: the GitLab web
+    Line endings are normalised and the ends are stripped: the GitHub web
     editor and the API disagree about trailing newlines and CRLF, and a review
     must not be re-run because something invisible moved.
     """
@@ -72,15 +70,15 @@ def parse(stored: str | None) -> tuple[str, str]:
 
 def already_reviewed(stored: str | None, sha: str,
                      title: str | None, description: str | None) -> bool:
-    """True ⟺ this exact merge request — same commit AND same prose — has
+    """True ⟺ this exact pull request — same commit AND same prose — has
     already been reviewed, so there is nothing new to look at.
 
     Fails towards REVIEWING (False) in every uncertain case. A needless review
-    costs one run; a skipped one strands the merge request forever, which is
-    the failure this module was written for.
+    costs one run; a skipped one strands the pull request forever, which is the
+    failure this module was written for.
 
-    A legacy bare-SHA record therefore earns exactly one re-review, after
-    which the stamp carries its prose digest and the question stops arising.
+    A legacy bare-SHA record therefore earns exactly one re-review, after which
+    the stamp carries its prose digest and the question stops arising.
     """
     if not sha:
         return False

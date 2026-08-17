@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 # project-instructions: OPTIONAL per-project instruction files, read from the
-# TARGET repository. Sourced (not executed) by the three GitLab runners, same
-# pattern as /usr/local/bin/agent-slot.
+# TARGET repository. Sourced (not executed) by the three runners, same pattern
+# as /usr/local/bin/agent-slot.
 #
 #   CLAWCODE-tester-instructions.md       — deployment tester
-#   CLAWCODE-reviewer-instructions.md     — MR reviewer
+#   CLAWCODE-reviewer-instructions.md     — pull request reviewer
 #   CLAWCODE-issuesolver-instructions.md  — issue solver
 #
 # All three live in the target repo's ROOT and are entirely optional: a project
@@ -39,9 +39,16 @@ PROJECT_INSTRUCTIONS_MAX_CHARS="${PROJECT_INSTRUCTIONS_MAX_CHARS:-8000}"
 # _pi_fetch <filename> <ref> [<local_dir>] -> raw content on stdout ("" if absent)
 #
 # Prefers a checkout when the caller has one (the solver and reviewer always
-# do), falls back to the GitLab API at a specific ref (the tester usually has
-# no checkout, and must read the file at the COMMIT UNDER TEST rather than
-# whatever is newest).
+# do), falls back to the contents API AT A SPECIFIC COMMIT (the tester usually
+# has no checkout, and must read the file at the COMMIT UNDER TEST rather than
+# whatever is newest — otherwise a push landing mid-run silently changes the
+# instructions the run was started under).
+#
+#   GET /repos/{owner}/{repo}/contents/{path}?ref={sha}
+#
+# The response is JSON with the file base64 in `content`, so it is decoded
+# here. Everything is best-effort and silent: a repository that ships no such
+# file is the normal case, and no failure mode of this function may stop a run.
 _pi_fetch() {
   _pi_fname="$1"; _pi_ref="${2:-}"; _pi_dir="${3:-}"
   if [ -n "$_pi_dir" ] && [ -f "$_pi_dir/$_pi_fname" ]; then
@@ -49,10 +56,35 @@ _pi_fetch() {
     return 0
   fi
   [ -n "$_pi_ref" ] || return 0
-  _pi_enc="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$_pi_fname" 2>/dev/null)" || return 0
+  [ -n "${REPO:-}" ] || return 0
+  # safe='/' so a nested path still works; the filenames themselves are plain.
+  _pi_enc="$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe='/'))" "$_pi_fname" 2>/dev/null)" || return 0
+  # Defaults so this file also works when sourced outside a runner that has
+  # already built its header variables.
+  _pi_api="${GH_API:-https://api.github.com}"
+  _pi_auth="${AUTH_HEADER:-Authorization: Bearer ${GITHUB_TOKEN:-}}"
+  _pi_accept="${ACCEPT_HEADER:-Accept: application/vnd.github+json}"
+  _pi_apiv="${APIV_HEADER:-X-GitHub-Api-Version: 2022-11-28}"
   # 404 is the normal case (no such file) — -f keeps curl quiet about it.
-  curl -fsSL -H "$TOKEN_HEADER" \
-    "$GL_API/projects/$ENC_REPO/repository/files/$_pi_enc/raw?ref=$_pi_ref" 2>/dev/null
+  curl -fsSL -H "$_pi_auth" -H "$_pi_accept" -H "$_pi_apiv" \
+    "$_pi_api/repos/$REPO/contents/$_pi_enc?ref=$_pi_ref" 2>/dev/null \
+  | python3 -c '
+import base64, json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+# A directory answers with a LIST. That is not a file, so it is not content.
+if not isinstance(d, dict):
+    sys.exit(0)
+raw = d.get("content") or ""
+if d.get("encoding") == "base64":
+    try:
+        raw = base64.b64decode(raw).decode("utf-8", "replace")
+    except Exception:
+        sys.exit(0)
+sys.stdout.write(raw)
+' 2>/dev/null
 }
 
 # load_project_instructions <filename> <ref> [<local_dir>]

@@ -1,6 +1,6 @@
 #!/bin/sh
-# security-level: the minimum severity the MR reviewer reports from the
-# GitLab security scans, changeable at runtime.
+# security-level: the minimum severity the pull-request reviewer reports
+# from GitHub code scanning, changeable at runtime.
 #
 # Backs the `security` commands of the `reviewer` chat skill. Writes
 # ~/.openclaw/security-level.conf on the workspace PVC, read at the start of
@@ -20,7 +20,7 @@
 # threshold of `critical` still reports criticals.
 #
 # When nothing qualifies, the review says nothing at all about security. The
-# pipeline is already green at that point, and a "no findings" paragraph in
+# checks are already green at that point, and a "no findings" paragraph in
 # every single review teaches the reader to skip the section that will one
 # day matter.
 #
@@ -66,8 +66,8 @@ cmd_set() {
   mkdir -p "$STATE_DIR"
   tmp="$LEVEL_FILE.tmp.$$"
   {
-    echo "# Minimum severity the MR reviewer reports from the GitLab security"
-    echo "# scans. Managed from chat — see the reviewer skill, or run"
+    echo "# Minimum severity the pull-request reviewer reports from GitHub"
+    echo "# code scanning. Managed from chat — see the reviewer skill, or run"
     echo "# security-level. Applies to the next review that starts."
     echo "$want"
   } > "$tmp" || return 3

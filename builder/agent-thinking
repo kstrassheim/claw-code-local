@@ -38,7 +38,7 @@ LIB="$(dirname "$0")/agent-thinking.sh"
 KEYS='solver|the issue solver'"'"'s implementation turns
 planning|story-point estimation and sprint planning
 tester|the deployment tester'"'"'s run
-reviewer|the MR reviewer'"'"'s run'
+reviewer|the pull-request reviewer'"'"'s run'
 
 _known() { printf '%s\n' "$KEYS" | cut -d'|' -f1 | grep -qx "$1"; }
 

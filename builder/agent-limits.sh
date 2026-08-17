@@ -1,9 +1,10 @@
 # shellcheck shell=bash
 # agent-limits: how long may each subsystem run?
 #
-# Sourced by the three GitLab runners (same pattern as project-kind and
-# project-instructions), and written by /usr/local/bin/agent-limits, which the
-# `developer`, `tester` and `reviewer` chat skills call.
+# Sourced by the three runners — fixer, tester, reviewer — in the same pattern
+# as project-kind and project-instructions, and written by
+# /usr/local/bin/agent-limits, which the `developer`, `tester` and `reviewer`
+# chat skills call.
 #
 # WHY A FILE AND NOT ENV
 # ----------------------
@@ -98,9 +99,8 @@ agent_limit() {
 # 3 would be silently replaced by its default and the setting would appear to
 # work while being unchangeable. Different unit, different reader.
 #
-# 0 is VALID here and means off, which is what #10 asks for — the threshold
-# doubles as the switch, so there is no second setting that can disagree with
-# it.
+# 0 is VALID here and means off: the threshold doubles as the switch, so there
+# is no second setting that can disagree with it.
 agent_count() {
   _al_key="$1"; _al_def="$2"
   [ -r "$AGENT_LIMITS_FILE" ] || { printf '%s\n' "$_al_def"; return 0; }

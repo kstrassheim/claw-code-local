@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 # agent-models: which LLM does each subsystem run on?
 #
-# Sourced by the three GitLab runners, exactly like agent-limits.sh, and
-# written by /usr/local/bin/agent-models, which the `developer`, `tester` and
-# `reviewer` chat skills call.
+# Sourced by the three runners — fixer, tester, reviewer — exactly like
+# agent-limits.sh, and written by /usr/local/bin/agent-models, which the
+# `developer`, `tester` and `reviewer` chat skills call.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -28,8 +28,8 @@
 #   solver.small    implementing a story at or below solver.small.max_points
 #   planning        story-point estimation and sprint planning
 #   tester          the deployment tester's run
-#   reviewer        the MR reviewer's run
-#   reviewer.small  reviewing such a story's MR — same threshold as above
+#   reviewer        the pull-request reviewer's run
+#   reviewer.small  reviewing such a story's pull request — same threshold
 #
 # The two `.small` keys are the cheap lane, and each is read with
 # agent_model_raw(): unset means that half is OFF, not "inherit the baseline".
@@ -103,9 +103,9 @@ agent_model_baseline() {
 # No baseline fallback, which is the whole point: a caller that needs to know
 # whether a key was configured at all cannot use agent_model(), because that
 # answers with the baseline and is therefore almost never empty. Both halves of
-# the cheap lane ask exactly this question — "is a small-story model set?"
-# (#10 for the solver, #20 for the reviewer) — and must not route small work
-# somewhere different merely because a baseline exists.
+# the cheap lane — the solver's and the reviewer's — ask exactly this question,
+# "is a small-story model set?", and must not route small work somewhere
+# different merely because a baseline exists.
 agent_model_raw() {
   _am_key="$1"
   [ -r "$AGENT_MODELS_FILE" ] || return 0

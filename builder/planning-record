@@ -3,7 +3,7 @@
 
 WHY A SEPARATE COMMAND
 The runners are bash and the store is Python. Rather than teach three shell
-scripts to speak Cosmos, they call this once at exit with what they already
+scripts to speak MongoDB, they call this once at exit with what they already
 know. That also keeps the failure surface in one place: this command NEVER
 exits non-zero, so a planning problem can never fail a run that has otherwise
 succeeded.
@@ -16,18 +16,18 @@ measurement the story-point scale was calibrated against, so an estimate and
 its actual cost are expressed in the same unit.
 
 THE OFFSET MATTERS
-Runner logs are per ISSUE (or per project for the tester) and accumulate
+Runner logs are per ISSUE (or per repository for the tester) and accumulate
 across runs, so counting the whole file would attribute every previous run's
 calls to this one. `--since-line` is the line count captured at start; only
 what came after it belongs to this run.
 
 Usage (story work — solver, reviewer):
-    planning-record --role solver --project 601/ai/x --iid 156 \
+    planning-record --role solver --repo acme/web --issue 156 \
         --run-id "$SESSION_ID" --log "$LOG_FILE" --since-line 1234 \
-        --model minimax/MiniMax-M3 --started "$T0" --outcome merged
+        --model minimax/MiniMax-M2.7 --started "$T0" --outcome merged
 
 Usage (deploy work — tester, which has no story):
-    planning-record --role tester --project 601/ai/x --sha "$HEAD_SHA" ...
+    planning-record --role tester --repo acme/web --sha "$HEAD_SHA" ...
 """
 
 from __future__ import annotations
@@ -47,7 +47,12 @@ RATE_LIMITED = re.compile(r"\[model-fetch\].*\bstatus=429")
 
 
 def count_calls(path: str, since_line: int) -> tuple[int, str, int]:
-    """(calls, provider, rate_limited) for the lines after `since_line`."""
+    """(calls, provider, rate_limited) for the lines after `since_line`.
+
+    A missing or unreadable log is zero calls, not an error: the run itself
+    succeeded, and refusing to record anything because the log moved would
+    lose the outcome as well as the cost.
+    """
     calls = rate = 0
     provider = ""
     try:
@@ -73,9 +78,12 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--role", required=True,
                     choices=("solver", "reviewer", "tester", "planner"))
-    ap.add_argument("--host", default="gitlab")
-    ap.add_argument("--project", required=True)
-    ap.add_argument("--iid")
+    ap.add_argument("--host", default="github")
+    # `--project` and `--iid` are accepted as aliases so a caller written
+    # against either spelling keeps working; `owner/repo` and `number` are what
+    # GitHub calls them and what the document shapes use.
+    ap.add_argument("--repo", "--project", dest="repo", required=True)
+    ap.add_argument("--issue", "--iid", dest="issue")
     ap.add_argument("--sha")
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--log")
@@ -87,14 +95,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--started", default="")
     ap.add_argument("--ended", default="")
     ap.add_argument("--outcome", default="")
-    # Keep recording while the run is still going (#8: "log current llm calls
-    # frequently locally ... to make it run and pod restart persistent").
+    # Keep recording while the run is still going.
     #
     # Recording only at exit loses everything when a run is killed, and a run
-    # is killed by every deploy. Measured on dev: one story logged 200 model
-    # calls and recorded 15, and the resulting history row told the estimator
-    # that an 8-point story had been over-estimated — the exact opposite of
-    # the truth, which is worse for calibration than having no row at all.
+    # is killed by every deploy. A story that logged 200 model calls and
+    # recorded 15 produces a history row telling the estimator that an 8-point
+    # story had been over-estimated — the exact opposite of the truth, which is
+    # worse for calibration than having no row at all.
     #
     # Safe to repeat because the document id is derived from runId and role,
     # so each write REPLACES the previous partial rather than adding to it.
@@ -132,8 +139,9 @@ def record_once(args, docs, store, sprint_current, quiet: bool = False) -> None:
     """Write the run's cost as it stands right now.
 
     Idempotent by construction: planning_docs derives the document id from
-    runId and role, so every call REPLACES the previous partial rather than
-    adding to it. That is what makes it safe to call on a timer.
+    runId and role, and the store upserts on it, so every call REPLACES the
+    previous partial rather than adding to it. That is what makes it safe to
+    call on a timer.
     """
     calls, provider, rate = (args.calls or 0, args.provider, 0)
     if args.log:
@@ -152,18 +160,18 @@ def record_once(args, docs, store, sprint_current, quiet: bool = False) -> None:
                                  "recorded\n")
                 return
             doc = docs.tester_work_doc(
-                host=args.host, project=args.project, sha=args.sha,
+                host=args.host, repo=args.repo, sha=args.sha,
                 run_id=args.run_id, worker=args.worker, model=args.model,
                 provider=provider, llm_calls=calls, seconds_on_429=0,
                 started_at=args.started, ended_at=args.ended or now,
                 outcome=args.outcome, sprint_id=sprint, now=now)
         else:
-            if not args.iid:
-                sys.stderr.write(f"[planning] {args.role} needs --iid; nothing "
-                                 "recorded\n")
+            if not args.issue:
+                sys.stderr.write(f"[planning] {args.role} needs --issue; "
+                                 "nothing recorded\n")
                 return
             doc = docs.work_doc(
-                host=args.host, project=args.project, iid=args.iid,
+                host=args.host, repo=args.repo, number=args.issue,
                 run_id=args.run_id, role=args.role, worker=args.worker,
                 model=args.model, provider=provider, llm_calls=calls,
                 seconds_on_429=0, started_at=args.started,
@@ -183,7 +191,7 @@ def record_once(args, docs, store, sprint_current, quiet: bool = False) -> None:
         # as failed because the planning store had a bad day.
         sys.stderr.write(f"[planning] could not record this run: "
                          f"{str(e)[:100]}\n")
-    return 0
+    return
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # project-kind: what does a TARGET project actually deploy? Sourced (not
-# executed) by the three GitLab runners, same pattern as
+# executed) by the three runners, same pattern as
 # /usr/local/bin/project-instructions.
 #
 #   web        a site to browse           frontend/ or backend/ (or: nothing
@@ -49,8 +49,11 @@
 # forces the checkout it then greps).
 #
 # The two detectors below must agree: the tester reads the repo tree over the
-# GitLab API (it often has no checkout), the reviewer and solver read the
-# checkout they already hold. Same patterns, two sources. The API side matches
+# API — `GET /repos/{owner}/{repo}/contents?ref={sha}`, one root entry per
+# line, at the COMMIT UNDER TEST — because it often has no checkout, while the
+# reviewer and solver read the checkout they already hold. Same patterns, two
+# sources; the tree is passed in, so this file never makes a request of its
+# own and stays testable without a token. The API side matches
 # case-insensitively and the filesystem side does not — a project spelling it
 # `Runbooks/` is detected by the tester and not by the other two, which is the
 # pre-existing behaviour of both and not worth diverging further over.

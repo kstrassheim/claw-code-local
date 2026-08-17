@@ -210,11 +210,11 @@ def calls_band(points: int) -> tuple[int, int]:
 def normalise(points) -> int | None:
     """Coerce a weight from the tracker onto the scale, or None.
 
-    A tracker will happily hold 4, 7 or 100 — GitLab's weight is a free
-    integer and a GitHub label is a string. Anything off-scale is rounded UP
-    to the next scale value rather than down: a story someone sized at 4 is
-    closer in risk to a 5 than to a 3, and rounding down is the direction that
-    starves a run.
+    An issue will happily carry 4, 7 or 100 — a story-point label is a free
+    string and nothing validates it. Anything off-scale is rounded UP to the
+    next scale value rather than down: a story someone sized at 4 is closer in
+    risk to a 5 than to a 3, and rounding down is the direction that starves a
+    run.
     """
     try:
         v = int(str(points).strip())

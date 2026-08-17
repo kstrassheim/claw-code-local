@@ -10,12 +10,12 @@
 # including the sessions that were already working.
 #
 # The three subsystems used to run with no coordination at all, and their
-# planners were scheduled on the same minute (issue-watcher and mr-reviewer
+# planners were scheduled on the same minute (issue-watcher and pr-reviewer
 # both `*/5`, tester `*/10`), so at :00/:10/:20 all three launched together.
-# The symptom was the MR reviewer taking a 429 on its very FIRST model call,
-# dying in ~60s, and retrying into the identical collision five minutes later
-# — seven times in a row — while the issue solver, which won the race, ran at
-# a 2% failure rate.
+# The symptom was the pull-request reviewer taking a 429 on its very FIRST
+# model call, dying in ~60s, and retrying into the identical collision five
+# minutes later — seven times in a row — while the issue solver, which won the
+# race, ran at a 2% failure rate.
 #
 # WHAT THIS GATE DOES *NOT* FIX (correction, 2026-07-25)
 # An earlier version of this header said that pattern "reads exactly like a
@@ -71,13 +71,13 @@ MAX_AGENT_SLOTS="${MAX_AGENT_SLOTS:-2}"
 AGENT_SLOT_WAIT="${AGENT_SLOT_WAIT:-90}"
 AGENT_SLOT=""
 
-# PRIORITY: the issue solver and the MR reviewer outrank the deployment
-# tester, across every project.
+# PRIORITY: the issue solver and the pull-request reviewer outrank the
+# deployment tester, across every project.
 #
 # The gate was first-come-first-served, and the tester is the worst possible
 # winner of that race: its run is the longest of the three (~40-60 min against
 # ~20 for a fixer), so one tester that happens to start first can sit on a
-# slot for an hour while issues and merge requests queue behind it. That is a
+# slot for an hour while issues and pull requests queue behind it. That is a
 # lot of tokens spent on re-testing a main commit while actual work waits.
 #
 # A low-priority caller may only take a slot if AGENT_SLOT_RESERVED slots
@@ -94,13 +94,27 @@ AGENT_SLOT_RESERVED="${AGENT_SLOT_RESERVED:-1}"
 # high (default) = solver, reviewer · low = tester
 SLOT_PRIORITY="${SLOT_PRIORITY:-high}"
 
+# The runners allowed to hold a slot, matched against the owner's cmdline.
+#
+# Substrings, not exact names, and deliberately so: the image installs these
+# WITHOUT their .sh suffix (`/usr/local/bin/fixer-runner`) while the repo keeps
+# it (`builder/fixer-runner.sh`), and the cmdline carries a path in front of
+# either. Matching the stem covers both spellings.
+#
+# Keep this list in step with the runners in builder/ — one missing from it has
+# its slot reaped out from under it while it is still working, and the reap is
+# silent, because a freed slot looks exactly like a slot nobody wanted. That is
+# the double-booking this whole file exists to prevent.
+AGENT_SLOT_OWNERS="${AGENT_SLOT_OWNERS:-fixer-runner|tester-runner|reviewer-runner}"
+
 # A slot is stale unless its owner PID is alive AND still looks like one of
 # our runners.
 _slot_owner_alive() {
   _pid="${1:-}"
   [ -n "$_pid" ] || return 1
   kill -0 "$_pid" 2>/dev/null || return 1
-  tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | grep -q 'runner-gitlab' || return 1
+  tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null \
+    | grep -qE "$AGENT_SLOT_OWNERS" || return 1
   return 0
 }
 
