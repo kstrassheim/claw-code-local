@@ -6,8 +6,26 @@
 # Tag matches https://github.com/openclaw/openclaw releases. The deploy /
 # validate workflows pull ghcr.io/openclaw/openclaw:<this minus v-prefix>
 # and re-tag it locally as openclaw-base:<this with v-prefix>.
-OPENCLAW_UPSTREAM=v2026.7.1
-OPENCLAW_VERSION=v2026.7.1.3
+#
+# Upstream publishes CORRECTION releases on a tag as `-1`, `-2`, ... so the
+# newest release of a line is not the highest-looking version string: at the
+# time of writing v2026.6.34 was published four days AFTER v2026.7.1-2 and is
+# a backport on an older line. Read the release list, not the dates.
+#
+# Whatever this is set to must exist on GHCR with a linux/arm64 entry, since
+# the deploy mirrors it before building. A tag that exists on GitHub but not
+# on the registry fails the mirror step AFTER the version has been bumped.
+OPENCLAW_UPSTREAM=v2026.7.1-2
+
+# Our build number on top of the upstream tag. The deploy skips the whole
+# build when this tag already exists in the registry, so it is effectively a
+# cache key: re-pushing the same value ships nothing.
+#
+# Deliberately NOT mirrored into k8s/kustomization.yaml by hand. The deploy
+# workflow rewrites that pin AFTER the image is pushed and commits it, which
+# is the ordering that matters — a manifest naming an image that does not
+# exist yet leaves Argo CD pulling a missing tag for the length of the build.
+OPENCLAW_VERSION=v2026.7.1-2.1
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
