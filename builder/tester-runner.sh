@@ -107,9 +107,31 @@ fi
 # not been renamed yet. A library that is genuinely absent is not fatal: each
 # call site below has a plain fallback, because a missing tuning knob must not
 # stop a test run from happening.
+# Where the sourced helper libraries live. Next to this script when running
+# from a checkout, /usr/local/bin in the image. Probed on a file that only
+# ever ships as a library, so a directory holding just the CLIs is rejected.
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+[ -n "$LIB_DIR" ] && [ -r "$LIB_DIR/agent-models.sh" ] || LIB_DIR="/usr/local/bin"
 _source_lib() {
-  for _c in "$1" "$1.sh"; do
-    if [ -r "/usr/local/bin/$_c" ]; then . "/usr/local/bin/$_c"; return 0; fi
+  # ONLY EVER SOURCE THE .sh FILE.
+  #
+  # Each runtime knob ships as a PAIR in the same directory: `agent-limits` is
+  # the CLI a human runs, `agent-limits.sh` is the library this sources. An
+  # earlier version searched the bare name first and therefore found the CLI.
+  #
+  # Sourcing the CLI does not merely fail to define the helpers. The CLI parses
+  # its (absent) subcommand, prints `unknown command`, and calls `exit` — and
+  # in a SOURCED file that exit belongs to the caller, so the runner died on
+  # its second line having done nothing. The symptom carried no error: the
+  # spawner reported a successful spawn every tick while no run ever started,
+  # no lock was taken and no log was written.
+  #
+  # The suffix is the whole rule. Testing the execute bit instead was tried and
+  # rejected: some filesystems force 0755 on every file, and there the guard
+  # refuses the real library and silently drops every knob back to its default.
+  # A name is a fact about the file; a mode bit is a fact about the volume.
+  for _d in "$LIB_DIR" /usr/local/bin; do
+    if [ -r "$_d/$1.sh" ]; then . "$_d/$1.sh"; return 0; fi
   done
   return 1
 }
