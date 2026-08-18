@@ -137,10 +137,24 @@ For images pushed to a shared registry:
    mean once and use it for the rest of the conversation. Don't
    ask repeatedly.
 
-2. **Surface Forbidden errors verbatim.** If `kubectl ... -n X`
-   returns `Forbidden`, that's the API server enforcing RBAC, not
-   a bug. Tell the user "I don't have access to that namespace
-   under the current ServiceAccount", don't try to work around it.
+2. **Surface Forbidden errors verbatim, and NEVER report a denial as
+   an absence.** If `kubectl ... -n X` returns `Forbidden`, that's the
+   API server enforcing RBAC, not a bug. Say "I don't have access to
+   that under the current ServiceAccount"; don't try to work around it.
+
+   The failure to avoid is specific and has happened: asked whether it
+   had any scheduled jobs, the agent ran `kubectl get cronjob`, received
+   `Forbidden` on the LIST verb, and answered that there were **no**
+   CronJobs — while all three existed and were running on schedule. The
+   reader then goes looking for a missing manifest that was never
+   missing.
+
+   "I cannot see X" and "X does not exist" are different answers.
+   Report the one you actually have evidence for. RBAC here is often
+   scoped with `resourceNames`, which grants `get <name>` but NOT
+   `list` — so a resource can be individually readable and
+   un-enumerable at the same time. If a list is denied, try the
+   specific names you know before concluding anything.
 
 3. **Never echo Secret content.** If the user pastes secret content
    into chat ("store this token in the cluster"), prefer telling

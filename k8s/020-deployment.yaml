@@ -19,6 +19,48 @@ rules:
     resourceNames: ["openclaw-config"]
     verbs: ["get", "patch", "update", "create"]
 ---
+# Read-only visibility of its OWN CronJobs.
+#
+# The three `*-control` Roles let the agent toggle each CronJob's `suspend`,
+# but they are scoped with `resourceNames`, and Kubernetes RBAC does not
+# honour resourceNames for `list` — a named grant covers `get` and nothing
+# else. So the agent could read any one CronJob by name while `kubectl get
+# cronjob` returned Forbidden.
+#
+# That is not a cosmetic gap. Asked whether it had any scheduled work at all,
+# the agent ran the list, received a permission error, and reported that it
+# had NO CronJobs — when all three existed and were running on schedule.
+# A denial rendered as an absence is the worst answer available: it is
+# confident, wrong, and points the reader at the wrong problem entirely.
+#
+# `list` cannot be narrowed to specific names, so this grants it across the
+# namespace. That is an acceptable widening: the namespace holds only this
+# bot's own CronJobs, the verb is read-only, and mutation stays name-scoped
+# in the `*-control` Roles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openclaw-cronjob-reader
+  namespace: claw-code-local
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openclaw-cronjob-reader
+  namespace: claw-code-local
+subjects:
+  - kind: ServiceAccount
+    name: openclaw
+    namespace: claw-code-local
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openclaw-cronjob-reader
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
