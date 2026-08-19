@@ -248,24 +248,49 @@ class Discovery(unittest.TestCase):
     def tearDown(self):
         rt.gh_get = self._real
 
-    def test_it_searches_for_open_pull_requests_awaiting_this_bot(self):
+    def test_it_searches_by_authorship_first(self):
+        # Authorship is the PRIMARY signal, and it has to be, because GitHub
+        # refuses to let a pull request's author be added as its reviewer
+        # (422). The bot authors everything it opens, so a `review-requested:`
+        # search can never return its own work — keying discovery on that
+        # alone leaves the solver waiting for a verdict that cannot arrive.
         def fake(url, params=None):
             self.calls.append((url, params or {}))
             return {"items": [{"number": 1,
                                "repository_url": "https://api.github.com/repos/o/r"}]}
         rt.gh_get = fake
-        items = rt.list_review_requests("cameron-claw")
+        items = rt.list_reviewable_prs("cameron-claw")
         url, params = self.calls[0]
         self.assertTrue(url.endswith("/search/issues"), url)
-        self.assertEqual(params["q"], "is:pr is:open review-requested:cameron-claw")
+        self.assertEqual(params["q"], "is:pr is:open author:cameron-claw")
         self.assertEqual(len(items), 1)
+
+    def test_it_also_searches_what_it_was_asked_to_review(self):
+        # Kept because it is the only way to catch a pull request a HUMAN
+        # asked the bot to look at, which authorship would miss.
+        def fake(url, params=None):
+            self.calls.append((url, params or {}))
+            return {"items": []}
+        rt.gh_get = fake
+        rt.list_reviewable_prs("cameron-claw")
+        queries = [p["q"] for _, p in self.calls]
+        self.assertIn("is:pr is:open review-requested:cameron-claw", queries)
+
+    def test_a_pull_request_found_twice_is_reviewed_once(self):
+        def fake(url, params=None):
+            self.calls.append((url, params or {}))
+            return {"items": [{"number": 7,
+                               "repository_url": "https://api.github.com/repos/o/r"}]}
+        rt.gh_get = fake
+        items = rt.list_reviewable_prs("cameron-claw")
+        self.assertEqual(len(items), 1, "authored AND requested must not double up")
 
     def test_no_login_means_no_search_at_all(self):
         def fake(url, params=None):
             self.calls.append((url, params or {}))
             return {"items": []}
         rt.gh_get = fake
-        self.assertEqual(rt.list_review_requests(""), [])
+        self.assertEqual(rt.list_reviewable_prs(""), [])
         self.assertEqual(self.calls, [])
 
     def test_the_repo_comes_from_repository_url(self):

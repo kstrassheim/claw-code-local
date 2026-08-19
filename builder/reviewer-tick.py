@@ -21,6 +21,7 @@ HOW THE PULL REQUESTS ARE FOUND
 GitHub has no cross-repo "pull requests awaiting my review" list endpoint, so
 this uses the search API:
 
+    GET /search/issues?q=is:pr+is:open+author:<bot-login>
     GET /search/issues?q=is:pr+is:open+review-requested:<bot-login>
 
 Search is a different service from the REST API and behaves like one:
@@ -139,27 +140,59 @@ def bot_login() -> str:
     return u.get("login", "") if isinstance(u, dict) else ""
 
 
-def list_review_requests(login: str) -> list[dict]:
-    """Open pull requests, anywhere, where this bot is a requested reviewer.
+def list_reviewable_prs(login: str) -> list[dict]:
+    """Open pull requests this bot should review: its OWN, plus any it was
+    asked to review.
 
-    One search per tick. `review-requested:` covers both a direct request and
-    one made through a team the bot is in, which is the whole point of asking
-    search rather than walking repos: the bot may be a reviewer on a repo it
-    would never have thought to list.
+    TWO SEARCHES, AND THE FIRST ONE IS THE IMPORTANT ONE.
+
+    The obvious design is "review what I was asked to review" — the solver
+    requests the bot as reviewer, the reviewer picks it up. That is impossible
+    here. GitHub refuses to let a pull request's AUTHOR be added as its
+    reviewer:
+
+        422  Review cannot be requested from pull request author.
+
+    The bot authors every pull request it opens, so it can never appear in its
+    own `review-requested:` results. Keying discovery on that alone deadlocks
+    the whole pipeline silently: the solver waits for a verdict, the reviewer
+    never sees the pull request, and every tick costs nothing and does nothing
+    — which reads as "the bot is idle" rather than as a fault.
+
+    So authorship is the primary signal. `review-requested:` is kept because
+    it is the only way to catch a pull request a HUMAN asked the bot to look
+    at, including via a team, which authorship would miss.
+
+    Results are merged and de-duplicated: a pull request the bot authored AND
+    was somehow requested on must be reviewed once, not twice.
     """
     if not login:
         return []
-    data = gh_get(
-        f"{GITHUB_API}/search/issues",
-        {
-            "q": f"is:pr is:open review-requested:{login}",
-            "sort": "updated",
-            "order": "desc",
-            "per_page": str(MAX_PRS),
-        },
-    )
-    items = data.get("items", []) if isinstance(data, dict) else []
-    return [i for i in items if isinstance(i, dict)][:MAX_PRS]
+
+    def search(query: str) -> list[dict]:
+        data = gh_get(
+            f"{GITHUB_API}/search/issues",
+            {
+                "q": query,
+                "sort": "updated",
+                "order": "desc",
+                "per_page": str(MAX_PRS),
+            },
+        )
+        items = data.get("items", []) if isinstance(data, dict) else []
+        return [i for i in items if isinstance(i, dict)]
+
+    seen: set[tuple[str, int]] = set()
+    out: list[dict] = []
+    for query in (f"is:pr is:open author:{login}",
+                  f"is:pr is:open review-requested:{login}"):
+        for item in search(query):
+            key = (repo_of(item), item.get("number"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out[:MAX_PRS]
 
 
 def repo_of(item: dict) -> str:
@@ -444,7 +477,7 @@ def main() -> None:
 
     try:
         login = bot_login()
-        items = list_review_requests(login)
+        items = list_reviewable_prs(login)
     except Exception as e:
         print(json.dumps({"namespace": namespace, "error": str(e), "prs": []}))
         return
