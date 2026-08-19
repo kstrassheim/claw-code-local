@@ -925,7 +925,20 @@ for c in reversed(cs if isinstance(cs, list) else []):
     if not body.startswith('🔎 REVIEW RESULT:'):
         continue
     first = body.splitlines()[0]
-    m = re.search(r'\(sha ([0-9a-fA-F]{7,40})\)', first)
+    # The sha is tolerated in whatever markdown the reviewer wrapped it in.
+    # The verdict line is WRITTEN BY THE AGENT from a prompt template, and a
+    # model formats a commit hash as code far more often than not — the real
+    # comment reads (sha `211f3ea...`), not (sha 211f3ea...). A strict pattern
+    # matched neither, so the sha parsed EMPTY, every verdict looked like it
+    # belonged to some other commit, and the solver waited for a verdict it had
+    # already been given. 113 ticks on one issue before anyone noticed.
+    # NO BACKTICK MAY APPEAR LITERALLY IN THIS SNIPPET. It is embedded in a
+    # double-quoted shell string, where a backtick opens COMMAND SUBSTITUTION
+    # — bash would run the contents as a command and hand Python a mangled
+    # pattern. \x60 is the same character to the regex engine and inert to the
+    # shell.
+    m = re.search(r'\(\s*sha[:\s]+[\x60\'\"]*([0-9a-fA-F]{7,40})[\x60\'\"]*\s*\)',
+                  first, re.IGNORECASE)
     print(('approved' if 'APPROVED' in first else 'changes') + ' ' + (m.group(1) if m else ''))
     break
 " 2>/dev/null
