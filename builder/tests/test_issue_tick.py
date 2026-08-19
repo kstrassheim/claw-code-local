@@ -109,6 +109,12 @@ class PlannerTestCase(unittest.TestCase):
                     + self.allowlist_text, "")
         if ".fixer-locks" in script:
             return (0, "\n".join(sorted(self.locked)), "")
+        if "issue-markers" in script:
+            # The awaiting-review / awaiting-human markers the planner ranks
+            # on. None here: these tests are about the gates, and the ordering
+            # they imply is pinned in test_wait_bounds against a real bash and
+            # real mtimes, because the TTL lives inside the snippet.
+            return (0, "", "")
         if "queue-state" in script:
             self.published.append(script)
             return (0, "", "")

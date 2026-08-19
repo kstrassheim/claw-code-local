@@ -36,6 +36,16 @@
 #   FIXER_SYNC_RETRY_CAP    — how many times an unresolved rebase conflict may
 #                             wake the agent while neither end has moved
 #                             (default 4)
+#   FIXER_REVIEW_RETRY_CAP  — how many times an UNADDRESSED review verdict may
+#                             wake the agent while the head has not moved
+#                             (default 4). After that the human is asked.
+#   FIXER_CI_RED_RETRY_CAP  — how many times an UNCHANGED red CI may wake the
+#                             agent (default 4). After that the human is asked.
+#   REVIEW_WAIT_TTL         — seconds an awaiting-review marker stays believed
+#                             (default 7200). Past it the wait is treated as
+#                             never having happened and the review is
+#                             re-requested — a reviewer that never delivers
+#                             must not wedge the issue forever.
 set -uo pipefail
 
 REPO="$1"
@@ -180,7 +190,28 @@ CI_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-fingerprint"
 #
 # The autonomous review requested for a head sha. One request per sha, so a
 # re-push asks again and a tick that changes nothing says nothing.
+#
+# IT ALSO EXPIRES, and that is the half that matters most. The marker is a
+# claim about somebody ELSE's future behaviour — "the reviewer is going to
+# post a verdict" — and nothing on this side can make that true. A reviewer
+# that crashed, was suspended mid-run, or whose verdict was never posted
+# leaves a marker that would be believed forever, and the two halves then wait
+# for each other: the solver parks on the verdict, the planner ranks the issue
+# first BECAUSE the solver is waiting, and every tick spends zero model calls
+# to discover the same nothing. REVIEW_WAIT_TTL is the bound on that wait. Past
+# it the marker is ignored — by the planner when it ranks, and here when the
+# gate decides whether to ask again — so the fixer re-checks the pull request
+# and re-requests the review instead of waiting on a promise nobody is left
+# to keep.
 AWAITING_REVIEW_MARKER="$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.awaiting-review"
+REVIEW_WAIT_TTL="${REVIEW_WAIT_TTL:-7200}"
+# Present ⟺ the fixer is waiting on a PERSON: a sign-off it asked for, or an
+# escalation it raised after exhausting a retry budget. The planner ranks
+# these LAST — a wait on a human is out of the bot's hands and can last days,
+# so the bot works its other issues meanwhile instead of holding the repo's
+# single slot idle. Removed the moment the human answers (a new @-mention, or
+# the sign-off landing), which puts the issue straight back in the order.
+AWAITING_HUMAN_MARKER="$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.awaiting-human"
 # The head sha a human sign-off was ASKED for, and the head sha it was GIVEN
 # for. Two files, because "I asked" and "they answered" are different facts
 # and collapsing them re-asks a question already answered.
@@ -203,6 +234,36 @@ SYNC_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.sync-fp"
 SYNC_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.sync-retries"
 SYNC_RETRY_CAP="${FIXER_SYNC_RETRY_CAP:-4}"
 MERGE_CONFLICT_NEW=0
+
+# The same pair, for the two OTHER things that are unresolved work nobody else
+# can see: a review verdict the agent has not acted on, and a red CI that has
+# not changed. Both wear exactly the SYNC_RETRY_FILE shape above, for exactly
+# the SYNC_RETRY_FILE reason — the fingerprint is written when the situation
+# is OBSERVED, before the agent has done anything about it, so a run that was
+# woken and then died spent the trigger for good and every later tick found
+# "already handled" and did nothing. A bounded budget retries a few times; the
+# situation changing resets it; running the budget out asks a person.
+#
+# "<verdict>:<verdict-sha7>:<head-sha7>" of the newest autonomous-review
+# verdict. The head is IN the fingerprint on purpose: a verdict is unaddressed
+# only while it is about the commit that is currently open, so a push both
+# resets the budget and stops the retries — the findings were answered.
+REVIEW_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.review-fp"
+REVIEW_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.review-retries"
+REVIEW_RETRY_CAP="${FIXER_REVIEW_RETRY_CAP:-4}"
+# The fingerprint an escalation was already posted for. ONE comment per
+# condition, not one per tick — see request_self_review for the same idiom and
+# the same reason: a comment every five minutes is how a pull request becomes
+# unreadable.
+REVIEW_ESCALATED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.review-escalated"
+# How many agent turns have been spent on the CURRENT red CI fingerprint.
+# Reset by the fingerprint changing (a push, a re-run) and by a human saying
+# something new — an instruction is a fresh start, not a continuation.
+CI_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-red-retries"
+CI_RED_RETRY_CAP="${FIXER_CI_RED_RETRY_CAP:-4}"
+CI_RED_ESCALATED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-red-escalated"
+REVIEW_RETRY_NEW=0
+CI_RED_RETRY_NEW=0
 
 mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$ISSUE_STATE_DIR" \
          "$STATE_ROOT/issue-markers" "$(dirname "$PROJECT_DIR")"
@@ -243,8 +304,10 @@ WIPE_FULL_STATE=0
 wipe_issue_state() {
   rm -f "$CURSOR_FILE" 2>/dev/null
   rm -f "$CI_FP_FILE" 2>/dev/null
-  rm -f "$AWAITING_REVIEW_MARKER" "$APPROVAL_ASKED_FILE" \
+  rm -f "$AWAITING_REVIEW_MARKER" "$AWAITING_HUMAN_MARKER" "$APPROVAL_ASKED_FILE" \
         "$APPROVAL_GRANTED_FILE" "$SYNC_FP_FILE" "$SYNC_RETRY_FILE" 2>/dev/null
+  rm -f "$REVIEW_FP_FILE" "$REVIEW_RETRY_FILE" "$REVIEW_ESCALATED_FILE" \
+        "$CI_RETRY_FILE" "$CI_RED_ESCALATED_FILE" 2>/dev/null
   rm -f "$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.lexical-asked" 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.jsonl 2>/dev/null
   rm -f "$STATE_ROOT"/agents/main/sessions/issue-"${REPO//\//-}"-"$ISSUE_NUM"-*.trajectory.jsonl 2>/dev/null
@@ -868,21 +931,53 @@ for c in reversed(cs if isinstance(cs, list) else []):
 " 2>/dev/null
 }
 
+# Has the awaiting-review wait outlived its TTL? 0 = yes, stop believing it.
+#
+# The marker records that a review was ASKED for. Whether one ever ARRIVES is
+# somebody else's business, so the wait needs a bound: past REVIEW_WAIT_TTL
+# the marker is treated as if it were never written. Missing marker counts as
+# expired — there is nothing to wait on.
+review_wait_expired() {
+  [ -f "$AWAITING_REVIEW_MARKER" ] || return 0
+  local age mtime
+  mtime="$(stat -c %Y "$AWAITING_REVIEW_MARKER" 2>/dev/null || echo 0)"
+  case "$mtime" in ''|*[!0-9]*) return 0 ;; esac
+  age=$(( $(date +%s) - mtime ))
+  [ "$age" -ge "${REVIEW_WAIT_TTL:-7200}" ]
+}
+
 # Ask the pr-reviewer for a review of the CURRENT head: request the bot as
 # reviewer (which is what the reviewer's planner keys on) and post ONE request
 # comment per sha. The marker is what makes it one per sha rather than one per
 # tick — a comment every five minutes is how a pull request becomes unreadable.
 request_self_review() { # $1 = pr number, $2 = head sha
   local pr="$1" sha="$2" requested=""
-  printf '%s' "{\"reviewers\":[\"$BOT_LOGIN\"]}" \
-  | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/pulls/$pr/requested_reviewers" >/dev/null 2>&1 \
-    || echo "[review-gate] WARNING: could not request a review on PR #$pr"
+  # NO REVIEWER IS REQUESTED, AND THAT IS NOT A FAILURE.
+  #
+  # GitHub refuses to add a pull request's AUTHOR as its reviewer:
+  #
+  #     422  Review cannot be requested from pull request author.
+  #
+  # This bot authors every pull request it opens, so the request can never
+  # succeed. It used to be attempted anyway, and the failure logged as a
+  # WARNING — which was misleading twice over. It is not a warning, it is the
+  # only possible outcome; and it implied the handshake had merely failed this
+  # once, when in fact no pull request the bot opens can EVER carry it as a
+  # requested reviewer.
+  #
+  # The reviewer therefore finds this pull request by AUTHORSHIP instead (see
+  # list_reviewable_prs in reviewer-tick). Nothing has to be requested at all;
+  # what follows is only the human-visible note and the per-sha marker that
+  # keeps it to one comment per commit rather than one per tick.
   [ -f "$AWAITING_REVIEW_MARKER" ] && requested="$(cat "$AWAITING_REVIEW_MARKER" 2>/dev/null)"
-  if [ "$requested" = "$sha" ]; then
+  if [ "$requested" = "$sha" ] && ! review_wait_expired; then
     echo "[review-gate] review of ${sha:0:8} already requested — waiting for the verdict"
     return 0
+  fi
+  if [ "$requested" = "$sha" ]; then
+    # Same sha, but the wait has outlived REVIEW_WAIT_TTL. Nothing is coming:
+    # ask again rather than wait on a promise nobody is left to keep.
+    echo "[review-gate] the review of ${sha:0:8} has been pending for over ${REVIEW_WAIT_TTL}s — asking again"
   fi
   post_issue_comment "🔎 Requested an autonomous review of \`${sha:0:8}\` on PR #$pr — the reviewer runs the app locally, checks the acceptance criteria and scans the change. I merge only after its ✅." \
     && echo "[review-gate] posted the review request for ${sha:0:8}" \
@@ -998,11 +1093,17 @@ To let it land, **approve PR #$pr** on GitHub. If you want changes first, say so
     && echo "[approval-gate] asked @$owner to sign off on ${sha:0:8}" \
     || echo "[approval-gate] WARNING: could not post the approval request"
   printf '%s' "$sha" > "$APPROVAL_ASKED_FILE"
+  # The wait is now on a person and can last days. The marker tells the
+  # planner to rank this issue LAST and work the bot's other issues meanwhile,
+  # instead of holding the repo's single slot on a question only somebody else
+  # can answer.
+  touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
 }
 
 approval_gate() { # $1 = pr number, $2 = head sha
   if ! approval_required; then
-    rm -f "$APPROVAL_ASKED_FILE" 2>/dev/null   # label removed → the wait is stale
+    # Label removed → the wait is stale, and so is the park that went with it.
+    rm -f "$APPROVAL_ASKED_FILE" "$AWAITING_HUMAN_MARKER" 2>/dev/null
     return 0
   fi
   local pr="$1" sha="$2" granted="" who
@@ -1015,7 +1116,7 @@ approval_gate() { # $1 = pr number, $2 = head sha
   who="$(pr_human_approval "$pr" "$sha")"
   if [ -n "$who" ]; then
     printf '%s' "$sha" > "$APPROVAL_GRANTED_FILE"
-    rm -f "$APPROVAL_ASKED_FILE" 2>/dev/null
+    rm -f "$APPROVAL_ASKED_FILE" "$AWAITING_HUMAN_MARKER" 2>/dev/null
     echo "[approval-gate] @$who approved ${sha:0:8} — merge may proceed"
     return 0
   fi
@@ -1131,6 +1232,167 @@ conflict_needs_agent() { # $1 = pr number
     return 0
   fi
   echo "[conflict] rebase conflict unresolved after $SYNC_RETRY_CAP attempts — not retrying (a human should look)"
+  return 1
+}
+
+# -- escalation ---------------------------------------------------------
+# Hand the situation to a person, ONCE.
+#
+# Every guard below can fail the same way if it is careless: the condition
+# persists, the tick runs every five minutes, and the pull request fills with
+# the same paragraph until nobody reads any of it. So an escalation is keyed
+# on a FINGERPRINT of the condition it is about — the same idiom as
+# request_self_review's per-sha marker, and for the same reason. The condition
+# changing produces a new fingerprint and a new (single) comment; the
+# condition persisting produces silence.
+#
+# 0 = the comment was posted now. 1 = it had already been said.
+escalate_once() { # $1 = marker file, $2 = fingerprint, $3 = body, $4 = log tag
+  local marker="$1" fp="$2" body="$3" tag="${4:-escalation}" already=""
+  [ -f "$marker" ] && already="$(cat "$marker" 2>/dev/null)"
+  if [ "$already" = "$fp" ]; then
+    return 1
+  fi
+  post_issue_comment "$body" \
+    && echo "[$tag] escalated '$fp' to @$(repo_owner_login)" \
+    || echo "[$tag] WARNING: could not post the escalation comment"
+  # Written whether or not the post succeeded, exactly as the review request
+  # is: a comment that cannot be posted now will not post better on the next
+  # tick, and retrying it forever is the spam this file is built to avoid.
+  printf '%s' "$fp" > "$marker"
+  # The wait is now on a person, so the planner should work other issues.
+  touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+  return 0
+}
+
+# -- autonomous-review retry -------------------------------------------
+# A CHANGES-REQUIRED verdict that has not been acted on is unresolved work,
+# exactly like a red CI — and it is invisible to every other wake trigger: it
+# is not a mention, not a CI transition and not a conflict.
+#
+# Waking once per verdict is not enough, and the failure mode is the one
+# SYNC_RETRY_FILE describes. The fingerprint is written the moment the verdict
+# is OBSERVED, before the agent has done anything with it. A run woken and
+# then killed — one 429, a deploy, an OOM — spends the trigger for good, and
+# from then on the stored and the current fingerprint match, so nothing wakes
+# anybody. The solver spawns every five minutes, prints two lines and exits;
+# the reviewer has already reviewed that sha and skips it. Both sides waiting,
+# correctly, and nothing moving.
+#
+# So: retry a bounded number of times while the situation persists, and when
+# the budget is gone ask a person instead of asking the model again forever.
+# The budget resets when the VERDICT changes or the HEAD moves — both produce
+# a new fingerprint — so a verdict that WAS addressed costs nothing extra.
+#
+# 0 = the agent should be woken. 1 = nothing to do.
+review_needs_agent() { # $1 = pr number
+  local pr="$1" verdict vsha head fp last tries
+  if ! reviewer_enabled; then
+    # No reviewer, no verdicts. Drop the state so a suspended-then-resumed
+    # reviewer does not inherit a budget from before it was switched off.
+    rm -f "$REVIEW_FP_FILE" "$REVIEW_RETRY_FILE" "$REVIEW_ESCALATED_FILE" 2>/dev/null
+    return 1
+  fi
+  head="$(pr_head_sha "$pr")"
+  [ -n "$head" ] || { echo "[review-retry] could not resolve the head sha of PR #$pr — not waking"; return 1; }
+  read -r verdict vsha <<< "$(pr_review_verdict "$pr")"
+  # The head is part of the fingerprint on purpose: a verdict is UNADDRESSED
+  # only while it is about the commit that is currently open. A push answers
+  # it, and must both stop the retries and reset the budget.
+  fp="none:${head:0:7}"
+  [ -n "${verdict:-}" ] && fp="${verdict}:${vsha:0:7}:${head:0:7}"
+  last=""
+  [ -f "$REVIEW_FP_FILE" ] && last="$(cat "$REVIEW_FP_FILE" 2>/dev/null)"
+  if [ "$last" != "$fp" ]; then
+    printf '%s' "$fp" > "$REVIEW_FP_FILE"
+    rm -f "$REVIEW_RETRY_FILE" "$REVIEW_ESCALATED_FILE" 2>/dev/null
+    if [ "${verdict:-}" = "changes" ] && [ "${vsha:-}" = "$head" ]; then
+      # The verdict is in, so the wait for it is over.
+      rm -f "$AWAITING_REVIEW_MARKER" 2>/dev/null
+      # This wake IS the first attempt at the findings, so it costs one from
+      # the budget — the cap is the TOTAL number of attempts, not cap+1.
+      echo 1 > "$REVIEW_RETRY_FILE"
+      echo "[review-retry] reviewer requires CHANGES ($fp) — waking the agent (attempt 1/$REVIEW_RETRY_CAP)"
+      return 0
+    fi
+    echo "[review-retry] review fingerprint is now '$fp' — tracking, not waking"
+    return 1
+  fi
+  if [ "${verdict:-}" != "changes" ] || [ "${vsha:-}" != "$head" ]; then
+    return 1
+  fi
+  tries=0
+  [ -f "$REVIEW_RETRY_FILE" ] && tries="$(cat "$REVIEW_RETRY_FILE" 2>/dev/null || echo 0)"
+  case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+  if [ "$tries" -lt "$REVIEW_RETRY_CAP" ]; then
+    tries=$(( tries + 1 ))
+    echo "$tries" > "$REVIEW_RETRY_FILE"
+    echo "[review-retry] verdict $fp still unaddressed — waking the agent (attempt $tries/$REVIEW_RETRY_CAP)"
+    return 0
+  fi
+  escalate_once "$REVIEW_ESCALATED_FILE" "$fp" \
+    "⚠️ The autonomous reviewer asked for changes on \`${head:0:8}\` in PR #$pr, and $REVIEW_RETRY_CAP attempts later they are still not addressed. I am not going to keep trying on my own.
+
+@$(repo_owner_login) — the findings are in the review comment on the pull request. Reply here and @-mention \`@$BOT_LOGIN\` with what you want done and I will pick it back up." \
+    "review-retry"
+  echo "[review-retry] verdict $fp unaddressed after $REVIEW_RETRY_CAP attempts — not retrying (a human should look)"
+  return 1
+}
+
+# -- red-CI retry ------------------------------------------------------
+# A red CI on the current head is unresolved work too, and the CI-fingerprint
+# wake alone only ever fires ONCE per pipeline: one observation wrote the
+# fingerprint, and a run that died before fixing anything left the pull
+# request red forever while the bot looked dead.
+#
+# Same answer as everywhere else in this file — a bounded budget on the
+# UNCHANGED fingerprint. What resets it:
+#   - the CI fingerprint changing (a push, a re-run): a different pipeline;
+#   - the checks going green: there is nothing to fix;
+#   - a new human comment (see the preflight): an instruction is a fresh
+#     start, not a continuation of the attempts that preceded it.
+#
+# 0 = the agent should be woken. 1 = nothing to do.
+ci_red_needs_agent() { # $1 = pr number, $2 = ci fingerprint, $3 = 1 if it changed this tick
+  local pr="$1" fp="$2" changed="${3:-0}" status tries sha7
+  if [ "$changed" = "1" ]; then
+    rm -f "$CI_RETRY_FILE" "$CI_RED_ESCALATED_FILE" 2>/dev/null
+  fi
+  # Only a SETTLED pipeline is a fact worth spending a turn on. In progress
+  # means there is nothing actionable yet, and no-checks means there is no
+  # pipeline to be red.
+  case "$fp" in
+    settled:*) ;;
+    *) return 1 ;;
+  esac
+  status="$(ci_status_for_pr "$pr")"
+  if [ "$status" != "not_green" ]; then
+    rm -f "$CI_RETRY_FILE" "$CI_RED_ESCALATED_FILE" 2>/dev/null
+    return 1
+  fi
+  if [ "$changed" = "1" ]; then
+    # The ci-change wake the preflight is about to do IS the first fix attempt
+    # on this pipeline, so it costs one from the budget. That makes the cap the
+    # TOTAL number of agent attempts on one red commit rather than cap+1.
+    echo 1 > "$CI_RETRY_FILE"
+    return 1
+  fi
+  tries=0
+  [ -f "$CI_RETRY_FILE" ] && tries="$(cat "$CI_RETRY_FILE" 2>/dev/null || echo 0)"
+  case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+  if [ "$tries" -lt "$CI_RED_RETRY_CAP" ]; then
+    tries=$(( tries + 1 ))
+    echo "$tries" > "$CI_RETRY_FILE"
+    echo "[ci-red-retry] checks still red on '$fp' — waking the agent (attempt $tries/$CI_RED_RETRY_CAP)"
+    return 0
+  fi
+  sha7="${fp#settled:}"; sha7="${sha7%%:*}"
+  escalate_once "$CI_RED_ESCALATED_FILE" "$fp" \
+    "⚠️ PR #$pr is still failing after $CI_RED_RETRY_CAP fix attempts on \`$sha7\`. I could not get the checks green on my own — the failing runs are on the pull request.
+
+@$(repo_owner_login) — could you take a look? Reply here and @-mention \`@$BOT_LOGIN\` and I will try again." \
+    "ci-red-retry"
+  echo "[ci-red-retry] checks still red after $CI_RED_RETRY_CAP attempts on $sha7 — not retrying (a human should look)"
   return 1
 }
 
@@ -1556,6 +1818,14 @@ fi
 #     settled — agent must react per rule 8 if red, rule 9 if green)
 #   - the branch conflicts with the base and the conflict is still
 #     unresolved (nothing else can see this one — see conflict_needs_agent)
+#   - the CI is red and UNCHANGED, and the red-retry budget is not spent
+#     (see ci_red_needs_agent)
+#   - a CHANGES-REQUIRED verdict about the current head is unaddressed, and
+#     the review-retry budget is not spent (see review_needs_agent)
+#
+# Each of the last three carries a bounded budget rather than firing forever:
+# past it the human is asked, ONCE, and the issue parks instead of burning a
+# turn every five minutes to reach the same wall.
 # In any of those cases, save the new state and fall through to the initial
 # agent invocation. Otherwise exit silently.
 WAKE_REASON=""
@@ -1596,8 +1866,34 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
   PREFLIGHT_NEW="$(fetch_new_mentions "$LAST_SEEN_ID" 2>/dev/null || echo '[]')"
   PREFLIGHT_NEW_COUNT="$(echo "$PREFLIGHT_NEW" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
 
-  if [ "$PREFLIGHT_NEW_COUNT" = "0" ] && [ "$CI_CHANGED" = "0" ] && [ "$MERGE_CONFLICT_NEW" = "0" ]; then
-    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged or not settled, no unresolved conflict — exiting without agent invocation"
+  # A person said something new. That ends every wait this run keeps on a
+  # human, and it hands the agent FRESH budgets: an instruction is a new
+  # start, not a continuation of the attempts that came before it — and the
+  # escalation markers go with them so the next dead end can be reported.
+  if [ "$PREFLIGHT_NEW_COUNT" != "0" ]; then
+    rm -f "$AWAITING_HUMAN_MARKER" "$CI_RETRY_FILE" "$CI_RED_ESCALATED_FILE" \
+          "$REVIEW_RETRY_FILE" "$REVIEW_ESCALATED_FILE" 2>/dev/null
+  fi
+
+  # A CI that is red and has NOT changed is unresolved work the fingerprint
+  # rule above cannot see: it fires once per pipeline, so a run that died
+  # before fixing anything left the pull request red forever. Bounded, and
+  # escalated to a person when the budget is gone — see ci_red_needs_agent.
+  if ci_red_needs_agent "$EXISTING_PR_NUMBER" "$CURRENT_CI_FP" "$CI_CHANGED"; then
+    CI_RED_RETRY_NEW=1
+  fi
+
+  # A review verdict the agent has not acted on is the fourth wake trigger,
+  # and the one that deadlocked this bot: nothing else can see it, so the
+  # solver waited for a verdict it had already been given. Also bounded — see
+  # review_needs_agent.
+  if review_needs_agent "$EXISTING_PR_NUMBER"; then
+    REVIEW_RETRY_NEW=1
+  fi
+
+  if [ "$PREFLIGHT_NEW_COUNT" = "0" ] && [ "$CI_CHANGED" = "0" ] && [ "$MERGE_CONFLICT_NEW" = "0" ] \
+     && [ "$CI_RED_RETRY_NEW" = "0" ] && [ "$REVIEW_RETRY_NEW" = "0" ]; then
+    echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged or not settled, no unresolved conflict, no unaddressed verdict — exiting without agent invocation"
     exit 0
   fi
 
@@ -1612,6 +1908,14 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
     else
       WAKE_REASON="ci-change"
     fi
+  fi
+
+  if [ "$CI_RED_RETRY_NEW" = "1" ]; then
+    WAKE_REASON="${WAKE_REASON:+$WAKE_REASON+}ci-red-retry"
+  fi
+
+  if [ "$REVIEW_RETRY_NEW" = "1" ]; then
+    WAKE_REASON="${WAKE_REASON:+$WAKE_REASON+}review-changes"
   fi
 
   if [ "$PREFLIGHT_NEW_COUNT" != "0" ]; then

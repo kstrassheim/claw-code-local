@@ -42,7 +42,10 @@ BLOCKS = {
     "review": ("# -- autonomous review gate", "# -- human sign-off gate"),
     "approval": ("# -- human sign-off gate", "# -- the merge"),
     "merge": ("# -- the merge", "# -- rebase-conflict retry"),
-    "conflict": ("# -- rebase-conflict retry", "# -- issue snapshot"),
+    "conflict": ("# -- rebase-conflict retry", "# -- escalation"),
+    "escalate": ("# -- escalation", "# -- autonomous-review retry"),
+    "review_retry": ("# -- autonomous-review retry", "# -- red-CI retry"),
+    "ci_red_retry": ("# -- red-CI retry", "# -- issue snapshot"),
     "model": ("# -- model routing", "# -- detect existing PR"),
 }
 
@@ -127,11 +130,20 @@ class RunnerBlock(ShellTestCase):
         lines += [f'{k}={_q(v)}' for k, v in sorted(values.items())]
         lines += [
             'AWAITING_REVIEW_MARKER="$PWD/awaiting-review"',
+            'AWAITING_HUMAN_MARKER="$PWD/awaiting-human"',
+            'REVIEW_WAIT_TTL="${REVIEW_WAIT_TTL:-7200}"',
             'APPROVAL_ASKED_FILE="$PWD/approval-asked"',
             'APPROVAL_GRANTED_FILE="$PWD/approval-granted"',
             'SYNC_FP_FILE="$PWD/sync-fp"',
             'SYNC_RETRY_FILE="$PWD/sync-retries"',
             'SYNC_RETRY_CAP="${SYNC_RETRY_CAP:-4}"',
+            'REVIEW_FP_FILE="$PWD/review-fp"',
+            'REVIEW_RETRY_FILE="$PWD/review-retries"',
+            'REVIEW_ESCALATED_FILE="$PWD/review-escalated"',
+            'REVIEW_RETRY_CAP="${REVIEW_RETRY_CAP:-4}"',
+            'CI_RETRY_FILE="$PWD/ci-red-retries"',
+            'CI_RED_ESCALATED_FILE="$PWD/ci-red-escalated"',
+            'CI_RED_RETRY_CAP="${CI_RED_RETRY_CAP:-4}"',
             'DEFAULT_BRANCH=main',
             'repo_owner_login() { echo "${REPO%%/*}"; }',
         ]
@@ -425,9 +437,15 @@ class ReviewGate(RunnerBlock):
         self.assertIn("HELD", out)
 
     def test_no_verdict_yet_requests_one_and_records_the_sha(self):
+        # The request is a COMMENT plus the per-sha marker, and not a
+        # requested-reviewer: GitHub refuses to add a pull request's author as
+        # its own reviewer (422), and this bot authors every pull request it
+        # opens — so the reviewer finds the work by authorship instead. What
+        # must still happen is that the ask is visible on the issue and the
+        # sha it was made for is recorded.
         rc, out, err = self.gate()
         self.assertIn("HELD", out, out + err)
-        self.assertTrue(any("requested_reviewers" in p for p in self.by_method("POST")),
+        self.assertTrue(any("issues/7/comments" in p for p in self.by_method("POST")),
                         self.requests())
         self.assertEqual(self.state("awaiting-review"), self.HEAD)
 

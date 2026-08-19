@@ -47,10 +47,13 @@ Env:
   GITHUB_TOKEN              — bot's PAT (already wired)
   HEARTBEAT_MAX_PER_REPO    (default 1)
   HEARTBEAT_TTL_SECONDS     (default 3600)
+  REVIEW_WAIT_TTL           (default 7200) — how long an awaiting-review
+                            marker is believed; see list_wait_markers
 """
 
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -75,6 +78,9 @@ from project_allowlist import Allowlist  # noqa: E402
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 MAX_PER_REPO = int(os.environ.get("HEARTBEAT_MAX_PER_REPO", "1"))
 TTL_SECONDS = int(os.environ.get("HEARTBEAT_TTL_SECONDS", "3600"))
+# How long the solver's "I asked for a review and am waiting" marker is
+# believed. Past it the wait is ignored — see list_wait_markers.
+REVIEW_WAIT_TTL = int(os.environ.get("REVIEW_WAIT_TTL", "7200"))
 
 K8S_SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 K8S_API = "https://kubernetes.default.svc"
@@ -379,6 +385,75 @@ def list_locked_repos(namespace: str, pod: str) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def list_wait_markers(namespace: str, pod: str) -> tuple[set, set]:
+    """What each repo's solver is currently WAITING on, read off the PVC.
+
+    Two marker kinds live in ~/.openclaw/issue-markers/, both written by the
+    solver and both named <owner>__<repo>-<number>.<kind>:
+
+      .awaiting-review  the solver asked the autonomous reviewer for a verdict
+                        on its own pull request and is waiting for it;
+      .awaiting-human   the solver asked a PERSON — a sign-off, or an
+                        escalation after a retry budget ran out.
+
+    They rank in opposite directions, which is the whole point of reading
+    them. A review the bot is waiting on is still the BOT'S work: it should
+    finish that issue before starting another, so it ranks FIRST. A wait on a
+    person is out of the bot's hands and can last days, so it ranks LAST and
+    the bot spends its one slot per repo on something it can actually move.
+
+    THE AWAITING-REVIEW MARKERS EXPIRE, and that is a safety net rather than a
+    detail. Ranking an issue first because the solver is waiting is only
+    correct while somebody is actually going to answer. A reviewer that
+    crashed, was suspended, or never posted its verdict leaves a marker that
+    would otherwise pin the repo's single slot on an issue that spends zero
+    model calls per tick, forever — the deadlock this exists to bound. Past
+    REVIEW_WAIT_TTL the marker is ignored here, the issue re-ranks as ordinary
+    work, and the solver re-checks the pull request and re-requests the
+    review.
+
+    One exec for both kinds: a marker read is worth a round trip, not two.
+    Anything that stops us reading them returns empty sets — the ordering is
+    an optimisation, and a tick that cannot read the markers should still
+    plan.
+    """
+    script = (
+        "root=$HOME/.openclaw/issue-markers; "
+        '[ -d "$root" ] || exit 0; '
+        f"now=$(date +%s); ttl={REVIEW_WAIT_TTL}; "
+        'for f in "$root"/*.awaiting-review; do '
+        '  [ -e "$f" ] || continue; '
+        '  age=$(( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) )); '
+        "  [ $age -lt $ttl ] || continue; "
+        '  echo "review $(basename "$f")"; '
+        "done; "
+        'for f in "$root"/*.awaiting-human; do '
+        '  [ -e "$f" ] || continue; '
+        '  echo "human $(basename "$f")"; '
+        "done"
+    )
+    try:
+        rc, out, err = kubectl_exec_capture(namespace, pod, "bash", "-c", script)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"list_wait_markers: {type(e).__name__}: {e}\n")
+        return set(), set()
+    if rc != 0:
+        sys.stderr.write(f"list_wait_markers: exec rc={rc} stderr={err}\n")
+        return set(), set()
+    review: set = set()
+    human: set = set()
+    for line in out.splitlines():
+        m = re.match(r"^(review|human)\s+(.*)-(\d+)\.awaiting-(?:review|human)$",
+                     line.strip())
+        if not m:
+            continue
+        # The marker spells owner/name with a double underscore, because a
+        # slash cannot be a filename.
+        key = (m.group(2).replace("__", "/"), int(m.group(3)))
+        (review if m.group(1) == "review" else human).add(key)
+    return review, human
+
+
 def main() -> int:
     if not GITHUB_TOKEN:
         json.dump({"error": "GITHUB_TOKEN not set"}, sys.stdout)
@@ -404,6 +479,9 @@ def main() -> int:
 
     allowed = read_allowlist(namespace, openclaw_pod)
     locked = list_locked_repos(namespace, openclaw_pod)
+    # What each solver is waiting on. Read once for every repo in the tick,
+    # because it is one exec against one directory either way.
+    awaiting_review, awaiting_human = list_wait_markers(namespace, openclaw_pod)
 
     plan: dict = {
         "generatedAt": int(started),
@@ -471,16 +549,38 @@ def main() -> int:
             # With MAX_PER_REPO=1 the planner services ONE issue per tick, so
             # this sort decides which. In order:
             #
-            #   rank      an issue already `In progress` is finished before a
-            #             fresh one is started. That is the in-flight rule,
-            #             and a priority label must not be able to undo it —
-            #             the bot converging on one issue at a time is what
-            #             keeps it from leaving a trail of half-done branches.
+            #   rank      what the bot can actually finish, first. An issue
+            #             already `In progress` is finished before a fresh one
+            #             is started — the in-flight rule, which a priority
+            #             label must not be able to undo, because the bot
+            #             converging on one issue at a time is what keeps it
+            #             from leaving a trail of half-done branches. Two
+            #             kinds of WAIT bracket that rule, in opposite
+            #             directions; see _rank.
             #   priority  issue_priority orders what is left, most urgent
             #             first, defaulting to Medium.
             #   number    ascending, so equal work is FIFO / oldest first.
             def _rank(i: dict) -> int:
-                return 0 if status_of_issue(i) == issue_status.IN_PROGRESS else 1
+                # A pull request parked on the bot's OWN reviewer ranks FIRST,
+                # not last. When the bot is its own reviewer the work is still
+                # the bot's, so it sees that issue through to the merge before
+                # starting another. With MAX_PER_REPO=1 this deliberately
+                # holds the repo's single slot: each tick re-spawns THIS
+                # issue, the solver finds no verdict yet and exits in seconds,
+                # and the moment the verdict lands the solver acts on it.
+                # That is only safe because the marker EXPIRES — a reviewer
+                # that never delivers would otherwise pin the slot forever.
+                # See list_wait_markers and REVIEW_WAIT_TTL.
+                if (repo, i["number"]) in awaiting_review:
+                    return 0
+                # A wait on a PERSON is the opposite case: out of the bot's
+                # hands, possibly for days. Those rank LAST so the bot moves
+                # on to work it can influence. The solver drops the marker the
+                # moment the human answers, which puts the issue straight back
+                # into the ordinary order.
+                if (repo, i["number"]) in awaiting_human:
+                    return 3
+                return 1 if status_of_issue(i) == issue_status.IN_PROGRESS else 2
 
             ordered = sorted(
                 issues,
