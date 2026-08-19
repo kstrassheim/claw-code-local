@@ -1,4 +1,4 @@
-name: PR Verify
+name: Verify
 
 # Every gate that decides what reaches main.
 #
@@ -9,8 +9,17 @@ name: PR Verify
 # not pass. A failing unit test now costs about a minute instead of the better
 # part of an hour of runner time.
 #
-# The same jobs run on pushes to main, not only on pull requests, so a merge
-# that lands while two PRs were green in isolation still gets checked.
+# The cheap checks also run on pushes to main, not only on pull requests, so a
+# merge that lands while two pull requests were green in isolation still gets
+# checked.
+#
+# The IMAGE BUILD does not. Deploy builds the identical commit on the same
+# self-hosted runner, so running it here too meant every push to main produced
+# TWO multi-hundred-megabyte arm64 builds of the same source. That is not just
+# waste: the runner shares a node with the control plane, and the load from it
+# has been enough to make the API server refuse connections and wedge the
+# storage provisioner. It also gave a flaky upstream build two chances to fail
+# per push instead of one.
 
 on:
   pull_request:
@@ -148,6 +157,10 @@ jobs:
 
   verify-build:
     name: Verify Image Build
+    # Pull requests only — see the note at the top of this file. On a push to
+    # main, Deploy builds this exact commit; a second identical build proves
+    # nothing and costs the same twenty minutes on the same runner.
+    if: github.event_name == 'pull_request'
     needs:
       - unit-tests
       - function-coverage
