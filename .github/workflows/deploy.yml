@@ -226,32 +226,70 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Pin Image Tag In Kustomization
-        # Bump k8s/kustomization.yaml so ArgoCD picks up the new tag.
-        # Without this step, OPENCLAW_VERSION bumps in /VERSIONS would
-        # rebuild + push the image but never reach the cluster.
+        # Bump k8s/kustomization.yaml so Argo CD picks up the new tag. Without
+        # this step, an OPENCLAW_VERSION bump rebuilds and pushes the image but
+        # never reaches the cluster.
+        #
+        # THE REBASE COMES FIRST, AND A LOWER VERSION IS REFUSED.
+        #
+        # This used to write the pin, commit, and only then `git pull --rebase`.
+        # With two deploys in flight — which is what three commits pushed a few
+        # minutes apart produces — the slower run replayed its own older pin on
+        # top of the newer one and won. The registry then held -2.5 while the
+        # manifest asked for -2.4, so a fix that had built and pushed
+        # successfully was simply never deployed, and every workflow was green.
+        #
+        # Rebasing first means the comparison is against what main actually
+        # says right now; refusing to move the pin BACKWARDS means a late
+        # finisher can no longer undo a newer deploy. Equal is a no-op, and a
+        # tag that is not in our version scheme (a workflow_dispatch build of
+        # an arbitrary ref) skips the comparison and pins as before.
         run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git pull --rebase origin main; then
+            git rebase --abort || true
+            echo "::warning::could not rebase onto main — leaving the pin alone; the next push reapplies it"
+            exit 0
+          fi
+
+          CURRENT="$(yq -r '(.images[] | select(.name == "claw-code-local") | .newTag)' k8s/kustomization.yaml)"
+          echo "pinned now: ${CURRENT}   this build: ${IMAGE_TAG}"
+
+          if [ "$CURRENT" = "$IMAGE_TAG" ]; then
+            echo "already pinned to ${IMAGE_TAG} — nothing to do"
+            exit 0
+          fi
+
+          # Only compare when BOTH look like our scheme; otherwise a dispatch
+          # build of an arbitrary ref would be judged against a version string
+          # it has nothing to do with.
+          case "${CURRENT}::${IMAGE_TAG}" in
+            v*.*::v*.*)
+              NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$IMAGE_TAG" | sort -V | tail -1)"
+              if [ "$NEWEST" != "$IMAGE_TAG" ]; then
+                echo "::warning::main is pinned to ${CURRENT}, which is newer than this build (${IMAGE_TAG}) — refusing to move the pin backwards"
+                exit 0
+              fi
+              ;;
+          esac
+
           yq -i \
             "(.images[] | select(.name == \"claw-code-local\") | .newTag) = \"${IMAGE_TAG}\"" \
             k8s/kustomization.yaml
 
-      - name: Commit Pinned Tag
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s/kustomization.yaml
           if git diff --cached --quiet; then
             echo "no kustomization tag change"
             exit 0
           fi
           git commit -m "chore: pin claw-code-local image to ${IMAGE_TAG}"
-          # Race-tolerant: another concurrent run (e.g., the sealed
-          # secrets job) may have pushed in the meantime.
-          if ! git pull --rebase origin main; then
-            git rebase --abort
-            echo "race: rebase failed, exiting 0 (next push will reapply)"
+          # Another run may still have pushed between the rebase and here.
+          if ! git push; then
+            echo "::warning::push raced with another run — the next deploy reapplies the pin"
             exit 0
           fi
-          git push
 
   publish-secrets:
     name: Apply Secrets
