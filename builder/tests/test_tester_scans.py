@@ -61,16 +61,14 @@ HOLD_A_SLOT = (
     "until tr '\\0' ' ' < /proc/$OWNER/cmdline 2>/dev/null "
     "| grep -q fixer-runner; do sleep 0.1; done\n")
 
-# The API preamble every extracted block assumes the runner already ran.
+# What every extracted block assumes the runner already set up. The host is
+# reached through the seam, so there is no URL or header here to get wrong.
 PREAMBLE = (
     "set -u\n"
     'STATE_ROOT="$PWD/.openclaw"\n'
     "REPO=o/r\n"
     "HEAD_SHA=abc1234def\n"
-    "GH_API=https://api.github.com\n"
-    'AUTH_HEADER="Authorization: Bearer t"\n'
-    'ACCEPT_HEADER="Accept: application/vnd.github+json"\n'
-    'APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"\n'
+    'FORGE=(forge-cli --repo "$REPO")\n'
 )
 
 
@@ -83,8 +81,8 @@ class _Blocks(ShellTestCase):
         os.makedirs(self.state, exist_ok=True)
         self.fixtures = os.path.join(self.home, "fixtures")
         os.makedirs(self.fixtures, exist_ok=True)
-        self.env["FAKE_CURL_DIR"] = "$PWD/fixtures"
-        self.env["FAKE_CURL_LOG"] = "$PWD/curl.log"
+        self.env["FAKE_FORGE_DIR"] = "$PWD/fixtures"
+        self.env["FAKE_FORGE_LOG"] = "$PWD/forge.log"
 
     def block(self, start, end, name):
         """extract_block always writes to the same path; keep several."""
@@ -169,59 +167,58 @@ class ScanSwitches(_Blocks):
 
 
 class DeployChecksGate(_Blocks):
-    """Was there a deployment of THIS commit at all?"""
+    """Was there a deployment of THIS commit at all?
+
+    The reduction from a host's own vocabulary to green/failed/pending/none no
+    longer happens here — it happens once, in the forge, and this reads the
+    answer. That is the point: the tester used to carry a THIRD copy of it,
+    and the copy disagreed. It called a pass `success` where everything else
+    said `green`, and it reported the whole commit `pending` whenever any run
+    was unfinished, even when another had already failed.
+
+    What is still worth pinning here is what the tester DOES with the answer,
+    and above all that nothing except a green commit opens the live-scan gate.
+    """
 
     def setUp(self):
         super().setUp()
         self.deploy = self.block(DEPLOY_START, DEPLOY_END, "deploy.sh")
 
-    def state_for(self, runs):
-        if runs is not None:
-            self.fixture("repos_o_r_commits_abc1234def_check-runs",
-                         {"check_runs": runs})
+    def state_for(self, state):
+        if state is not None:
+            self.fixture("checks_abc1234def", state)
         rc, out, err = self.sh(
             PREAMBLE + f'source "$PWD/{self.deploy}"\n'
             "echo STATE=$DEPLOY_CHECKS\n")
         self.assertEqual(rc, 0, out + err)
         return self.values(out)["STATE"]
 
-    def test_all_green_is_success(self):
-        self.assertEqual(self.state_for([
-            {"status": "completed", "conclusion": "success"},
-            {"status": "completed", "conclusion": "skipped"}]), "success")
+    def test_the_answer_is_read_rather_than_re_derived(self):
+        for state in ("green", "failed", "pending", "none"):
+            with self.subTest(state=state):
+                self.assertEqual(self.state_for(state), state)
 
-    def test_a_failure_is_failed(self):
-        self.assertEqual(self.state_for([
-            {"status": "completed", "conclusion": "success"},
-            {"status": "completed", "conclusion": "failure"}]), "failed")
-
-    def test_a_run_still_going_is_pending(self):
-        self.assertEqual(self.state_for([
-            {"status": "in_progress", "conclusion": None}]), "pending")
-
-    def test_no_checks_is_none_and_NOT_success(self):
-        # A repository with no checks on this commit has told us nothing about
-        # whether it deployed. Reading that as "green" would let the live scan
-        # run against whatever happened to be up.
-        self.assertEqual(self.state_for([]), "none")
-
-    def test_an_unreachable_api_is_none(self):
-        # No fixture: the fake curl exits like `curl -f` on a 404. A failure to
-        # ask must not read as a successful deploy.
-        self.assertEqual(self.state_for(None), "none")
+    def test_a_host_that_cannot_be_asked_is_not_a_deployment(self):
+        # No fixture, so the read fails. `pending` rather than `none`: we do
+        # not know that nothing ran, only that we could not find out. Either
+        # way the gate stays shut — what must never happen is that a failure
+        # to ask reads as a successful deploy.
+        state = self.state_for(None)
+        self.assertNotEqual(state, "green")
+        self.assertEqual(state, "pending")
 
 
 class PentestTripleGate(_Blocks):
     """Three authorisations, and the scan runs only with all three."""
 
-    HOSTS_SLUG = "repos_o_r_contents_PENTEST_ALLOWED_HOSTS"
+    HOSTS_SLUG = "file-at-ref_PENTEST_ALLOWED_HOSTS_abc1234def"
 
     def setUp(self):
         super().setUp()
         self.switches = self.block(SWITCH_START, SWITCH_END, "switches.sh")
         self.gate = self.block(GATE_START, GATE_END, "gate.sh")
 
-    def run_gate(self, *, switch=True, deploy="success", hosts_file=None,
+    def run_gate(self, *, switch=True, deploy="green", hosts_file=None,
                  inherited=None):
         self.flag(".pentest-enabled", switch)
         if hosts_file is not None:
@@ -408,9 +405,11 @@ class DuplicateGuard(_Blocks):
         os.makedirs(self.drafts, exist_ok=True)
 
     def check(self, title, open_titles):
-        self.fixture("repos_o_r_issues",
-                     [{"title": t} for t in open_titles]
-                     + [{"title": "a pull request", "pull_request": {}}])
+        # Change requests are filtered out on the other side of the seam, so
+        # the tester only ever sees issues here. Before that, one arriving in
+        # this list made the tester suppress a draft because it matched the
+        # title of its own earlier report.
+        self.fixture("open-issues", [{"title": t} for t in open_titles])
         with open(os.path.join(self.drafts, "d.json"), "w",
                   encoding="utf-8", newline="\n") as f:
             json.dump({"title": title, "body": "b", "assigneeRole": "BOT"}, f)
@@ -468,13 +467,14 @@ class DuplicateGuard(_Blocks):
             "new")
 
     def test_a_closed_issue_does_not_suppress_a_regression(self):
-        # Only OPEN issues are fetched (state=open), so a defect that was
-        # fixed, closed and came back is filed again — which is the report a
-        # regression deserves.
-        log = "state=open"
+        # Only OPEN issues are asked for, so a defect that was fixed, closed
+        # and came back is filed again — which is the report a regression
+        # deserves. The question says so in its name now; it used to be a
+        # query parameter a reader had to know the meaning of.
         self.check("Login form submits nothing", [])
-        with open(os.path.join(self.home, "curl.log"), encoding="utf-8") as f:
-            self.assertIn(log, f.read())
+        with open(os.path.join(self.home, "forge.log"), encoding="utf-8") as f:
+            asked = f.read()
+        self.assertIn("open-issues", asked)
 
 
 if __name__ == "__main__":

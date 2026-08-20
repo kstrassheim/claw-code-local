@@ -68,6 +68,11 @@ class Discovery(unittest.TestCase):
             "title": "a task", "body": "the body",
             "url": f"{BASE}/group/sub/app/-/issues/4",
             "labels": ["On Hold"], "state": "open", "closedAs": None,
+            # Always false here: merge requests live in their own collection,
+            # so an issue read is only ever an issue. Present regardless, so
+            # a caller asks both hosts the same question.
+            "isChangeRequest": False,
+            "createdAt": "",
         })
 
     def test_tasks_are_listed_as_well_as_issues(self):
@@ -245,10 +250,12 @@ class Notes(unittest.TestCase):
 
     def test_the_author_is_named_the_same_way_everywhere(self):
         f, _ = gl({"/issues/5/notes": [
-            {"id": 1, "body": "hi", "author": {"username": "owner"}}]})
+            {"id": 1, "body": "hi", "author": {"username": "owner"},
+             "created_at": "2026-08-01T10:00:00Z"}]})
         self.assertEqual(f.comments("g/app", 5),
                          [{"id": 1, "body": "hi",
-                           "author": {"username": "owner"}}])
+                           "author": {"username": "owner"},
+                           "createdAt": "2026-08-01T10:00:00Z"}])
 
     def test_system_notes_are_not_somebody_speaking(self):
         # Label changes and assignments are recorded as notes authored by

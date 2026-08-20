@@ -25,7 +25,7 @@ OPENCLAW_UPSTREAM=v2026.7.1-2
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.7.1-2.12
+OPENCLAW_VERSION=v2026.7.1-2.13
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
@@ -39,6 +39,12 @@ GLAB_VERSION=1.97.0
 GITLAB_MCP_VERSION=0.7.0
 TERRAFORM_VERSION=1.13.0
 TERRAFORM_MCP_VERSION=0.5.2
+# OpenTofu: the fork of Terraform under the Linux Foundation, and the registry
+# MCP that goes with it. Both are here rather than one replacing terraform:
+# a project's state and lockfile are written by whichever binary made them,
+# and the bot works on repositories that have chosen either.
+OPENTOFU_VERSION=1.12.6
+OPENTOFU_MCP_VERSION=0.1.5
 CODE_SERVER_VERSION=4.118.0
 AWS_CLI_VERSION=2.34.45
 GCLOUD_VERSION=567.0.0

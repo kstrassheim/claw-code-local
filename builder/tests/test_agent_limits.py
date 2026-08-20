@@ -148,5 +148,52 @@ class FailSoft(ShellTestCase):
         self.assertEqual(self._read(), "7200")
 
 
+class WhetherAPersonSetIt(ShellTestCase):
+    """`agent_limit_is_set` — "nobody set this" versus "somebody set it".
+
+    `agent_limit` cannot answer that: it returns the default when the key is
+    absent, so a key set to exactly the default is indistinguishable from one
+    that was never touched. Anywhere a value can also be DERIVED, the two lead
+    to opposite decisions — a derived number may replace a built-in default,
+    and must not replace a human who deliberately configured one.
+    """
+
+    def _write(self, text):
+        with open(f"{self.home}/.openclaw/agent-limits.conf", "w",
+                  encoding="utf-8", newline="\n") as f:
+            f.write(text)
+
+    def _is_set(self, key="solver.lifetime"):
+        rc, _, _ = self.sh(
+            f'. $PWD/bin/agent-limits.sh && agent_limit_is_set {key}')
+        return rc == 0
+
+    def test_a_configured_value_reads_as_set(self):
+        self._write("solver.lifetime = 4h\n")
+        self.assertTrue(self._is_set())
+
+    def test_an_untouched_key_reads_as_unset(self):
+        self._write("solver.turn = 3h\n")
+        self.assertFalse(self._is_set())
+
+    def test_a_missing_store_reads_as_unset(self):
+        self.assertFalse(self._is_set())
+
+    def test_a_value_set_to_exactly_the_default_still_reads_as_set(self):
+        # The case `agent_limit` cannot distinguish, and the reason this
+        # exists. Somebody typed it; that is a decision.
+        self._write("solver.turn = 3500\n")
+        self.assertTrue(self._is_set("solver.turn"))
+
+    def test_an_unusable_value_reads_as_unset(self):
+        # A typo already falls back to the default inside `agent_limit`.
+        # Reporting it as configured would let it suppress a derived value and
+        # leave the run on a number nobody chose — the worst of both.
+        for junk in ("eventually", "0", "-5", "3h4x", "999999999"):
+            with self.subTest(junk=junk):
+                self._write(f"solver.lifetime = {junk}\n")
+                self.assertFalse(self._is_set())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -146,13 +146,7 @@ _source_lib agent-slot || true
 if [ -n "${TESTER_BOT_LOGIN:-}" ]; then
   BOT_LOGIN="$TESTER_BOT_LOGIN"
 else
-  BOT_LOGIN="$(curl -fsSL \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    https://api.github.com/user 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" \
-    2>/dev/null)"
+  BOT_LOGIN="$(forge-cli --repo "$REPO" identity 2>/dev/null)"
   if [ -z "$BOT_LOGIN" ]; then
     echo "FATAL: tester cannot resolve bot identity from \$GITHUB_TOKEN /user" >&2
     exit 1
@@ -235,40 +229,30 @@ echo "============================================================"
 
 # ---- GH API helpers ------------------------------------------------
 
-GH_API="https://api.github.com"
-AUTH_HEADER="Authorization: Bearer $GITHUB_TOKEN"
-ACCEPT_HEADER="Accept: application/vnd.github+json"
-APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"
+# Every question this runner asks its host goes through `forge-cli` — the same
+# implementation the planners import — so nothing below knows a URL or an auth
+# header, and the tester works against a project on either host.
+FORGE=(forge-cli --repo "$REPO")
 
-fetch_main_head_sha() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/branches/main" 2>/dev/null \
-  | python3 -c "import sys,json; print((json.load(sys.stdin).get('commit') or {}).get('sha') or '')" 2>/dev/null
-}
-
-HEAD_SHA="$(fetch_main_head_sha)"
-if [ -z "$HEAD_SHA" ]; then
-  # Some repos use a different default branch — try the API default.
-  HEAD_SHA="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO" 2>/dev/null \
+# The commit under test: the head of the repository's DEFAULT branch.
+#
+# Asked as one question now. It used to be three requests and a comment
+# apologising for them — fetch `main`, and if that 404s fetch the repository to
+# learn the real default branch name, then fetch that branch — with the branch
+# name briefly living in the variable meant for the sha. Which branch is the
+# default is the host's business, and it answers both halves at once.
+DEFAULT_BRANCH=""
+HEAD_SHA=""
+if _default_json="$("${FORGE[@]}" default-branch 2>/dev/null)"; then
+  { read -r DEFAULT_BRANCH; read -r HEAD_SHA; } < <(printf '%s' "$_default_json" \
     | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-db = d.get('default_branch') or 'main'
-# Re-issue: caller will fetch via separate call. Print branch name back.
-print(db)
-" 2>/dev/null)"
-  if [ -n "$HEAD_SHA" ] && [ "$HEAD_SHA" != "main" ]; then
-    DEFAULT_BRANCH="$HEAD_SHA"
-    HEAD_SHA="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      "$GH_API/repos/$REPO/branches/$DEFAULT_BRANCH" 2>/dev/null \
-      | python3 -c "import sys,json; print((json.load(sys.stdin).get('commit') or {}).get('sha') or '')" 2>/dev/null)"
-  else
-    DEFAULT_BRANCH="main"
-  fi
-else
-  DEFAULT_BRANCH="main"
+print(d.get('branch') or '')
+print(d.get('sha') or '')
+" 2>/dev/null)
 fi
+: "${DEFAULT_BRANCH:=main}"
 
 if [ -z "$HEAD_SHA" ]; then
   echo "[tester] could not fetch HEAD for $REPO — exit"
@@ -362,31 +346,16 @@ SESSION_ID="tester-${REPO//\//-}-$(date +%s)"
 # deployment of a commit whose deploy failed means scanning whatever was live
 # before it, and reporting the result against a commit that never shipped.
 #
-# States: success | failed | pending | none. Only `success` opens the gate.
-# `none` is deliberately NOT success: a repository with no checks on this
-# commit has told us nothing about whether it deployed.
-deploy_checks_state() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" 2>/dev/null \
-  | python3 -c "
-import sys, json
-try:
-    runs = (json.load(sys.stdin) or {}).get('check_runs') or []
-except Exception:
-    runs = []
-if not runs:
-    print('none')
-elif any((r.get('status') or '') != 'completed' for r in runs):
-    print('pending')
-elif any((r.get('conclusion') or '') not in ('success', 'neutral', 'skipped')
-         for r in runs):
-    print('failed')
-else:
-    print('success')
-" 2>/dev/null
-}
-DEPLOY_CHECKS="$(deploy_checks_state)"
-[ -n "$DEPLOY_CHECKS" ] || DEPLOY_CHECKS="none"
+# States: green | failed | pending | none. Only `green` opens the gate.
+# `none` is deliberately NOT green: a repository with no checks on this commit
+# has told us nothing about whether it deployed.
+# The reduction is the forge's, and this is the only place the tester asks.
+# It used to carry its own copy — a third one, subtly different from the other
+# two: it called a passing run `success` where everything else says `green`,
+# and any incomplete run made the whole commit `pending` even when another had
+# already failed. One vocabulary, one answer.
+DEPLOY_CHECKS="$("${FORGE[@]}" checks --sha "$HEAD_SHA" 2>/dev/null || echo pending)"
+[ -n "$DEPLOY_CHECKS" ] || DEPLOY_CHECKS="pending"
 echo "[deploy-checks] $HEAD_SHA: $DEPLOY_CHECKS"
 
 # ---- pentest authorisation gate ------------------------------------
@@ -415,16 +384,15 @@ PENTEST_ACTIVE=0
 PENTEST_SKIP_REASON=""
 if [ "$PENTEST_ON" != "1" ]; then
   PENTEST_SKIP_REASON="the pen test is switched off (default) — enable it from chat with \`tester pentest on\`"
-elif [ "$DEPLOY_CHECKS" != "success" ]; then
+elif [ "$DEPLOY_CHECKS" != "green" ]; then
   PENTEST_SKIP_REASON="the deploy checks for $HEAD_SHA did not succeed (state: $DEPLOY_CHECKS) — there is no verified deployment of this commit to scan"
 else
   # Read the authorisation file from the repository ROOT at the COMMIT UNDER
   # TEST, over the API rather than out of the checkout: the file has to be the
   # one the owner committed to the tested commit, not whatever happens to be
   # in a working tree the agent may have touched.
-  _pentest_hosts_raw="$(curl -fsSL \
-    -H "$AUTH_HEADER" -H "Accept: application/vnd.github.raw" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/contents/PENTEST_ALLOWED_HOSTS?ref=$HEAD_SHA" 2>/dev/null || true)"
+  _pentest_hosts_raw="$("${FORGE[@]}" file-at-ref \
+    --path PENTEST_ALLOWED_HOSTS --ref "$HEAD_SHA" 2>/dev/null || true)"
   _pentest_hosts=""
   if [ -n "$_pentest_hosts_raw" ]; then
     _pentest_hosts="$(printf '%s' "$_pentest_hosts_raw" | python3 -c "
@@ -1129,15 +1097,16 @@ FALLBACK_USED=""
 # closes what it fixes, so a closed one CAN be re-filed if it regresses, which
 # is a regression report and worth having.
 EXISTING_TITLES_FILE="$DRAFTS_DIR/.open-issue-titles"
-curl -fsSL \
-  -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-  "$GH_API/repos/$REPO/issues?state=open&per_page=100" 2>/dev/null \
+"${FORGE[@]}" open-issues 2>/dev/null \
   | python3 -c "
 import sys, json
 try: data = json.load(sys.stdin)
 except Exception: data = []
+# Change requests are already filtered out on the other side of the seam: on
+# at least one host they come back from the issues collection looking like
+# issues, and counting them here made the tester suppress a draft because it
+# matched the title of its own earlier report.
 for i in data if isinstance(data, list) else []:
-    if 'pull_request' in i: continue
     t = (i.get('title') or '').strip()
     if t: print(' '.join(t.split()))
 " > "$EXISTING_TITLES_FILE" 2>/dev/null
@@ -1255,22 +1224,27 @@ print(json.dumps(d))
     echo "[tester] WARN: could not parse draft $draft — skipping"
     continue
   fi
-  resp="$(curl -fsSL -X POST \
-    -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    -H 'Content-Type: application/json' \
-    -d "$payload" \
-    "$GH_API/repos/$REPO/issues" 2>/dev/null)"
-  if [ -n "$resp" ]; then
-    n="$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number',''))" 2>/dev/null)"
-    url="$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('html_url',''))" 2>/dev/null)"
-    if [ -n "$n" ]; then
-      CREATED_ISSUES+=("#$n $url")
-      echo "[tester] created issue $REPO #$n"
-    else
-      echo "[tester] WARN: issue create returned unparseable response for $draft"
-    fi
+  # Title, body, labels and assignee travel as arguments and a FILE rather
+  # than as a hand-built payload: the body is agent output full of backticks
+  # and quotes, and the shape of the request is the forge's business.
+  _title="$(printf '%s' "$payload" | python3 -c \
+    "import sys,json; print(json.load(sys.stdin).get('title',''))" 2>/dev/null)"
+  _labels="$(printf '%s' "$payload" | python3 -c \
+    "import sys,json; print(','.join(json.load(sys.stdin).get('labels') or []))" 2>/dev/null)"
+  _assignees="$(printf '%s' "$payload" | python3 -c \
+    "import sys,json; print(','.join(json.load(sys.stdin).get('assignees') or []))" 2>/dev/null)"
+  _bodyf="$(mktemp)"
+  printf '%s' "$payload" | python3 -c \
+    "import sys,json; sys.stdout.write(json.load(sys.stdin).get('body') or '')" \
+    > "$_bodyf" 2>/dev/null
+  n="$("${FORGE[@]}" create-issue --title "$_title" --body-file "$_bodyf" \
+        --labels "$_labels" --assignees "$_assignees" 2>/dev/null)"
+  rm -f "$_bodyf"
+  if [ -n "$n" ]; then
+    CREATED_ISSUES+=("#$n")
+    echo "[tester] created issue $REPO #$n"
   else
-    echo "[tester] WARN: failed to POST issue for $draft"
+    echo "[tester] WARN: could not file the issue for $draft"
   fi
 done
 
@@ -1311,16 +1285,9 @@ cat "$SUMMARY_FILE"
 # Post the summary as a commit comment so the repo subscriber gets a
 # GitHub notification.
 SUMMARY_BODY="$(cat "$SUMMARY_FILE")"
-COMMIT_PAYLOAD="$(BODY="$SUMMARY_BODY" python3 -c '
-import os, json
-print(json.dumps({"body": os.environ["BODY"]}))
-')"
-curl -fsSL -X POST \
-  -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d "$COMMIT_PAYLOAD" \
-  "$GH_API/repos/$REPO/commits/$HEAD_SHA/comments" >/dev/null 2>&1 \
-  || echo "[tester] note: could not post commit comment (continuing)"
+"${FORGE[@]}" comment-on-commit --sha "$HEAD_SHA" --body-file "$SUMMARY_FILE" \
+  >/dev/null 2>&1 \
+  || echo "[tester] note: could not post the commit comment (continuing)"
 
 # Telegram delivery. `telegram-notify` resolves the owner's paired chat from
 # openclaw's own state and FAILS OPEN on every path, so it needs no `|| true`

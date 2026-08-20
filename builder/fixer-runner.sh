@@ -122,19 +122,33 @@ _source_lib project-instructions || true
 if [ -n "${FIXER_BOT_LOGIN:-}" ]; then
   BOT_LOGIN="$FIXER_BOT_LOGIN"
 else
-  BOT_LOGIN="$(curl -fsSL \
-    -H "Authorization: Bearer $GITHUB_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    https://api.github.com/user 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" \
-    2>/dev/null)"
+  BOT_LOGIN="$(forge-cli --repo "$REPO" identity 2>/dev/null)"
   if [ -z "$BOT_LOGIN" ]; then
     echo "FATAL: could not resolve bot identity from \$GITHUB_TOKEN /user — aborting" >&2
     exit 1
   fi
 fi
 POLL_INTERVAL="${FIXER_POLL_INTERVAL:-300}"
+
+# The story's SIZE, resolved once, here, because two things read it: how long
+# this run may take, and which model implements it.
+#
+# $STORY_POINTS arrives from the spawner, which reads it off the issue's
+# `SP::<n>` label, and is left EXACTLY as it arrived — the planning record is
+# written from it further down, and a defaulted 8 recorded as an estimate is a
+# number nobody produced. $SOLVER_POINTS is the working value, and
+# $POINTS_DEFAULTED says which of the two it is.
+#
+# An unestimated story is 8: under-estimating is the expensive direction, so an
+# unknown story gets the strong model and the larger budget rather than the
+# cheap lane. A defaulted 8 and a judged 8 route identically and are still not
+# the same fact, which is why only one of them is allowed to shorten a run.
+case "${STORY_POINTS:-}" in
+  ''|*[!0-9]*) SOLVER_POINTS=8; POINTS_DEFAULTED=1 ;;
+  *)           SOLVER_POINTS="$STORY_POINTS"; POINTS_DEFAULTED=0 ;;
+esac
+[ "$POINTS_DEFAULTED" = "1" ] \
+  && echo "[story] $REPO#$ISSUE_NUM is unestimated — proceeding as $SOLVER_POINTS point(s)"
 
 # How long a turn and a whole run may take. Runtime-adjustable through
 # `agent-limits` (the store lives on the workspace PVC and is read at the
@@ -151,6 +165,53 @@ if command -v agent_limit >/dev/null 2>&1; then
 else
   MAX_LIFETIME_SECONDS="$_SOLVER_LIFETIME_DEFAULT"
   AGENT_TURN_TIMEOUT="$_SOLVER_TURN_DEFAULT"
+fi
+
+# The estimate already carries a duration, so let it set the budget.
+#
+# The point scale is calibrated in model time — one point is about a quarter of
+# an hour of it — which means a sized story has already been told how long it
+# should take. A flat six-hour lifetime for every story is the opposite: a
+# one-pointer that wedges takes six hours to admit it, and the repository it
+# holds a lock on waits all of them.
+#
+# ON BY DEFAULT, and only ever for a story somebody actually sized. A defaulted
+# 8 is not an estimate, and shortening a run on the strength of a number the
+# bot invented is how work gets cut off halfway.
+#
+# A HUMAN'S SETTING WINS. The derived value replaces the built-in default, not
+# a cap somebody deliberately configured — with this on by default, silently
+# ignoring `agent-limits set solver.lifetime` would make that command look
+# broken. Which number won is logged either way; two sources for one budget
+# that disagree in silence are worse than either alone.
+SOLVER_AUTORUNTIME=on
+command -v agent_flag >/dev/null 2>&1 \
+  && SOLVER_AUTORUNTIME="$(agent_flag solver.autoruntime on)"
+if [ "$SOLVER_AUTORUNTIME" = "on" ] && [ "$POINTS_DEFAULTED" = "0" ]; then
+  # A quarter of an hour per point, and never less than that: a turn needs
+  # long enough to be worth starting at all.
+  _AUTO_LIFETIME=$(( SOLVER_POINTS * 900 ))
+  [ "$_AUTO_LIFETIME" -ge 900 ] 2>/dev/null || _AUTO_LIFETIME=900
+  # Half for a single turn. A run has to be able to react to its own output,
+  # so a per-turn cap equal to the lifetime would let the first turn eat the
+  # entire budget and leave nothing to act on the result.
+  _AUTO_TURN=$(( _AUTO_LIFETIME / 2 ))
+  if command -v agent_limit_is_set >/dev/null 2>&1 \
+     && agent_limit_is_set solver.lifetime; then
+    echo "[limits] auto runtime: $SOLVER_POINTS point(s) suggests ${_AUTO_LIFETIME}s, keeping the configured solver.lifetime of ${MAX_LIFETIME_SECONDS}s"
+  else
+    MAX_LIFETIME_SECONDS="$_AUTO_LIFETIME"
+    echo "[limits] auto runtime: $SOLVER_POINTS point(s) => lifetime ${MAX_LIFETIME_SECONDS}s"
+  fi
+  if command -v agent_limit_is_set >/dev/null 2>&1 \
+     && agent_limit_is_set solver.turn; then
+    echo "[limits] auto runtime: keeping the configured solver.turn of ${AGENT_TURN_TIMEOUT}s"
+  else
+    AGENT_TURN_TIMEOUT="$_AUTO_TURN"
+    echo "[limits] auto runtime: turn ${AGENT_TURN_TIMEOUT}s"
+  fi
+elif [ "$SOLVER_AUTORUNTIME" = "on" ]; then
+  echo "[limits] auto runtime: $REPO#$ISSUE_NUM is unestimated — keeping the configured caps"
 fi
 
 # How hard this subsystem thinks. Empty means pass no --thinking and inherit
@@ -341,15 +402,15 @@ record_delivery() {
   command -v python3 >/dev/null 2>&1 || return 0
   # The trap is installed before the API constants are, and an exit in that
   # window must not turn into an unbound-variable error inside the trap.
-  [ -n "${GH_API:-}" ] || return 0
+  # The trap is installed before the seam is, and an exit in that window must
+  # not turn into an unbound-variable error inside the trap.
+  [ -n "${FORGE:-}" ] || return 0
   local prs created
-  prs="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls?state=closed&sort=updated&direction=desc&per_page=50" \
+  prs="$("${FORGE[@]}" recent-change-requests --state closed --limit 50 \
     2>/dev/null || true)"
   [ -n "$prs" ] || return 0
-  created="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('created_at') or '')" \
+  created="$("${FORGE[@]}" issue --number "$ISSUE_NUM" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('createdAt') or '')" \
     2>/dev/null || echo '')"
   printf '%s' "$prs" | REPO="$REPO" ISSUE_NUM="$ISSUE_NUM" BRANCH="${BRANCH:-}" \
     ISSUE_CREATED="$created" LIB="${CLAW_LIB_DIR:-/usr/local/bin}" python3 -c "
@@ -444,12 +505,18 @@ if command -v planning-story >/dev/null 2>&1; then
     --points "${STORY_POINTS:-}" || true
 fi
 
-# -- GH API helpers ---------------------------------------------------
+# -- the code host ----------------------------------------------------
 
-GH_API="https://api.github.com"
-AUTH_HEADER="Authorization: Bearer $GITHUB_TOKEN"
-ACCEPT_HEADER="Accept: application/vnd.github+json"
-APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"
+# Every question this runner asks its host goes through `forge-cli`, the same
+# implementation the planners import. No URL, no auth header and no API
+# version appears below it, so this solver works on whichever host the issue
+# lives on, and a host's quirks are fixed once rather than in each subsystem
+# that trips over them.
+FORGE=(forge-cli --repo "$REPO")
+
+# What a person reading this should see a change called.
+CR_NOUN="$("${FORGE[@]}" noun 2>/dev/null || echo "change request")"
+[ -n "$CR_NOUN" ] || CR_NOUN="change request"
 
 export FIXER_BOT_LOGIN_VAL="$BOT_LOGIN"
 export FIXER_ISSUE_NUM="$ISSUE_NUM"
@@ -458,46 +525,51 @@ export FIXER_ISSUE_NUM="$ISSUE_NUM"
 # OR whose head ref starts with `issue-<n>-`. Output: JSON array of
 # {number, head_ref, html_url, title}.
 fetch_open_prs_for_issue() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls?state=open&per_page=100" \
-  | python3 -c "
-import sys, json, re, os
-n = os.environ['FIXER_ISSUE_NUM']
-pat = re.compile(r'\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#' + n + r'\\b', re.IGNORECASE)
-prefix = f'issue-{n}-'
+  # WHICH changes close this issue is the forge's question now: linking by
+  # branch name or by closing keyword is the same rule on both hosts, and it
+  # was written out twice — here and in the planner — with only one of the two
+  # ever fixed when it was wrong.
+  "${FORGE[@]}" change-requests-for-issue --number "$ISSUE_NUM" 2>/dev/null \
+  | REPO="$REPO" python3 -c "
+import sys, json, os, subprocess
+try:
+    numbers = json.load(sys.stdin)
+except Exception:
+    numbers = []
 out = []
-for p in json.load(sys.stdin):
-    body = p.get('body') or ''
-    head_ref = (p.get('head') or {}).get('ref','')
-    if pat.search(body) or head_ref.startswith(prefix):
-        out.append({
-            'number': p['number'],
-            'head_ref': head_ref,
-            'html_url': p['html_url'],
-            'title': p['title'],
-        })
+for n in numbers if isinstance(numbers, list) else []:
+    raw = subprocess.run(['forge-cli', '--repo', os.environ['REPO'],
+                          'change-request', '--number', str(n)],
+                         capture_output=True, text=True)
+    if raw.returncode != 0:
+        continue
+    try:
+        cr = json.loads(raw.stdout)
+    except Exception:
+        continue
+    out.append({'number': cr.get('number'),
+                'head_ref': cr.get('headRef') or '',
+                'html_url': cr.get('url') or '',
+                'title': cr.get('title') or ''})
 print(json.dumps(out))
 "
 }
 
 # All comments on the issue (used to seed the agent's context).
 fetch_all_comments() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100"
+  "${FORGE[@]}" comments --number "$ISSUE_NUM"
 }
 
 # Issue body itself.
 fetch_issue_body() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
-  | python3 -c "import sys,json; i=json.load(sys.stdin); print(i.get('body') or '')"
+  "${FORGE[@]}" issue --number "$ISSUE_NUM" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or '')"
 }
 
 # Issue state ("open" or "closed"). Used to trigger full wipe on close.
 fetch_issue_state() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','open'))"
+  "${FORGE[@]}" issue --number "$ISSUE_NUM" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('state') or 'open')"
 }
 
 # Repository owner login — the @-mention target for any question the
@@ -515,8 +587,7 @@ repo_owner_login() {
 # our own posts.
 fetch_new_mentions() {
   local since_id="$1"
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" \
+  "${FORGE[@]}" comments --number "$ISSUE_NUM" \
   | python3 -c "
 import sys, json, re, os
 since = int('${since_id:-0}')
@@ -524,37 +595,35 @@ bot = os.environ['FIXER_BOT_LOGIN_VAL'].lower()
 mention_re = re.compile(r'@' + re.escape(bot) + r'\b', re.IGNORECASE)
 out = []
 for c in json.load(sys.stdin):
-    if c['id'] <= since:
+    if (c.get('id') or 0) <= since:
         continue
-    if (c.get('user') or {}).get('login', '').lower() == bot:
+    author = (c.get('author') or {}).get('username', '')
+    if author.lower() == bot:
         continue
     body = c.get('body') or ''
     if not mention_re.search(body):
         continue
-    out.append({
-        'id': c['id'],
-        'user': c['user']['login'],
-        'body': body,
-        'html_url': c.get('html_url'),
-    })
+    out.append({'id': c.get('id'), 'user': author, 'body': body})
 print(json.dumps(out))
 "
 }
 
 react_to_comment() {
   local cid="$1"
-  curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    -H 'Content-Type: application/json' \
-    -d '{"content":"+1"}' \
-    "$GH_API/repos/$REPO/issues/comments/$cid/reactions" >/dev/null 2>&1 \
-    && echo "[react] thumbs-up on comment $cid" \
-    || echo "[react] FAILED on comment $cid"
+  # The ISSUE travels with the comment id: one host addresses a comment on its
+  # own and the other only through the item it belongs to, and asking for both
+  # is what lets either of them answer.
+  if "${FORGE[@]}" react --number "$ISSUE_NUM" --comment-id "$cid" --emoji "+1" \
+       >/dev/null 2>&1; then
+    echo "[react] acknowledged comment $cid"
+  else
+    echo "[react] FAILED on comment $cid"
+  fi
 }
 
 most_recent_comment_id() {
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" \
-  | python3 -c "import sys,json; cs=json.load(sys.stdin); print(max((c['id'] for c in cs), default=0))"
+  "${FORGE[@]}" comments --number "$ISSUE_NUM" \
+  | python3 -c "import sys,json; print(max((c.get('id') or 0 for c in json.load(sys.stdin)), default=0))"
 }
 
 # CI fingerprint: a stable token for the CI state on the PR head. The
@@ -573,29 +642,35 @@ most_recent_comment_id() {
 #   - push of a fix → sha7 changes → wake
 #   - last check settles → settled prefix → wake
 #   - CI flaps red after a hotfix attempt → still wakes via sha
+# The head commit of a change, asked once and reused. Four helpers below need
+# it and each used to fetch it for itself.
+head_sha_of_pr() {
+  "${FORGE[@]}" change-request --number "$1" 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('headSha') or '')" 2>/dev/null
+}
+
 ci_fingerprint_for_pr() {
   local pr_num="$1"
   local head_sha
-  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  head_sha="$(head_sha_of_pr "$pr_num")"
   if [ -z "$head_sha" ]; then echo "unknown"; return; fi
   local sha7="${head_sha:0:7}"
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
+  # Each check reduced to the SAME four words every other gate uses. It used
+  # to hash raw conclusions, which meant this file carried its own opinion of
+  # what a conclusion means — a fifth one, quietly different from the rest.
+  "${FORGE[@]}" check-list --sha "$head_sha" 2>/dev/null \
   | SHA7="$sha7" python3 -c "
 import sys, json, hashlib, os
 sha7 = os.environ['SHA7']
 try:
-    d = json.load(sys.stdin)
+    runs = json.load(sys.stdin)
 except Exception:
     print('unknown'); sys.exit(0)
-runs = d.get('check_runs', [])
 if not runs:
     print(f'no-checks:{sha7}'); sys.exit(0)
-if any(r.get('status') != 'completed' for r in runs):
+if any(r.get('state') == 'pending' for r in runs):
     print(f'in-progress:{sha7}'); sys.exit(0)
-completed = sorted([(r['name'], r.get('conclusion') or 'unknown') for r in runs])
+completed = sorted((r.get('name') or '', r.get('state') or '') for r in runs)
 h = hashlib.sha256(repr(completed).encode()).hexdigest()[:16]
 print(f'settled:{sha7}:{h}')
 "
@@ -608,27 +683,21 @@ print(f'settled:{sha7}:{h}')
 ci_summary_text_for_pr() {
   local pr_num="$1"
   local head_sha
-  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  head_sha="$(head_sha_of_pr "$pr_num")"
   if [ -z "$head_sha" ]; then echo "(could not fetch CI status)"; return; fi
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
+  "${FORGE[@]}" check-list --sha "$head_sha" 2>/dev/null \
   | python3 -c "
 import sys, json
 try:
-    d = json.load(sys.stdin)
+    runs = json.load(sys.stdin)
 except Exception:
-    print('(unparseable check-runs response)'); sys.exit(0)
-runs = d.get('check_runs', [])
+    print('(could not read the checks)'); sys.exit(0)
 if not runs:
-    print('(no checks reported yet on head sha)'); sys.exit(0)
-for r in sorted(runs, key=lambda x: x['name']):
-    status = r.get('status','?')
-    conclusion = r.get('conclusion') or '-'
-    url = r.get('html_url','')
-    marker = '✅' if conclusion == 'success' else ('❌' if conclusion in ('failure','cancelled','timed_out') else '⏳')
-    print(f'{marker} {r[\"name\"]:35s} status={status:12s} conclusion={conclusion:10s} {url}')
+    print('(no checks reported yet on the head commit)'); sys.exit(0)
+marks = {'green': '\u2705', 'failed': '\u274c', 'pending': '\u23f3'}
+for r in sorted(runs, key=lambda x: x.get('name') or ''):
+    state = r.get('state') or 'pending'
+    print(f\"{marks.get(state, '\u23f3')} {(r.get('name') or '?'):35s} {state}\")
 "
 }
 
@@ -641,52 +710,29 @@ for r in sorted(runs, key=lambda x: x['name']):
 ci_failing_logs_for_pr() {
   local pr_num="$1"
   local head_sha
-  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
-  if [ -z "$head_sha" ]; then return 0; fi
-  # Pull check-runs and pick out the failing job_ids from details_url
-  # (format: https://github.com/<owner>/<repo>/actions/runs/<run_id>/job/<job_id>).
-  local FAILED_JOBS
-  FAILED_JOBS="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
-  | python3 -c "
-import sys, json, re
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for r in d.get('check_runs', []):
-    if r.get('conclusion') not in ('failure', 'cancelled', 'timed_out'):
-        continue
-    m = re.search(r'/runs/(\d+)/job/(\d+)', r.get('details_url') or '')
-    if not m:
-        continue
-    print(f\"{r['name']}\t{m.group(2)}\")
-" 2>/dev/null)"
-  if [ -z "$FAILED_JOBS" ]; then return 0; fi
-  while IFS=$'\t' read -r jobname jobid; do
-    [ -n "$jobid" ] || continue
-    echo "### ❌ $jobname"
-    echo
-    echo '```'
-    # The logs endpoint returns 302 to an Azure blob URL; -L follows it.
-    curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      "$GH_API/repos/$REPO/actions/jobs/$jobid/logs" 2>/dev/null \
-    | python3 -c "
+  head_sha="$(head_sha_of_pr "$pr_num")"
+  [ -n "$head_sha" ] || return 0
+  # WHICH job failed and WHERE its log lives is the host's business — this
+  # used to dig a job id out of a URL with a regex, which is a private detail
+  # of one host's web routes and has no counterpart anywhere else.
+  local raw
+  raw="$("${FORGE[@]}" failing-check-log --sha "$head_sha" 2>/dev/null || true)"
+  [ -n "$raw" ] || return 0
+  echo "### \u274c failing check"
+  echo
+  echo '```'
+  printf '%s' "$raw" | python3 -c "
 import sys, re
 raw = sys.stdin.read()
-# Strip ANSI + the leading ISO8601 timestamp on each line for legibility.
+# Strip ANSI and the leading timestamp each runner prefixes, for legibility.
 ansi = re.compile(r'\x1b\\[[0-9;]*m')
 ts = re.compile(r'^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z\\s*')
-lines = [ts.sub('', ansi.sub('', ln)).rstrip() for ln in raw.split('\\n')]
-# 1. Show every line that looks like a failure signal
+lines = [ts.sub('', ansi.sub('', ln)).rstrip() for ln in raw.split('\n')]
 patterns = re.compile(
-    r'\\b(error|ERROR|FAIL\\b|✗|✘|Failing:|AssertionError|Exception|Traceback|threshold|does not meet|below|not met|coverage for|expected.*to|ENOENT|exit code [1-9])\\b',
+    r'\\b(error|ERROR|FAIL\\b|\u2717|\u2718|Failing:|AssertionError|Exception|Traceback|threshold|does not meet|below|not met|coverage for|expected.*to|ENOENT|exit code [1-9])\\b',
     re.IGNORECASE,
 )
 hits = [ln for ln in lines if patterns.search(ln)]
-# 2. Plus the last 30 raw lines (often contain the summary)
 tail = [ln for ln in lines if ln.strip()][-30:]
 seen = set()
 out = []
@@ -694,11 +740,10 @@ for ln in hits[:40] + ['---'] + tail:
     if ln in seen: continue
     seen.add(ln)
     out.append(ln[:240])
-print('\\n'.join(out))
+print('\n'.join(out))
 " 2>/dev/null
-    echo '```'
-    echo
-  done <<< "$FAILED_JOBS"
+  echo '```'
+  echo
 }
 
 # CI gate: returns "green" if every check-run on the PR's head SHA
@@ -709,44 +754,36 @@ print('\\n'.join(out))
 ci_status_for_pr() {
   local pr_num="$1"
   local head_sha
-  head_sha=$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$pr_num" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['head']['sha'])" 2>/dev/null)
+  head_sha="$(head_sha_of_pr "$pr_num")"
   if [ -z "$head_sha" ]; then
     echo "unknown"
     return
   fi
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null \
-  | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print('unknown'); sys.exit(0)
-runs = d.get('check_runs', [])
-if not runs:
-    print('pending')
-elif all(r.get('status') == 'completed' and r.get('conclusion') == 'success' for r in runs):
-    print('green')
-else:
-    print('not_green')
-"
+  # The gate's own vocabulary, from the one place check semantics are decided.
+  # `none` — a commit nobody ran anything on — is NOT green here: it says
+  # nothing about whether the change works, and treating it as a pass is how a
+  # change reaches review with nothing having tested it.
+  local state
+  state="$("${FORGE[@]}" checks --sha "$head_sha" 2>/dev/null || echo unknown)"
+  case "$state" in
+    green)            echo "green" ;;
+    pending|none|"")  echo "pending" ;;
+    failed)           echo "not_green" ;;
+    *)                echo "unknown" ;;
+  esac
 }
 
 # List requested-reviewer logins on the PR (one per line).
 fetch_pr_reviewers() {
-  local pr_num="$1"
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$pr_num/requested_reviewers" 2>/dev/null \
+  "${FORGE[@]}" review-requests --number "$1" 2>/dev/null \
   | python3 -c "
 import sys, json
 try:
-    d = json.load(sys.stdin)
+    for name in json.load(sys.stdin):
+        if name:
+            print(name)
 except Exception:
-    sys.exit(0)
-for u in d.get('users', []):
-    print(u['login'])
+    pass
 "
 }
 
@@ -767,18 +804,14 @@ enforce_no_reviewer_when_ci_red() {
     echo "[ci-gate] PR #$pr_num CI green and reviewers=[$(echo "$reviewers" | tr '\n' ',' | sed 's/,$//')] — allowed"
     return 0
   fi
-  local reviewers_json
-  reviewers_json="$(echo "$reviewers" | python3 -c "
-import sys, json
-logins = [l.strip() for l in sys.stdin if l.strip()]
-print(json.dumps({'reviewers': logins}))
-")"
-  curl -fsSL -X DELETE -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    -H 'Content-Type: application/json' \
-    -d "$reviewers_json" \
-    "$GH_API/repos/$REPO/pulls/$pr_num/requested_reviewers" >/dev/null 2>&1 \
-    && echo "[ci-gate] PR #$pr_num CI=$status — removed reviewer(s) [$(echo "$reviewers" | tr '\n' ',' | sed 's/,$//')] (rule 9: no review until all checks green)" \
-    || echo "[ci-gate] PR #$pr_num CI=$status — FAILED to remove reviewers"
+  local reviewer_csv
+  reviewer_csv="$(echo "$reviewers" | tr '\n' ',' | sed 's/,$//')"
+  if "${FORGE[@]}" unrequest-review --number "$pr_num" \
+       --reviewers "$reviewer_csv" >/dev/null 2>&1; then
+    echo "[ci-gate] #$pr_num CI=$status — withdrew the review request from [$reviewer_csv] (rule 9: no review until all checks are green)"
+  else
+    echo "[ci-gate] #$pr_num CI=$status — FAILED to withdraw the review request"
+  fi
 }
 
 # -- work-item status --------------------------------------------------
@@ -789,10 +822,14 @@ print(json.dumps({'reviewers': logins}))
 # operator's intent at the moment of closing and never overwrites it.
 
 post_issue_comment() { # $1 = body
-  BODY="$1" python3 -c 'import os,json;print(json.dumps({"body":os.environ["BODY"]}))' \
-  | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments" >/dev/null 2>&1
+  local _bodyf _rc
+  _bodyf="$(mktemp)"
+  printf '%s' "$1" > "$_bodyf"
+  "${FORGE[@]}" comment --number "$ISSUE_NUM" --body-file "$_bodyf" \
+    >/dev/null 2>&1
+  _rc=$?
+  rm -f "$_bodyf"
+  return $_rc
 }
 
 # Move the issue to a NON-TERMINAL status. Refuses on a closed issue.
@@ -824,21 +861,23 @@ print(json.dumps({'add': add, 'remove': remove}))
   local add remove
   add="$(printf '%s' "$updates" | python3 -c "import sys,json;print(json.dumps(json.load(sys.stdin)['add']))")"
   remove="$(printf '%s' "$updates" | python3 -c "import sys,json;print('\n'.join(json.load(sys.stdin)['remove']))")"
-  if [ "$add" != "[]" ]; then
-    printf '%s' "{\"labels\": $add}" \
-    | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-        -H 'Content-Type: application/json' -d @- \
-        "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels" >/dev/null 2>&1 \
-      && echo "[status] #$ISSUE_NUM → $want" \
-      || echo "[status] WARNING: could not set '$want' on #$ISSUE_NUM"
+  local add_csv
+  add_csv="$(printf '%s' "$updates" | python3 -c "import sys,json;print(','.join(json.load(sys.stdin)['add']))" 2>/dev/null)"
+  if [ -n "$add_csv" ]; then
+    if "${FORGE[@]}" add-labels --number "$ISSUE_NUM" --labels "$add_csv"; then
+      echo "[status] #$ISSUE_NUM → $want"
+    else
+      echo "[status] WARNING: could not set '$want' on #$ISSUE_NUM"
+    fi
   fi
-  # GitHub's issue PATCH has no add/remove semantics, so each removal is its
-  # own DELETE. Applying BOTH halves is what keeps two `status::` labels off
-  # one issue — GitHub does not enforce one-value-per-scope.
+  # Applying BOTH halves of the diff is what keeps two `status::` labels off
+  # one issue: no host here enforces one-value-per-scope, so the rule is the
+  # diff, and skipping the removals leaves the previous status in place beside
+  # the new one. How a removal is spelled — a URL naming the label, a field in
+  # an update — is the forge's business now.
   while IFS= read -r stale; do
     [ -n "$stale" ] || continue
-    curl -fsSL -X DELETE -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels/$(printf '%s' "$stale" | python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.stdin.read().strip()))')" \
+    "${FORGE[@]}" remove-label --number "$ISSUE_NUM" --label "$stale" \
       >/dev/null 2>&1 || true
   done <<< "$remove"
 }
@@ -848,32 +887,36 @@ print(json.dumps({'add': add, 'remove': remove}))
 # terminal status lives in the close reason — "was this delivered?" has to be
 # answerable afterwards without re-deriving it from the merge history.
 close_issue_as() { # $1 = terminal status name
-  local reason
-  reason="$(WANT="$1" python3 -c "
+  # The INTENT, not a field name. One host has a native close reason and the
+  # other writes the intent as a label; which of the two is in use is not
+  # something this runner is in a position to know, and it no longer has to.
+  local intent
+  intent="$(WANT="$1" python3 -c "
 import os, sys
 sys.path.insert(0, os.environ.get('PYTHONPATH','').split(os.pathsep)[0])
 import issue_status
-print(issue_status.close_reason(os.environ['WANT']) or '')
+want = os.environ['WANT']
+if want in issue_status.TERMINAL:
+    print('delivered' if want == issue_status.DONE else 'revoked')
 " 2>/dev/null)"
-  [ -n "$reason" ] || { echo "[status] '$1' is not a terminal status — not closing"; return 1; }
+  [ -n "$intent" ] || { echo "[status] '$1' is not a terminal status — not closing"; return 1; }
   if [ "${ISSUE_STATE:-open}" = "closed" ]; then
     echo "[status] #$ISSUE_NUM already closed — leaving its close reason alone"
     return 0
   fi
-  printf '%s' "{\"state\":\"closed\",\"state_reason\":\"$reason\"}" \
-  | curl -fsSL -X PATCH -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/issues/$ISSUE_NUM" >/dev/null 2>&1 \
-    && { echo "[status] closed #$ISSUE_NUM as $1 (state_reason=$reason)"; ISSUE_STATE=closed; return 0; } \
-    || { echo "[status] WARNING: could not close #$ISSUE_NUM"; return 1; }
+  if "${FORGE[@]}" close-issue --number "$ISSUE_NUM" "--$intent" >/dev/null 2>&1; then
+    echo "[status] closed #$ISSUE_NUM as $1 ($intent)"
+    ISSUE_STATE=closed
+    return 0
+  fi
+  echo "[status] WARNING: could not close #$ISSUE_NUM"
+  return 1
 }
 
 # -- pull-request facts ------------------------------------------------
 
 pr_head_sha() { # $1 = pr number
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$1" 2>/dev/null \
-  | python3 -c "import sys,json; print((json.load(sys.stdin).get('head') or {}).get('sha') or '')" 2>/dev/null
+  head_sha_of_pr "$1"
 }
 
 # "<mergeable_state> <draft>" — e.g. "clean false", "dirty false", "blocked true".
@@ -882,15 +925,19 @@ pr_head_sha() { # $1 = pr number
 # asynchronously and answers null while it is thinking, and reading null as
 # "not mergeable" would make every freshly-pushed head look conflicted.
 pr_merge_facts() { # $1 = pr number
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$1" 2>/dev/null \
+  "${FORGE[@]}" change-request --number "$1" 2>/dev/null \
   | python3 -c "
 import sys, json
 try:
     p = json.load(sys.stdin)
 except Exception:
     print('unknown false'); raise SystemExit(0)
-print('%s %s' % (p.get('mergeable_state') or 'unknown',
+# Mergeability is three-valued on purpose: True, False, and None for 'the host
+# has not worked it out yet'. Reading None as False makes every freshly-pushed
+# head look conflicted, and the solver then sets about fixing a conflict that
+# does not exist.
+_m = p.get('mergeable')
+print('%s %s' % ('clean' if _m is True else ('dirty' if _m is False else 'unknown'),
                  'true' if p.get('draft') else 'false'))
 " 2>/dev/null
 }
@@ -927,8 +974,7 @@ reviewer_enabled() {  # 0 = reviewer active, 1 = suspended / absent / unreachabl
 # "changes <sha>" / "" (no verdict at all). The sha comes from the verdict's
 # own first line, not from the pull request.
 pr_review_verdict() { # $1 = pr number
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$1/comments?per_page=100" 2>/dev/null \
+  "${FORGE[@]}" change-request-comments --number "$1" 2>/dev/null \
   | BOT="$BOT_LOGIN" python3 -c "
 import sys, json, re, os
 bot = os.environ['BOT'].lower()
@@ -937,7 +983,7 @@ try:
 except Exception:
     cs = []
 for c in reversed(cs if isinstance(cs, list) else []):
-    if ((c.get('user') or {}).get('login','').lower()) != bot:
+    if ((c.get('author') or {}).get('username','').lower()) != bot:
         continue
     body = (c.get('body') or '').strip()
     if not body.startswith('🔎 REVIEW RESULT:'):
@@ -1087,8 +1133,7 @@ print('1' if story_estimate.requires_approval(json.loads(os.environ['LABELS'] or
 # own review never counts — it is the same account that opened the pull
 # request, and an account approving itself is not a sign-off.
 pr_human_approval() { # $1 = pr number, $2 = head sha
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/pulls/$1/reviews?per_page=100" 2>/dev/null \
+  "${FORGE[@]}" review-verdicts --number "$1" 2>/dev/null \
   | BOT="$BOT_LOGIN" SHA="$2" python3 -c "
 import sys, json, os
 bot = os.environ['BOT'].lower()
@@ -1098,12 +1143,12 @@ try:
 except Exception:
     rs = []
 for r in reversed(rs if isinstance(rs, list) else []):
-    who = ((r.get('user') or {}).get('login') or '')
+    who = r.get('author') or ''
     if who.lower() == bot:
         continue
-    if (r.get('state') or '').upper() != 'APPROVED':
+    if (r.get('verdict') or '') != 'approved':
         continue
-    if sha and (r.get('commit_id') or '') != sha:
+    if sha and (r.get('sha') or '') != sha:
         continue     # approved an older commit; a push invalidates a sign-off
     print(who)
     break
@@ -1165,10 +1210,7 @@ approval_gate() { # $1 = pr number, $2 = head sha
 # sign-off gates exist. Deciding it here also means the decision is testable
 # without a model call.
 merge_pr() { # $1 = pr number
-  printf '%s' "{\"merge_method\":\"squash\"}" \
-  | curl -fsSL -X PUT -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/pulls/$1/merge" >/dev/null 2>&1
+  "${FORGE[@]}" merge --number "$1" >/dev/null 2>&1
 }
 
 # Does the issue body forbid the bot from merging? A pre-existing opt-out,
@@ -1316,16 +1358,14 @@ park_on_hold() {
   local labels
   touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
 
-  labels="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null \
+  labels="$("${FORGE[@]}" issue --number "$ISSUE_NUM" 2>/dev/null \
     | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-names = [str((l or {}).get('name','')) for l in (d.get('labels') or [])]
-print('\\n'.join(names))
+print('\\n'.join(str(n) for n in (d.get('labels') or [])))
 " 2>/dev/null)"
 
   # Already parked: do not write again. A no-op label write still appends a
@@ -1335,16 +1375,15 @@ print('\\n'.join(names))
     return 0
   fi
 
-  # Best-effort create; 422 means it already exists, which is fine.
-  printf '%s' '{"name":"On Hold","color":"eee600","description":"Parked, waiting on a person. Only a human removes it."}' \
-    | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-        -H 'Content-Type: application/json' -d @- \
-        "$GH_API/repos/$REPO/labels" >/dev/null 2>&1 || true
+  # Define it first: at least one host will not put a label on an issue until
+  # the label exists in the project, and the park would silently fail on any
+  # repository the bot has not parked in before. Already-defined is success.
+  "${FORGE[@]}" ensure-label --name "On Hold" --color eee600 \
+    --description "Parked, waiting on a person. Only a human removes it." \
+    >/dev/null 2>&1 || true
 
-  if printf '%s' '{"labels":["On Hold"]}' \
-    | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-        -H 'Content-Type: application/json' -d @- \
-        "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels" >/dev/null 2>&1; then
+  if "${FORGE[@]}" add-labels --number "$ISSUE_NUM" --labels "On Hold" \
+       >/dev/null 2>&1; then
     echo "[park] #$ISSUE_NUM parked On Hold — waiting on a person"
   else
     echo "[park] WARNING: could not add On Hold to #$ISSUE_NUM"
@@ -1363,8 +1402,7 @@ bot_awaiting_human_reply() {
   local target
   target="$(repo_owner_login 2>/dev/null)"
   [ -n "$target" ] || return 1
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" 2>/dev/null \
+  "${FORGE[@]}" comments --number "$ISSUE_NUM" 2>/dev/null \
   | BOT="$BOT_LOGIN" MENTION="$target" python3 -c "
 import sys, json, os
 bot = os.environ['BOT'].lower()
@@ -1377,7 +1415,7 @@ cs = cs if isinstance(cs, list) else []
 if not cs:
     sys.exit(1)
 last = cs[-1]
-author = ((last.get('user') or {}).get('login') or '').lower()
+author = ((last.get('author') or {}).get('username') or '').lower()
 body = last.get('body') or ''
 # The newest comment must be the BOT's and must @-mention the human. If the
 # human replied after it, the newest comment is theirs and the wait is over.
@@ -1549,10 +1587,12 @@ ci_red_needs_agent() { # $1 = pr number, $2 = ci fingerprint, $3 = 1 if it chang
 # because every gate below reads the same facts, and three fetches of the same
 # issue can disagree with each other mid-tick.
 
-ISSUE_JSON="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-  "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null || echo '{}')"
+ISSUE_JSON="$("${FORGE[@]}" issue --number "$ISSUE_NUM" 2>/dev/null || echo '{}')"
 ISSUE_STATE="$(printf '%s' "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state') or 'open')" 2>/dev/null || echo open)"
-ISSUE_STATE_REASON="$(printf '%s' "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state_reason') or '')" 2>/dev/null || echo '')"
+# WHY it was closed, in the bot's own words — `delivered` or `revoked`. One
+# host has a native field for this and the other reads it back off a label;
+# the runner is told the answer, never the field.
+ISSUE_CLOSED_AS="$(printf '%s' "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('closedAs') or '')" 2>/dev/null || echo '')"
 ISSUE_LABELS_JSON="$(printf '%s' "$ISSUE_JSON" | python3 -c "
 import sys, json
 try:
@@ -1562,15 +1602,15 @@ except Exception:
 print(json.dumps([str((l or {}).get('name') or '') if isinstance(l, dict) else str(l)
                   for l in (i.get('labels') or [])]))
 " 2>/dev/null || echo '[]')"
-ISSUE_STATUS="$(LABELS="$ISSUE_LABELS_JSON" STATE="$ISSUE_STATE" REASON="$ISSUE_STATE_REASON" python3 -c "
+ISSUE_STATUS="$(LABELS="$ISSUE_LABELS_JSON" STATE="$ISSUE_STATE" CLOSED_AS="$ISSUE_CLOSED_AS" python3 -c "
 import json, os, sys
 sys.path.insert(0, os.environ.get('PYTHONPATH','').split(os.pathsep)[0])
 import issue_status
-print(issue_status.status_of(json.loads(os.environ['LABELS'] or '[]'),
-                             state=os.environ['STATE'],
-                             state_reason=os.environ['REASON'] or None))
+print(issue_status.status_of_item(json.loads(os.environ['LABELS'] or '[]'),
+                                  state=os.environ['STATE'],
+                                  closed_as=os.environ['CLOSED_AS'] or None))
 " 2>/dev/null || echo 'to do')"
-echo "[status] #$ISSUE_NUM is '$ISSUE_STATUS' (state=$ISSUE_STATE reason=${ISSUE_STATE_REASON:-none})"
+echo "[status] #$ISSUE_NUM is '$ISSUE_STATUS' (state=$ISSUE_STATE closed-as=${ISSUE_CLOSED_AS:-n/a})"
 
 # A REVOKED issue: a human set `status::wont-do` or `status::duplicate` while
 # leaving it open. That is a terminal call the bot must honour rather than
@@ -1591,17 +1631,11 @@ esac
 # Which model implements THIS story, decided from its size and then from any
 # pin the issue carries.
 #
-# The size arrives in $STORY_POINTS from the spawner, which reads it off the
-# issue's `SP::<n>` label. An UNESTIMATED story defaults to 8 and never
-# qualifies for the cheap lane: under-estimating is the expensive direction —
-# it is what makes a run die half-finished — so an unknown story gets the
-# strong model. A defaulted 8 and a judged 8 route identically and are still
-# not the same fact, which is why the default is logged as one.
-case "${STORY_POINTS:-}" in
-  ''|*[!0-9]*) STORY_POINTS=8; POINTS_DEFAULTED=1 ;;
-  *)           POINTS_DEFAULTED=0 ;;
-esac
-[ "$POINTS_DEFAULTED" = "1" ] && echo "[model] $REPO#$ISSUE_NUM is unestimated — planning with the default $STORY_POINTS point(s)"
+# The size was resolved at the top of the run — $SOLVER_POINTS, with
+# $POINTS_DEFAULTED saying whether anybody actually judged it. An UNESTIMATED
+# story never qualifies for the cheap lane: under-estimating is the expensive
+# direction — it is what makes a run die half-finished — so an unknown story
+# gets the strong model.
 
 SOLVER_MODEL_KEY="solver"
 _SMALL_MAX=3
@@ -1611,11 +1645,11 @@ command -v agent_count >/dev/null 2>&1 && _SMALL_MAX="$(agent_count solver.small
 # therefore almost never empty — which would route every small story into a
 # cheap lane nobody configured.
 if [ "$POINTS_DEFAULTED" = "0" ] && [ "${_SMALL_MAX:-0}" -gt 0 ] \
-   && [ "$STORY_POINTS" -le "$_SMALL_MAX" ] 2>/dev/null \
+   && [ "$SOLVER_POINTS" -le "$_SMALL_MAX" ] 2>/dev/null \
    && command -v agent_model_raw >/dev/null 2>&1 \
    && [ -n "$(agent_model_raw solver.small 2>/dev/null)" ]; then
   SOLVER_MODEL_KEY="solver.small"
-  echo "[model] $REPO#$ISSUE_NUM is $STORY_POINTS point(s) (<= $_SMALL_MAX) — using the small-story model"
+  echo "[model] $REPO#$ISSUE_NUM is $SOLVER_POINTS point(s) (<= $_SMALL_MAX) — using the small-story model"
 fi
 
 AGENT_MODEL=""
@@ -1726,8 +1760,8 @@ if not cs:
     print('(no comments yet)')
 else:
     for c in reversed(cs):
-        user = (c.get('user') or {}).get('login','?')
-        ts = c.get('created_at','')
+        user = (c.get('author') or {}).get('username','?')
+        ts = c.get('createdAt','')
         body = (c.get('body') or '').strip()
         if len(body) > 1200:
             body = body[:1200] + '\n…[truncated]'
@@ -1754,8 +1788,8 @@ if not cs:
     print('(no comments yet)')
 else:
     for c in cs:
-        user = (c.get('user') or {}).get('login','?')
-        ts = c.get('created_at','')
+        user = (c.get('author') or {}).get('username','?')
+        ts = c.get('createdAt','')
         text = (c.get('body') or '').strip()
         if len(text) > 1200:
             text = text[:1200] + '\n…[truncated]'
@@ -1888,14 +1922,10 @@ $ASK_QUESTION
 
 Reply with \`@$BOT_LOGIN\` and your choice and I'll proceed."
 
-    # Post via authenticated API; payload built as JSON via python to
-    # avoid quoting hell in the curl -d argument.
-    REQ_PAYLOAD="$(ASK_BODY="$ASK_BODY" python3 -c 'import os,json,sys;print(json.dumps({"body":os.environ["ASK_BODY"]}))')"
-    if curl -fsSL -X POST \
-      -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' \
-      -d "$REQ_PAYLOAD" \
-      "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments" >/dev/null 2>&1; then
+    # The question goes through the seam like every other write. It used to
+    # be assembled into a JSON payload here purely to survive being an
+    # argument — a file removes both the payload and the problem.
+    if post_issue_comment "$ASK_BODY"; then
       touch "$LEXICAL_ASKED_MARKER"
       echo "[lexical-guard] ASK posted, marker written, exiting without agent invocation"
       exit 0
@@ -2395,22 +2425,21 @@ $BRANCH_INSTRUCTION
    logs, mention that explicitly in your status comment (so the
    user knows the issue is API access, not your reasoning).
 
-   **The github MCP is the ONLY authenticated path to GitHub from
-   inside the agent.** Every other channel — \`gh\` CLI, bare
-   \`curl\`, and \`web_fetch\` — runs without \$GITHUB_TOKEN
-   (the openclaw exec tool sanitizes the token from subprocesses)
-   and will fail predictably:
+   **Two authenticated paths exist, and no others.** \`forge-cli\`
+   for anything about the issue or the $CR_NOUN, and the host MCP
+   for what it does not cover. Everything else — the \`gh\` CLI,
+   a bare \`curl\`, \`web_fetch\` — runs WITHOUT the token (the
+   exec tool strips it from subprocesses) and fails predictably:
      - \`gh ...\` → \"please run gh auth login\"
-     - \`curl -H \"Authorization: Bearer \$GITHUB_TOKEN\" ...\` →
-       401 / empty (token is gone in exec)
-     - \`web_fetch https://api.github.com/...\` → 403
-       \"Must have admin rights to Repository\" (unauthenticated)
-     - \`web_fetch https://github.com/.../actions/runs/...\` →
-       404 \"Page not found\" (logged-out HTML wall)
-   When the agent finds itself reaching for any of these against
-   a github.com URL: STOP, use the github MCP instead. Re-trying
-   the same unauthenticated path is the most common LLM-time
-   waste in this codebase.
+     - a hand-written API request → 401, or an empty body
+     - \`web_fetch\` against the API → 403 \"Must have admin
+       rights\" (it is unauthenticated)
+     - \`web_fetch\` against a run's web page → 404 (a logged-out
+       HTML wall)
+   \`forge-cli --repo $REPO --help\` lists what it can answer, and
+   it works the same way whichever host this project lives on.
+   Retrying an unauthenticated path is the single most common way
+   a turn is wasted here: STOP and use one of the two.
 
    Once you have the actual error, diagnose the root cause, push a
    fix commit to the SAME branch. Post a one-line status comment

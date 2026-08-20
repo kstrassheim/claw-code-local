@@ -24,7 +24,7 @@ from harness import BUILDER, ShellTestCase
 
 RUNNER = "reviewer-runner.sh"
 
-API_START = "# -- GitHub API helpers"
+API_START = "# -- the code host"
 API_END = "# -- re-resolve the pull request"
 VERDICT_START = "# -- deterministic verdict handling"
 VERDICT_END = "# -- record what was reviewed"
@@ -41,11 +41,11 @@ class VerdictBlock(ShellTestCase):
         self.verdict = self._block(VERDICT_START, VERDICT_END, "verdict.sh")
         self.fixtures = os.path.join(self.home, "fixtures")
         os.makedirs(self.fixtures, exist_ok=True)
-        self.env["FAKE_CURL_DIR"] = "$PWD/fixtures"
-        self.env["FAKE_CURL_LOG"] = "$PWD/curl.log"
-        # No verdict comment on the pull request yet — the ordinary state at
+        self.env["FAKE_FORGE_DIR"] = "$PWD/fixtures"
+        self.env["FAKE_FORGE_LOG"] = "$PWD/forge.log"
+        # No verdict comment on the change request yet — the ordinary state at
         # the moment a run finishes.
-        self.fixture("repos_o_r_issues_7_comments", [])
+        self.fixture("comments_7", [])
 
     def _block(self, start, end, name):
         """extract_block always writes to the same path; keep both blocks."""
@@ -60,14 +60,21 @@ class VerdictBlock(ShellTestCase):
             f.write(json.dumps(payload))
 
     def requests(self):
-        path = os.path.join(self.home, "curl.log")
+        path = os.path.join(self.home, "forge.log")
         if not os.path.exists(path):
             return []
         with open(path, encoding="utf-8") as f:
             return [l.strip() for l in f if l.strip()]
 
     def posts(self):
-        return [r for r in self.requests() if r.startswith("POST ")]
+        """Everything the block SAID — a comment or a formal review.
+
+        The rule this file defends is "an incomplete run posts NOTHING", and
+        the verb names what posting means far more directly than the HTTP
+        method ever did.
+        """
+        return [r for r in self.requests()
+                if r.split()[0].split("_")[0] in ("comment", "submit-review")]
 
     def run_verdict(self, summary=None):
         if summary is not None:
@@ -80,6 +87,8 @@ class VerdictBlock(ShellTestCase):
             "PR_NUMBER=7\n"
             "GITHUB_TOKEN=token\n"
             "BOT_LOGIN=bot\n"
+            'FORGE=(forge-cli --repo "$REPO")\n'
+            'CR_NOUN="pull request"\n' 
             "HEAD_SHA=abc1234\n"
             "RUN_START_EPOCH=0\n"
             'SUMMARY_FILE="$PWD/summary.md"\n'
@@ -121,7 +130,7 @@ class VerdictBlock(ShellTestCase):
         # lookup.
         self.run_verdict()
         self.assertTrue(
-            any("issues/7/comments" in r for r in self.requests()),
+            any(r.startswith("comments") for r in self.requests()),
             self.requests())
 
     def test_a_provider_outage_is_named_as_such(self):
@@ -143,68 +152,65 @@ class VerdictBlock(ShellTestCase):
     # -- a completed run does post --------------------------------------
 
     def test_a_summary_with_findings_posts_the_comment_and_the_review(self):
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
-        self.fixture("POST_repos_o_r_pulls_7_reviews", {"id": 2})
         rc, out, err = self.run_verdict(
             "RESULT: changes required — 2 finding(s)\n\n1. a thing\n")
         self.assertEqual(rc, 0, out + err)
         self.assertIn("REACHED_END", out)
-        self.assertTrue(any("issues/7/comments" in p for p in self.posts()),
+        self.assertTrue(any(p.startswith("comment") for p in self.posts()),
                         self.posts())
-        self.assertTrue(any("pulls/7/reviews" in p for p in self.posts()),
+        self.assertTrue(any(p.startswith("submit-review") for p in self.posts()),
                         self.posts())
         self.assertIn("changes requested", out)
 
     def test_an_approved_summary_submits_an_APPROVE(self):
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
-        self.fixture("POST_repos_o_r_pulls_7_reviews", {"id": 2})
         rc, out, err = self.run_verdict("RESULT: approved\n\nall good\n")
         self.assertEqual(rc, 0, out + err)
-        self.assertIn("approved via the reviews API", out)
+        self.assertIn("approved as a formal review", out)
 
-    def test_a_refused_review_api_call_is_not_a_failed_run(self):
-        # GitHub refuses APPROVE on a pull request the token's own account
-        # authored. The RESULT comment is the verdict; the review event is a
-        # nicety.
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
-        # No fixture for the reviews endpoint => the fake curl exits non-zero.
+    def test_a_refused_review_is_not_a_failed_run(self):
+        # At least one host refuses a review from the change's own author,
+        # and here that is always the case — the solver and the reviewer are
+        # one account. The RESULT comment is the verdict; the formal review
+        # is a nicety, and losing it must not fail the run or lose the
+        # verdict that was already posted.
+        self.env["FAKE_FORGE_FAIL"] = "submit-review"
         rc, out, err = self.run_verdict("RESULT: approved\n\nall good\n")
         self.assertEqual(rc, 0, out + err)
-        self.assertIn("refused APPROVE", out)
+        self.assertIn("not recorded", out)
         self.assertIn("REACHED_END", out)
 
     def test_a_comment_that_will_not_post_is_NOT_treated_as_a_verdict(self):
         # If the comment cannot be posted there is no machine-readable
         # verdict for the solver to read, so the run is incomplete and must
         # retry — not proceed to submit a review for a verdict nobody can see.
-        # No fixture at all for the comments endpoint => the fake curl fails
-        # like a 4xx on both the read and the write.
-        os.remove(os.path.join(self.fixtures, "repos_o_r_issues_7_comments"))
+        # The write itself is refused, which is what "the verdict is not
+        # visible" actually looks like: a read with no fixture would only
+        # starve the lookup, not the posting.
+        self.env["FAKE_FORGE_FAIL"] = "comment"
         rc, out, err = self.run_verdict("RESULT: approved\n\nall good\n")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("INCOMPLETE", out)
         self.assertEqual(
-            [p for p in self.posts() if "reviews" in p], [],
+            [p for p in self.posts() if p.startswith("submit-review")], [],
             "submitted a review for a verdict that was never posted")
 
     def test_the_agents_own_comment_is_taken_as_the_verdict(self):
         # The normal path: the agent posted it itself, so the wrapper posts
         # nothing and only submits the review event.
-        self.fixture("repos_o_r_issues_7_comments", [{
-            "user": {"login": "bot"},
+        self.fixture("comments_7", [{
+            "author": {"username": "bot"},
             "created_at": "2099-01-01T00:00:00Z",
             "body": "🔎 REVIEW RESULT: APPROVED (sha abc1234)\n\n## Acceptance criteria\n1. ✅",
         }])
-        self.fixture("POST_repos_o_r_pulls_7_reviews", {"id": 2})
         rc, out, err = self.run_verdict()
         self.assertEqual(rc, 0, out + err)
         self.assertEqual([p for p in self.posts() if "comments" in p], [],
                          "posted a second verdict comment")
-        self.assertIn("approved via the reviews API", out)
+        self.assertIn("approved as a formal review", out)
 
     def test_a_verdict_for_another_sha_does_not_count(self):
-        self.fixture("repos_o_r_issues_7_comments", [{
-            "user": {"login": "bot"},
+        self.fixture("comments_7", [{
+            "author": {"username": "bot"},
             "created_at": "2099-01-01T00:00:00Z",
             "body": "🔎 REVIEW RESULT: APPROVED (sha 9999999)",
         }])
@@ -215,8 +221,8 @@ class VerdictBlock(ShellTestCase):
     def test_a_verdict_from_an_earlier_run_does_not_count(self):
         # Matching any comment for the sha meant an earlier verdict was read
         # back as this run's result, so a head could never be re-reviewed.
-        self.fixture("repos_o_r_issues_7_comments", [{
-            "user": {"login": "bot"},
+        self.fixture("comments_7", [{
+            "author": {"username": "bot"},
             "created_at": "1999-01-01T00:00:00Z",
             "body": "🔎 REVIEW RESULT: CHANGES REQUIRED (sha abc1234)",
         }])
@@ -234,7 +240,7 @@ class VerdictBlock(ShellTestCase):
         self.assertIn("INCOMPLETE", out)
 
     def test_somebody_elses_comment_is_not_the_bots_verdict(self):
-        self.fixture("repos_o_r_issues_7_comments", [{
+        self.fixture("comments_7", [{
             "user": {"login": "a-human"},
             "created_at": "2099-01-01T00:00:00Z",
             "body": "🔎 REVIEW RESULT: APPROVED (sha abc1234)",

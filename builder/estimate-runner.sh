@@ -56,10 +56,12 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 [ -r "$LIB_DIR/agent-models.sh" ] || LIB_DIR="/usr/local/bin"
 export PYTHONPATH="$LIB_DIR:${PYTHONPATH:-}"
 
-GH_API="https://api.github.com"
-AUTH_HEADER="Authorization: Bearer ${GITHUB_TOKEN:-}"
-ACCEPT_HEADER="Accept: application/vnd.github+json"
-APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"
+# Every question this runner asks a code host goes through `forge-cli`, which
+# is the same implementation the planners import. Nothing here knows a URL, an
+# auth header or an API version — so this runner works against whichever host
+# the issue actually lives on, and a host's quirks are fixed in one place
+# rather than in each subsystem that happens to hit them.
+FORGE=(forge-cli --repo "$REPO")
 
 STATE_ROOT="${HOME:-/home/node}/.openclaw"
 LOG_DIR="$STATE_ROOT/estimate-logs"
@@ -103,9 +105,7 @@ SESSION_ID="estimate-${REPO//\//-}-${ISSUE_NUM}-$(date +%s)"
 
 # --- the issue ---------------------------------------------------------------
 
-ISSUE_JSON="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-  "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null)"
-if [ -z "$ISSUE_JSON" ]; then
+if ! ISSUE_JSON="$("${FORGE[@]}" issue --number "$ISSUE_NUM")"; then
   echo "FATAL: could not read $REPO#$ISSUE_NUM — nothing estimated" >&2
   exit 1
 fi
@@ -140,7 +140,7 @@ import story_estimate
 issue = json.loads(os.environ["ISSUE_JSON"])
 points = story_estimate.points_of(issue)
 print("ok")
-print("1" if "pull_request" in issue else "")
+print("1" if issue.get("isChangeRequest") else "")
 print(issue.get("state") or "open")
 print("" if points is None else points)
 print("1" if story_estimate.wants_estimate(issue) else "")
@@ -151,9 +151,11 @@ if [ "$READ_OK" != "ok" ]; then
   exit 1
 fi
 
-# The issues endpoint serves pull requests too, and a PR is not a story.
+# On at least one host the issues collection serves change requests as well,
+# and a change request is not a story. Sizing one would be the bot estimating
+# its own output.
 if [ -n "$IS_PR" ]; then
-  echo "[estimate] $REPO#$ISSUE_NUM is a pull request, not a story — nothing to size"
+  echo "[estimate] $REPO#$ISSUE_NUM is a change request, not a story — nothing to size"
   exit 0
 fi
 if [ "$ISSUE_STATE" = "closed" ]; then
@@ -313,11 +315,11 @@ echo "[estimate] $REPO#$ISSUE_NUM -> $POINTS point(s)"
 
 # --- record it on the issue --------------------------------------------------
 #
-# GitHub has no add_labels/remove_labels on the issue PATCH: a label is ADDED
-# with a POST to the issue's labels collection and REMOVED with a DELETE naming
-# it in the URL. So the plan comes from story_estimate — which is where the
-# one-value-per-scope rule the platform does not enforce actually lives — and
-# this loop applies it, one call per removal.
+# The plan comes from story_estimate — which is where the one-value-per-scope
+# rule that no host enforces natively actually lives — and this applies it.
+# HOW a label is added or removed is the forge's business: one host adds with a
+# POST to a collection and removes by naming the label in a URL, another does
+# both in one update, and neither shape belongs in a runner.
 
 LABEL_PLAN="$(ISSUE_JSON="$ISSUE_JSON" POINTS="$POINTS" python3 -c '
 import json, os
@@ -330,10 +332,9 @@ if [ -z "$LABEL_PLAN" ]; then
   LABEL_PLAN='{"add":[],"remove":[]}'
 fi
 
-ADD_PAYLOAD="$(printf '%s' "$LABEL_PLAN" | python3 -c '
+ADD_LABELS="$(printf '%s' "$LABEL_PLAN" | python3 -c '
 import json, sys
-plan = json.load(sys.stdin)
-print(json.dumps({"labels": plan["add"]}) if plan["add"] else "")' 2>/dev/null)"
+print(",".join(json.load(sys.stdin)["add"]))' 2>/dev/null)"
 
 # The label has to EXIST in the repository before it can go on an issue, and a
 # repo the bot has never estimated in has no `SP::` labels at all. Created from
@@ -341,32 +342,33 @@ print(json.dumps({"labels": plan["add"]}) if plan["add"] else "")' 2>/dev/null)"
 # same everywhere; a 422 because it already exists is the normal case and is
 # deliberately ignored.
 ensure_label() {
-  local name="$1" payload
-  payload="$(LABEL_NAME="$name" python3 -c '
-import json, os
+  local name="$1" color description
+  # Colour and description come from story_estimate so they are the same
+  # everywhere; whether "it already exists" counts as success is the forge's
+  # business, and it says yes.
+  { read -r color; read -r description; } < <(LABEL_NAME="$name" python3 -c '
+import os
 import story_estimate
 name = os.environ["LABEL_NAME"]
 for d in story_estimate.label_definitions():
     if d["name"] == name:
-        print(json.dumps(d))
+        print(d.get("color") or "")
+        print(d.get("description") or "")
         break
 else:
-    print(json.dumps({"name": name, "color": "c5def5", "description": ""}))' 2>/dev/null)"
-  [ -n "$payload" ] || return 0
-  curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    -H 'Content-Type: application/json' -d "$payload" \
-    "$GH_API/repos/$REPO/labels" >/dev/null 2>&1 || true
+    print("")
+    print("")' 2>/dev/null)
+  "${FORGE[@]}" ensure-label --name "$name" \
+    --color "${color:-}" --description "${description:-}" >/dev/null 2>&1 || true
 }
 
 # Add BEFORE removing, so the issue is never momentarily sizeless. If the add
 # fails the old size is still there, which is a stale number; if the removal
 # ran first and the add then failed, the story would look unestimated and be
 # re-planned as a defaulted 8.
-if [ -n "$ADD_PAYLOAD" ]; then
+if [ -n "$ADD_LABELS" ]; then
   ensure_label "SP::$POINTS"
-  if curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-       -H 'Content-Type: application/json' -d "$ADD_PAYLOAD" \
-       "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels" >/dev/null 2>&1; then
+  if "${FORGE[@]}" add-labels --number "$ISSUE_NUM" --labels "$ADD_LABELS"; then
     echo "[estimate] labelled #$ISSUE_NUM SP::$POINTS"
   else
     echo "[estimate] WARNING: could not add SP::$POINTS to #$ISSUE_NUM"
@@ -375,24 +377,26 @@ else
   echo "[estimate] #$ISSUE_NUM already says SP::$POINTS — no label write"
 fi
 
-while IFS=$'\t' read -r enc name; do
-  [ -n "$enc" ] || continue
-  if curl -fsSL -X DELETE -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-       "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels/$enc" >/dev/null 2>&1; then
+# The label is named as a person writes it. Encoding it for a URL is
+# transport, and it is on the other side of the seam now — which also means a
+# label with a slash or a space in it is no longer this script's problem.
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  if "${FORGE[@]}" remove-label --number "$ISSUE_NUM" --label "$name"; then
     echo "[estimate] removed '$name' from #$ISSUE_NUM"
   else
     echo "[estimate] WARNING: could not remove '$name' from #$ISSUE_NUM"
   fi
 done < <(printf '%s' "$LABEL_PLAN" | python3 -c '
-import json, sys, urllib.parse
+import json, sys
 for name in json.load(sys.stdin)["remove"]:
-    print(urllib.parse.quote(name, safe="") + "\t" + name)' 2>/dev/null)
+    print(name)' 2>/dev/null)
 
 # --- one note ----------------------------------------------------------------
 
-NOTE_PAYLOAD="$(POINTS="$POINTS" RATIONALE="$RATIONALE" \
+NOTE_BODY="$(POINTS="$POINTS" RATIONALE="$RATIONALE" \
   SPLIT_ENABLED="$SPLIT_ENABLED" python3 -c '
-import json, os
+import os
 import story_points
 points = int(os.environ["POINTS"])
 parts = ["\U0001F4D0 **Estimate: %d story point(s)**" % points]
@@ -409,14 +413,18 @@ if os.environ.get("SPLIT_ENABLED") == "1" and story_points.is_too_big(points):
                  "smaller issues and I will pick those up.")
 parts.append("Estimated by the planning model; the size drives which model "
              "implements it. Change the `SP::` label to overrule this.")
-print(json.dumps({"body": "\n\n".join(parts)}))' 2>/dev/null)"
+print("\n\n".join(parts))' 2>/dev/null)"
 
-if [ -n "$NOTE_PAYLOAD" ]; then
-  curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-    -H 'Content-Type: application/json' -d "$NOTE_PAYLOAD" \
-    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments" >/dev/null 2>&1 \
-    && echo "[estimate] posted the estimate comment" \
-    || echo "[estimate] WARNING: could not post the estimate comment"
+# The body travels on STDIN, never as an argument: it is model output, and it
+# carries newlines, quotes and backticks that an argument would hand straight
+# to the shell.
+if [ -n "$NOTE_BODY" ]; then
+  if printf '%s' "$NOTE_BODY" \
+       | "${FORGE[@]}" comment --number "$ISSUE_NUM" --body-file -; then
+    echo "[estimate] posted the estimate comment"
+  else
+    echo "[estimate] WARNING: could not post the estimate comment"
+  fi
 fi
 
 # Record the STORY, and place it in the sprint it is being worked in.
@@ -432,16 +440,25 @@ fi
 # Never fatal — the estimate itself is already posted, and bookkeeping about
 # the work must not fail the work.
 if [ -n "${POINTS:-}" ] && command -v planning-story >/dev/null 2>&1; then
-  ISSUE_TITLE="$(printf '%s' "$ISSUE_JSON" | python3 -c \
-    'import sys,json; print((json.load(sys.stdin) or {}).get("title",""))' 2>/dev/null || echo "")"
+  # Title, labels and URL all come off the record that was already read. The
+  # URL especially: building one by hand means writing a host's domain into a
+  # runner, and the story would then link to the wrong site for any project
+  # that does not live there.
   ISSUE_LABELS="$(printf '%s' "$ISSUE_JSON" | python3 -c \
-    'import sys,json; print(",".join(str((l or {}).get("name","")) for l in ((json.load(sys.stdin) or {}).get("labels") or [])))' 2>/dev/null || echo "")"
+    'import sys,json; print(",".join(str(l) for l in ((json.load(sys.stdin) or {}).get("labels") or [])))' 2>/dev/null || echo "")"
+  ISSUE_URL="$(printf '%s' "$ISSUE_JSON" | python3 -c \
+    'import sys,json; print((json.load(sys.stdin) or {}).get("url",""))' 2>/dev/null || echo "")"
+  # The host the issue actually came from, not the one this deployment mostly
+  # uses. The story id is built from it, so guessing here would file the same
+  # issue under two different stories the day a second host is configured.
+  ISSUE_FORGE="$(printf '%s' "$ISSUE_JSON" | python3 -c \
+    'import sys,json; print((json.load(sys.stdin) or {}).get("forge",""))' 2>/dev/null || echo "")"
   planning-story \
-    --host "${PLANNING_HOST:-github}" \
+    --host "${ISSUE_FORGE:-${PLANNING_HOST:-github}}" \
     --repo "$REPO" \
     --issue "$ISSUE_NUM" \
     --title "$ISSUE_TITLE" \
-    --url "https://github.com/$REPO/issues/$ISSUE_NUM" \
+    --url "$ISSUE_URL" \
     --points "$POINTS" \
     --estimator "${AGENT_MODEL_NAME:-planning}" \
     --labels "$ISSUE_LABELS" \

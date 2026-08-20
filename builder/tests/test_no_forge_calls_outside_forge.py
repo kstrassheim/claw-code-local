@@ -48,7 +48,7 @@ PATHS = re.compile(
 
 # Files that legitimately hold transport: the implementations themselves, and
 # the tests that pin them.
-IMPLEMENTATIONS = {"forge.py"}
+IMPLEMENTATIONS = {"forge.py", "forge-cli"}
 
 # ---------------------------------------------------------------------------
 # NOT CONVERTED YET. Delete an entry when its file stops speaking REST — the
@@ -56,16 +56,11 @@ IMPLEMENTATIONS = {"forge.py"}
 # list only by failing this test.
 # ---------------------------------------------------------------------------
 ALLOWED = {
-    # The three runners. They cannot import Python, so their seam is a sourced
-    # shell library rather than this module, and converting them is the next
-    # step rather than this one.
-    "fixer-runner.sh",
-    "reviewer-runner.sh",
-    "tester-runner.sh",
-
     # The remaining subsystems, each of which reaches a host for one narrow
-    # purpose and none of which a planner depends on.
-    "estimate-runner.sh",       # sizes a story: reads the issue, writes a label
+    # purpose and none of which a planner depends on. The three RUNNERS are no
+    # longer among them: they cannot import this module, so they shell out to
+    # `forge-cli`, which is this module — one implementation, not a second one
+    # written in bash that would drift from it in silence.
     "planning",                 # records what was delivered, onto the issue
     "project-allow",            # validates a repository the owner names
     "project-instructions.sh",  # fetches a project's own instructions file

@@ -36,7 +36,10 @@ from harness import BUILDER, ShellTestCase
 RUNNER = "fixer-runner.sh"
 
 BLOCKS = {
-    "api": ("# -- GH API helpers", "# -- work-item status"),
+    # The helpers that ask the host anything. Named for what they are now —
+    # questions through one seam — rather than for the transport they used to
+    # be written in.
+    "api": ("# -- the code host", "# -- work-item status"),
     "status": ("# -- work-item status", "# -- pull-request facts"),
     "facts": ("# -- pull-request facts", "# -- autonomous review gate"),
     "review": ("# -- autonomous review gate", "# -- human sign-off gate"),
@@ -46,6 +49,12 @@ BLOCKS = {
     "escalate": ("# -- escalation", "# -- autonomous-review retry"),
     "review_retry": ("# -- autonomous-review retry", "# -- red-CI retry"),
     "ci_red_retry": ("# -- red-CI retry", "# -- issue snapshot"),
+    # The story's size and the run's budget are resolved together at the top
+    # of the runner, because two things read the size: how long this run may
+    # take, and which model implements it. The routing block below consumes
+    # what this one produces, so a routing test has to run both.
+    "size": ("# The story's SIZE, resolved once, here",
+             "# How hard this subsystem thinks."),
     "model": ("# -- model routing", "# -- detect existing PR"),
 }
 
@@ -65,6 +74,11 @@ class RunnerBlock(ShellTestCase):
                         os.path.join(self.bin, name))
         self.fixtures = os.path.join(self.home, "fixtures")
         os.makedirs(self.fixtures, exist_ok=True)
+        # The runners ask QUESTIONS now, not URLs, so the stand-in is the
+        # seam rather than the transport under it. The fake curl stays for
+        # the units that still speak HTTP directly.
+        self.env["FAKE_FORGE_DIR"] = "$PWD/fixtures"
+        self.env["FAKE_FORGE_LOG"] = "$PWD/forge.log"
         self.env["FAKE_CURL_DIR"] = "$PWD/fixtures"
         self.env["FAKE_CURL_LOG"] = "$PWD/curl.log"
         self.blocks = {}
@@ -82,6 +96,18 @@ class RunnerBlock(ShellTestCase):
     def sources(self, *names):
         return "".join(f'source "$PWD/{self.block(n)}"\n' for n in names)
 
+    def checks(self, state, name="build", sha=None):
+        """What CI did on the head, answered consistently.
+
+        Two questions are asked of a commit — the reduction that gates merge,
+        and the per-check detail a summary and a fingerprint are built from —
+        and a test that answered only one of them would pin a state the
+        runner never actually sees.
+        """
+        sha = sha or getattr(self, "HEAD", "")
+        self.fixture(f"checks_{sha}", state)
+        self.fixture(f"check-list_{sha}", [{"name": name, "state": state}])
+
     def fixture(self, slug, payload):
         with open(os.path.join(self.fixtures, slug), "w",
                   encoding="utf-8", newline="\n") as f:
@@ -95,14 +121,31 @@ class RunnerBlock(ShellTestCase):
         os.chmod(path, 0o755)
 
     def requests(self):
-        path = os.path.join(self.home, "curl.log")
+        """Every question the block asked its host, oldest first."""
+        path = os.path.join(self.home, "forge.log")
         if not os.path.exists(path):
             return []
         with open(path, encoding="utf-8") as f:
             return [l.strip() for l in f if l.strip()]
 
-    def by_method(self, method):
-        return [r for r in self.requests() if r.startswith(method + " ")]
+    def asked(self, verb):
+        """Calls of one verb. The verb IS the assertion now.
+
+        This replaced grouping by HTTP method, which was always a proxy for
+        the question — `POST` meant "wrote something", and which something
+        depended on reading the URL. A gate that must not comment is now
+        pinned as `asked("comment") == []`, which is what the test means.
+        """
+        return [r for r in self.requests() if r.split()[0].split("_")[0] == verb]
+
+    def wrote_anything(self):
+        """Every call that CHANGES something. Gates are pinned on this."""
+        writes = ("comment", "add-labels", "remove-label", "close-issue",
+                  "merge", "submit-review", "request-review",
+                  "unrequest-review", "react", "create-issue",
+                  "comment-on-commit", "ensure-label")
+        return [r for r in self.requests()
+                if r.split()[0].split("_")[0] in writes]
 
     def state(self, name):
         path = os.path.join(self.home, name)
@@ -121,13 +164,18 @@ class RunnerBlock(ShellTestCase):
             "BOT_LOGIN": "bot",
             "GITHUB_TOKEN": "token",
             "ISSUE_STATE": "open",
-            "ISSUE_STATE_REASON": "",
+            "ISSUE_CLOSED_AS": "",
             "ISSUE_LABELS_JSON": "[]",
             "AGENT_THINKING": "",
         }
         values.update({k: str(v) for k, v in overrides.items()})
         lines = ['export PYTHONPATH="$PWD/bin"', "set -u"]
         lines += [f'{k}={_q(v)}' for k, v in sorted(values.items())]
+        lines += [
+            # The seam the blocks reach their host through.
+            'FORGE=(forge-cli --repo "$REPO")',
+            'CR_NOUN="pull request"',
+        ]
         lines += [
             'AWAITING_REVIEW_MARKER="$PWD/awaiting-review"',
             'AWAITING_HUMAN_MARKER="$PWD/awaiting-human"',
@@ -184,10 +232,13 @@ class ModelRouting(RunnerBlock):
             + ("" if points is None else f"export STORY_POINTS={_q(points)}\n")
             + 'source "$PWD/bin/agent-limits.sh"\n'
             + 'source "$PWD/bin/agent-models.sh"\n'
-            + self.sources("model")
+            + self.sources("size", "model")
             + 'echo "KEY=$SOLVER_MODEL_KEY"\n'
             + 'echo "MODEL=$AGENT_MODEL"\n'
-            + 'echo "POINTS=$STORY_POINTS/$POINTS_DEFAULTED"\n'
+            # $SOLVER_POINTS, not $STORY_POINTS: the raw value is left exactly
+            # as the spawner sent it so the planning record cannot be written
+            # from a number the bot invented. The WORKING size is what routes.
+            + 'echo "POINTS=$SOLVER_POINTS/$POINTS_DEFAULTED"\n'
         )
         rc, out, err = self.sh(script, **env)
         self.assertEqual(rc, 0, out + err)
@@ -290,8 +341,6 @@ class StatusTransitions(RunnerBlock):
 
     def setUp(self):
         super().setUp()
-        self.fixture("POST_repos_o_r_issues_7_labels", [])
-        self.fixture("PATCH_repos_o_r_issues_7", {"number": 7})
 
     def run_status(self, call, **overrides):
         return self.sh(self.preamble(**overrides)
@@ -301,8 +350,7 @@ class StatusTransitions(RunnerBlock):
     def test_pickup_sets_in_progress(self):
         rc, out, err = self.run_status('set_issue_status "in progress"')
         self.assertEqual(rc, 0, out + err)
-        self.assertTrue(any("issues/7/labels" in p for p in self.by_method("POST")),
-                        self.requests())
+        self.assertTrue(self.asked("add-labels"), self.requests())
         self.assertIn("→ in progress", out)
 
     def test_an_issue_already_in_progress_is_left_alone(self):
@@ -313,7 +361,7 @@ class StatusTransitions(RunnerBlock):
             'set_issue_status "in progress"',
             ISSUE_LABELS_JSON=json.dumps(["status::in-progress"]))
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(self.by_method("POST"), [], self.requests())
+        self.assertEqual(self.wrote_anything(), [], self.requests())
 
     def test_a_contradictory_status_label_is_removed_as_well_as_added(self):
         # GitHub does not enforce one-value-per-scope, so both halves of the
@@ -322,8 +370,8 @@ class StatusTransitions(RunnerBlock):
             'set_issue_status "in progress"',
             ISSUE_LABELS_JSON=json.dumps(["status::wont-do"]))
         self.assertEqual(rc, 0, out + err)
-        self.assertTrue(self.by_method("POST"), self.requests())
-        self.assertTrue(any("labels/status" in r for r in self.by_method("DELETE")),
+        self.assertTrue(self.wrote_anything(), self.requests())
+        self.assertTrue(any("status" in r for r in self.asked("remove-label")),
                         self.requests())
 
     # -- the rule that must never be softened ---------------------------
@@ -335,8 +383,8 @@ class StatusTransitions(RunnerBlock):
         rc, out, err = self.run_status('set_issue_status "in progress"',
                                        ISSUE_STATE="closed")
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(self.by_method("POST"), [], self.requests())
-        self.assertEqual(self.by_method("PATCH"), [], self.requests())
+        self.assertEqual(self.wrote_anything(), [], self.requests())
+        self.assertEqual(self.asked("close-issue"), [], self.requests())
         self.assertIn("that would reopen it", out)
 
     # -- terminal states ------------------------------------------------
@@ -344,8 +392,8 @@ class StatusTransitions(RunnerBlock):
     def test_a_delivery_closes_the_issue_as_completed(self):
         rc, out, err = self.run_status("close_issue_as done")
         self.assertEqual(rc, 0, out + err)
-        self.assertTrue(self.by_method("PATCH"), self.requests())
-        self.assertIn("state_reason=completed", out)
+        self.assertTrue(self.asked("close-issue"), self.requests())
+        self.assertIn("(delivered)", out)
 
     def test_a_revoke_closes_the_issue_as_not_planned(self):
         # The distinction is the whole reason terminal status lives in the
@@ -353,24 +401,24 @@ class StatusTransitions(RunnerBlock):
         # without re-deriving it from the merge history.
         rc, out, err = self.run_status("""close_issue_as "won't do" """)
         self.assertEqual(rc, 0, out + err)
-        self.assertIn("state_reason=not_planned", out)
+        self.assertIn("(revoked)", out)
 
     def test_a_duplicate_is_also_not_planned(self):
         rc, out, err = self.run_status("close_issue_as duplicate")
         self.assertEqual(rc, 0, out + err)
-        self.assertIn("state_reason=not_planned", out)
+        self.assertIn("(revoked)", out)
 
     def test_an_already_closed_issue_keeps_its_close_reason(self):
         # Re-closing would rewrite the reason a human chose.
         rc, out, err = self.run_status("close_issue_as done",
                                        ISSUE_STATE="closed")
         self.assertEqual(rc, 0, out + err)
-        self.assertEqual(self.by_method("PATCH"), [], self.requests())
+        self.assertEqual(self.asked("close-issue"), [], self.requests())
 
     def test_a_non_terminal_status_is_refused_by_the_close_path(self):
         rc, out, err = self.run_status('close_issue_as "in progress" || echo REFUSED')
         self.assertIn("REFUSED", out)
-        self.assertEqual(self.by_method("PATCH"), [], self.requests())
+        self.assertEqual(self.asked("close-issue"), [], self.requests())
 
 
 # ---------------------------------------------------------------------------
@@ -383,12 +431,11 @@ class ReviewGate(RunnerBlock):
 
     def setUp(self):
         super().setUp()
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": self.HEAD},
-                                           "mergeable_state": "clean",
+        self.fixture("change-request_7", {"headSha": self.HEAD,
+                                           "mergeable": True,
                                            "draft": False})
-        self.fixture("repos_o_r_issues_7_comments", [])
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
-        self.fixture("POST_repos_o_r_pulls_7_requested_reviewers", {})
+        self.fixture("comments_7", [])
+        self.fixture("change-request-comments_7", [])
         self.reviewer_active()
 
     def reviewer_active(self):
@@ -401,8 +448,8 @@ class ReviewGate(RunnerBlock):
         self.kubectl('exit 1')
 
     def verdict(self, text, login="bot"):
-        self.fixture("repos_o_r_issues_7_comments",
-                     [{"user": {"login": login}, "body": text}])
+        self.fixture("change-request-comments_7",
+                     [{"author": {"username": login}, "body": text}])
 
     def gate(self):
         return self.sh(self.preamble()
@@ -426,7 +473,7 @@ class ReviewGate(RunnerBlock):
         rc, out, _ = self.gate()
         self.assertIn("HELD", out)
         self.assertIn("requires CHANGES", out)
-        self.assertEqual([p for p in self.by_method("POST")
+        self.assertEqual([p for p in self.wrote_anything()
                           if "requested_reviewers" in p], [])
 
     def test_an_approval_for_an_older_commit_does_not_carry(self):
@@ -445,15 +492,14 @@ class ReviewGate(RunnerBlock):
         # sha it was made for is recorded.
         rc, out, err = self.gate()
         self.assertIn("HELD", out, out + err)
-        self.assertTrue(any("issues/7/comments" in p for p in self.by_method("POST")),
-                        self.requests())
+        self.assertTrue(self.asked("comment"), self.requests())
         self.assertEqual(self.state("awaiting-review"), self.HEAD)
 
     def test_the_request_is_posted_once_per_head_not_once_per_tick(self):
         self.gate()
-        first = len([p for p in self.by_method("POST") if "issues/7/comments" in p])
+        first = len(self.asked("comment"))
         self.gate()
-        second = len([p for p in self.by_method("POST") if "issues/7/comments" in p])
+        second = len(self.asked("comment"))
         self.assertEqual(first, 1)
         self.assertEqual(second, 1, "asked again for the same head")
 
@@ -468,7 +514,7 @@ class ReviewGate(RunnerBlock):
         self.assertIn("HELD", out)
 
     def test_an_unresolvable_head_holds_the_gate(self):
-        os.remove(os.path.join(self.fixtures, "repos_o_r_pulls_7"))
+        os.remove(os.path.join(self.fixtures, "change-request_7"))
         rc, out, _ = self.gate()
         self.assertIn("HELD", out)
 
@@ -481,7 +527,7 @@ class ReviewGate(RunnerBlock):
         rc, out, err = self.gate()
         self.assertIn("MAY_MERGE", out, out + err)
         self.assertIn("suspended", out)
-        self.assertEqual(self.by_method("POST"), [], self.requests())
+        self.assertEqual(self.wrote_anything(), [], self.requests())
 
     def test_a_suspended_reviewer_clears_a_wait_left_over_from_before(self):
         with open(os.path.join(self.home, "awaiting-review"), "w",
@@ -510,11 +556,10 @@ class ApprovalGate(RunnerBlock):
 
     def setUp(self):
         super().setUp()
-        self.fixture("repos_o_r_pulls_7_reviews", [])
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
+        self.fixture("review-verdicts_7", [])
 
     def reviews(self, *entries):
-        self.fixture("repos_o_r_pulls_7_reviews", list(entries))
+        self.fixture("review-verdicts_7", list(entries))
 
     def gate(self, labels=None, sha=None):
         return self.sh(
@@ -526,31 +571,28 @@ class ApprovalGate(RunnerBlock):
     def test_no_approval_label_means_no_gate(self):
         rc, out, err = self.gate(labels="[]")
         self.assertIn("MAY_MERGE", out, out + err)
-        self.assertEqual(self.by_method("POST"), [], self.requests())
+        self.assertEqual(self.wrote_anything(), [], self.requests())
 
     def test_the_label_holds_the_merge_and_asks_the_owner(self):
         rc, out, err = self.gate()
         self.assertIn("HELD", out, out + err)
-        self.assertTrue(any("issues/7/comments" in p for p in self.by_method("POST")),
-                        self.requests())
+        self.assertTrue(self.asked("comment"), self.requests())
         self.assertEqual(self.state("approval-asked"), self.HEAD)
 
     def test_the_question_is_asked_once_per_head_not_once_per_tick(self):
         self.gate()
         self.gate()
-        self.assertEqual(len([p for p in self.by_method("POST")
-                              if "issues/7/comments" in p]), 1)
+        self.assertEqual(len(self.asked("comment")), 1)
 
     def test_a_new_head_asks_again(self):
         # An approval covers the code it was given for.
         self.gate()
         self.gate(sha="ffffffffffffffffffffffffffffffffffffffff")
-        self.assertEqual(len([p for p in self.by_method("POST")
-                              if "issues/7/comments" in p]), 2)
+        self.assertEqual(len(self.asked("comment")), 2)
 
     def test_a_human_approval_for_this_head_opens_the_gate(self):
-        self.reviews({"user": {"login": "a-human"}, "state": "APPROVED",
-                      "commit_id": self.HEAD})
+        self.reviews({"author": "a-human", "verdict": "approved",
+                      "sha": self.HEAD})
         rc, out, err = self.gate()
         self.assertIn("MAY_MERGE", out, out + err)
         self.assertEqual(self.state("approval-granted"), self.HEAD)
@@ -558,20 +600,20 @@ class ApprovalGate(RunnerBlock):
     def test_the_bots_own_approval_is_not_a_sign_off(self):
         # It is the same account that opened the pull request. An account
         # approving itself is not a human looking at the code.
-        self.reviews({"user": {"login": "bot"}, "state": "APPROVED",
-                      "commit_id": self.HEAD})
+        self.reviews({"author": "bot", "verdict": "approved",
+                      "sha": self.HEAD})
         rc, out, _ = self.gate()
         self.assertIn("HELD", out)
 
     def test_an_approval_of_an_earlier_commit_does_not_carry(self):
-        self.reviews({"user": {"login": "a-human"}, "state": "APPROVED",
-                      "commit_id": "0000000000000000000000000000000000000000"})
+        self.reviews({"author": "a-human", "verdict": "approved",
+                      "sha": "0000000000000000000000000000000000000000"})
         rc, out, _ = self.gate()
         self.assertIn("HELD", out)
 
     def test_a_comment_review_is_not_an_approval(self):
-        self.reviews({"user": {"login": "a-human"}, "state": "COMMENTED",
-                      "commit_id": self.HEAD})
+        self.reviews({"author": "a-human", "verdict": "commented",
+                      "sha": self.HEAD})
         rc, out, _ = self.gate()
         self.assertIn("HELD", out)
 
@@ -581,7 +623,7 @@ class ApprovalGate(RunnerBlock):
             f.write(self.HEAD)
         rc, out, err = self.gate()
         self.assertIn("MAY_MERGE", out, out + err)
-        self.assertEqual(self.by_method("POST"), [], self.requests())
+        self.assertEqual(self.wrote_anything(), [], self.requests())
 
     def test_removing_the_label_clears_a_pending_wait(self):
         with open(os.path.join(self.home, "approval-asked"), "w",
@@ -621,19 +663,15 @@ class MergeOrder(RunnerBlock):
 
     def setUp(self):
         super().setUp()
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": self.HEAD},
-                                           "mergeable_state": "clean",
+        self.fixture("change-request_7", {"headSha": self.HEAD,
+                                           "mergeable": True,
                                            "draft": False})
-        self.fixture(f"repos_o_r_commits_{self.HEAD}_check-runs",
-                     {"check_runs": [{"name": "build", "status": "completed",
-                                      "conclusion": "success"}]})
-        self.fixture("repos_o_r_issues_7_comments",
-                     [{"user": {"login": "bot"},
+        self.checks("green")
+        self.fixture("change-request-comments_7",
+                     [{"author": {"username": "bot"},
                        "body": f"🔎 REVIEW RESULT: APPROVED (sha {self.HEAD})"}])
-        self.fixture("repos_o_r_pulls_7_reviews", [])
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
-        self.fixture("PUT_repos_o_r_pulls_7_merge", {"merged": True})
-        self.fixture("PATCH_repos_o_r_issues_7", {"number": 7})
+        self.fixture("comments_7", [])
+        self.fixture("review-verdicts_7", [])
         self.kubectl("echo false")
 
     def merge(self, refuse_merge=False, **overrides):
@@ -649,34 +687,32 @@ class MergeOrder(RunnerBlock):
             + "if maybe_merge_green_pr 7; then echo MERGED; else echo NOT_MERGED; fi\n")
 
     def merged(self):
-        return [p for p in self.by_method("PUT") if p.endswith("/merge")]
+        return self.asked("merge")
 
     def test_a_green_reviewed_pull_request_is_merged_and_the_issue_closed(self):
         rc, out, err = self.merge()
         self.assertIn("MERGED", out, out + err)
         self.assertTrue(self.merged(), self.requests())
-        self.assertIn("state_reason=completed", out)
+        self.assertIn("(delivered)", out)
 
     def test_red_checks_stop_it_before_any_gate_is_consulted(self):
-        self.fixture(f"repos_o_r_commits_{self.HEAD}_check-runs",
-                     {"check_runs": [{"name": "build", "status": "completed",
-                                      "conclusion": "failure"}]})
+        self.checks("failed")
         rc, out, _ = self.merge()
         self.assertIn("NOT_MERGED", out)
         self.assertEqual(self.merged(), [])
         self.assertIn("checks are 'not_green'", out)
 
     def test_a_conflicting_branch_is_not_merged(self):
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": self.HEAD},
-                                           "mergeable_state": "dirty",
+        self.fixture("change-request_7", {"headSha": self.HEAD,
+                                           "mergeable": False,
                                            "draft": False})
         rc, out, _ = self.merge()
         self.assertIn("NOT_MERGED", out)
         self.assertIn("conflicts with the base branch", out)
 
     def test_a_draft_is_not_merged(self):
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": self.HEAD},
-                                           "mergeable_state": "clean",
+        self.fixture("change-request_7", {"headSha": self.HEAD,
+                                           "mergeable": True,
                                            "draft": True})
         rc, out, _ = self.merge()
         self.assertIn("NOT_MERGED", out)
@@ -684,7 +720,7 @@ class MergeOrder(RunnerBlock):
 
     def test_mergeability_not_computed_yet_is_ask_again_not_no(self):
         # GitHub computes it asynchronously and answers null while thinking.
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": self.HEAD},
+        self.fixture("change-request_7", {"headSha": self.HEAD,
                                            "draft": False})
         rc, out, _ = self.merge()
         self.assertIn("NOT_MERGED", out)
@@ -698,7 +734,8 @@ class MergeOrder(RunnerBlock):
     def test_the_review_gate_stops_it_before_a_human_is_ever_asked(self):
         # Order matters: asking a person to sign off on code the reviewer has
         # not passed spends their attention on something not ready for it.
-        self.fixture("repos_o_r_issues_7_comments", [])
+        self.fixture("comments_7", [])
+        self.fixture("change-request-comments_7", [])
         rc, out, _ = self.merge(ISSUE_LABELS_JSON=json.dumps(["approval"]))
         self.assertIn("NOT_MERGED", out)
         self.assertNotIn("MERGE APPROVAL REQUESTED", out)
@@ -717,7 +754,7 @@ class MergeOrder(RunnerBlock):
         rc, out, _ = self.merge(refuse_merge=True)
         self.assertIn("NOT_MERGED", out)
         self.assertIn("was refused", out)
-        self.assertEqual(self.by_method("PATCH"), [],
+        self.assertEqual(self.asked("close-issue"), [],
                          "closed the issue for a merge that never happened")
 
 
@@ -734,14 +771,18 @@ class ConflictRetry(RunnerBlock):
         self.dirty()
 
     def dirty(self, sha=None):
-        self.fixture("repos_o_r_pulls_7",
-                     {"head": {"sha": sha or self.HEAD},
-                      "mergeable_state": "dirty", "draft": False})
+        self.fixture("change-request_7",
+                     {"headSha": sha or self.HEAD,
+                      # The neutral record answers three ways: True, False,
+                      # and None for "the host has not decided yet". False is
+                      # a conflict; None is not, and reading it as one makes
+                      # every freshly-pushed head look broken.
+                      "mergeable": False, "draft": False})
 
     def clean(self):
-        self.fixture("repos_o_r_pulls_7",
-                     {"head": {"sha": self.HEAD},
-                      "mergeable_state": "clean", "draft": False})
+        self.fixture("change-request_7",
+                     {"headSha": self.HEAD,
+                      "mergeable": True, "draft": False})
 
     def check(self, cap=4):
         return self.sh(self.preamble()

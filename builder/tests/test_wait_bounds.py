@@ -62,30 +62,32 @@ def _q(s):
 class WaitBlock(RunnerBlock):
     """A runner block, plus the fixtures every wait-bound test needs."""
 
+    HEAD = HEAD
+
     def setUp(self):
         super().setUp()
         self.head(HEAD)
-        self.fixture("repos_o_r_issues_7_comments", [])
-        self.fixture("POST_repos_o_r_issues_7_comments", {"id": 1})
+        self.fixture("comments_7", [])
+        self.fixture("change-request-comments_7", [])
         self.kubectl("echo false")          # the reviewer CronJob is active
 
-    def head(self, sha, state="clean"):
-        self.fixture("repos_o_r_pulls_7", {"head": {"sha": sha},
-                                           "mergeable_state": state,
-                                           "draft": False})
+    def head(self, sha, mergeable=True):
+        self.fixture("change-request_7", {"headSha": sha,
+                                          "mergeable": mergeable,
+                                          "draft": False})
 
     def verdict(self, kind=None, sha=HEAD, login="bot"):
-        """Put (or clear) the reviewer's verdict comment on the issue."""
+        """Put (or clear) the reviewer's verdict on the change request."""
         if kind is None:
-            self.fixture("repos_o_r_issues_7_comments", [])
+            self.fixture("change-request-comments_7", [])
             return
         word = "APPROVED" if kind == "approved" else "CHANGES REQUIRED"
-        self.fixture("repos_o_r_issues_7_comments",
-                     [{"user": {"login": login},
+        self.fixture("change-request-comments_7",
+                     [{"author": {"username": login},
                        "body": f"🔎 REVIEW RESULT: {word} (sha {sha})"}])
 
     def comments_posted(self):
-        return [p for p in self.by_method("POST") if "issues/7/comments" in p]
+        return self.asked("comment")
 
     def extra_block(self, name, start, end):
         """Extract a block this suite pins that the gate tests do not."""
@@ -296,7 +298,7 @@ class ReviewRetry(WaitBlock):
         self.assertIsNone(self.state("review-retries"))
 
     def test_an_unresolvable_head_wakes_nobody(self):
-        os.remove(os.path.join(self.fixtures, "repos_o_r_pulls_7"))
+        os.remove(os.path.join(self.fixtures, "change-request_7"))
         rc, out, _ = self.check()
         self.assertIn("SLEEP", out)
 
@@ -315,12 +317,10 @@ class CiRedRetry(WaitBlock):
         self.red()
 
     def red(self):
-        self.fixture("repos_o_r_commits", {"check_runs": [
-            {"name": "build", "status": "completed", "conclusion": "failure"}]})
+        self.checks("failed")
 
     def green(self):
-        self.fixture("repos_o_r_commits", {"check_runs": [
-            {"name": "build", "status": "completed", "conclusion": "success"}]})
+        self.checks("green")
 
     def check(self, fp=None, changed=0, cap=4):
         fp = self.FP if fp is None else fp

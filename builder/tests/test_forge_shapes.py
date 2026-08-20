@@ -171,6 +171,101 @@ class LabelsWhateverShapeTheyArriveIn(unittest.TestCase):
         self.assertEqual(github()._labels(None), [])
 
 
+class AChangeRequestIsNotAStory(unittest.TestCase):
+    """`isChangeRequest` — one host serves both from the same collection."""
+
+    def test_a_change_request_read_as_an_issue_says_it_is_one(self):
+        # The issues collection on this host returns pull requests too, and
+        # they look exactly like issues apart from one extra key. A caller
+        # that sizes one is estimating the bot's own output; a caller that
+        # plans work on one opens a change request against a change request.
+        rec = github()._issue(dict(GITHUB_ISSUE, pull_request={"url": "..."}),
+                              "acme/web")
+        self.assertTrue(rec["isChangeRequest"])
+
+    def test_an_ordinary_issue_says_it_is_not(self):
+        self.assertFalse(github()._issue(GITHUB_ISSUE, "r")["isChangeRequest"])
+
+    def test_the_other_host_answers_the_same_question_and_says_no(self):
+        # It keeps merge requests in their own collection, so an issue read is
+        # only ever an issue. The field is reported anyway — a caller must be
+        # able to ask both hosts the same question rather than knowing which
+        # one needs asking.
+        rec = gitlab()._issue(GITLAB_ISSUE, "acme/web")
+        self.assertIn("isChangeRequest", rec)
+        self.assertFalse(rec["isChangeRequest"])
+
+
+class DefiningALabelBeforeUsingIt(unittest.TestCase):
+    """`ensure_label` — because one host will not apply an undefined label.
+
+    The first estimate in a fresh repository fails otherwise, with a status
+    that reads like a permissions problem and is not one.
+    """
+
+    def calls_of(self, f, transport):
+        return [(m, u, j, fo) for (m, u, p, j, fo) in transport.calls]
+
+    def test_a_new_label_is_created_with_the_colour_it_was_given(self):
+        seen = []
+
+        def transport(method, url, *, headers, params=None, json_body=None,
+                      form_body=None, timeout=None):
+            seen.append((method, url, json_body, form_body))
+            return {}
+
+        f = forge.GitHubForge("t", transport=transport)
+        self.assertTrue(f.ensure_label("acme/web", "SP::5", "c5def5", "five"))
+        method, url, body, _ = seen[0]
+        self.assertEqual(method, "POST")
+        self.assertTrue(url.endswith("/repos/acme/web/labels"))
+        self.assertEqual(body, {"name": "SP::5", "color": "c5def5",
+                                "description": "five"})
+
+    def test_a_label_that_already_exists_is_success_not_failure(self):
+        # After the first estimate in a repository this is EVERY call. A
+        # caller that read it as a failure would stop labelling anything the
+        # second time round.
+        def transport(*a, **k):
+            raise forge.ForgeError("422 already_exists", code=422)
+
+        f = forge.GitHubForge("t", transport=transport)
+        self.assertTrue(f.ensure_label("acme/web", "SP::5"))
+
+    def test_a_real_failure_is_still_reported(self):
+        # Losing the difference would mean a repository the bot cannot write
+        # to looks exactly like one where every label is already defined.
+        def transport(*a, **k):
+            raise forge.ForgeError("403 forbidden", code=403)
+
+        self.assertFalse(
+            forge.GitHubForge("t", transport=transport).ensure_label("r", "x"))
+
+    def test_the_other_host_is_given_the_colour_the_way_it_wants_it(self):
+        # A CSS hex there, six bare digits here. Exactly the kind of
+        # difference no caller should have to know about — and the reason
+        # `ensure_label` takes the bot's own vocabulary and translates.
+        seen = []
+
+        def transport(method, url, *, headers, params=None, json_body=None,
+                      form_body=None, timeout=None):
+            seen.append((method, url, form_body))
+            return {}
+
+        f = forge.GitLabForge("https://gitlab.example.com", "t",
+                              transport=transport)
+        self.assertTrue(f.ensure_label("group/app", "SP::5", "c5def5"))
+        method, url, fields = seen[0]
+        self.assertEqual(fields["color"], "#c5def5")
+        self.assertIn("group%2Fapp", url)
+
+    def test_a_label_with_no_name_is_refused_without_a_request(self):
+        seen = []
+        f = forge.GitHubForge("t", transport=lambda *a, **k: seen.append(a))
+        self.assertFalse(f.ensure_label("acme/web", ""))
+        self.assertEqual(seen, [])
+
+
 class NotesAreTheShapeTheGuardsAlreadySpeak(unittest.TestCase):
     """`_note` — author under `username`, on both hosts."""
 

@@ -92,6 +92,28 @@ agent_limit() {
   printf '%s\n' "$_al_sec"
 }
 
+# agent_limit_is_set <key> — did a PERSON put a usable value in the store?
+#
+# `agent_limit` cannot answer this: it returns the default when the key is
+# absent, so a caller cannot tell "nobody set it" from "somebody set it to
+# exactly the default". The difference matters wherever a value can also be
+# derived — a derived number may override a default, and must not override a
+# human who deliberately set one.
+#
+# Usable, not merely present: a key holding a typo falls back to the default
+# inside `agent_limit`, so reporting it as set would let an unreadable value
+# suppress the derived one and leave the run on a number nobody chose.
+agent_limit_is_set() {
+  _al_key="$1"
+  [ -r "$AGENT_LIMITS_FILE" ] || return 1
+  _al_raw="$(sed 's/#.*//' "$AGENT_LIMITS_FILE" 2>/dev/null \
+             | grep -E "^[[:space:]]*$(printf '%s' "$_al_key" | sed 's/\./\\./g')[[:space:]]*=" \
+             | tail -1 | cut -d= -f2-)"
+  [ -n "$_al_raw" ] || return 1
+  _al_sec="$(_al_parse "$_al_raw")" || return 1
+  _al_sane "$_al_sec"
+}
+
 # agent_count <key> <default> — a plain integer setting, NOT a duration.
 #
 # agent_limit() cannot serve this: it parses values as seconds and rejects

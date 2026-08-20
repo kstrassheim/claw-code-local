@@ -25,6 +25,9 @@ The container image (built from `builder/Dockerfile`) ships:
   TOOLS-k8s.md.
 - **`terraform`** + HashiCorp's `terraform-mcp-server` — see
   TOOLS-terraform.md.
+- **`tofu`** + the OpenTofu registry MCP — the same job, the other
+  fork. Which one a project uses is a property of the project, not a
+  preference: see TOOLS-opentofu.md.
 - **`aws`** / **`gcloud`** / **`aliyun`** CLIs + matching
   `mcp.servers.aws|gcp|alicloud` wrappers — see TOOLS-aws.md,
   TOOLS-gcp.md, TOOLS-alicloud.md.

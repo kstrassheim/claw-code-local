@@ -45,7 +45,7 @@ reviewer.run|3500|the reviewer'"'"'s single agent run'
 # key|kind|default|what it does
 SETTINGS='solver.small.max_points|count|3|stories at or below this are implemented on solver.small and reviewed on reviewer.small (0 or off disables both)
 planning.split_points|count|13|a story sized AT or above this is not started — the bot asks for it to be split (off = never; only 2,3,5,8,13 differ)
-solver.autoruntime|flag|off|derive the solver'"'"'s runtime from the story points instead of solver.turn/solver.lifetime'
+solver.autoruntime|flag|on|derive the solver'"'"'s runtime from the story points (a configured solver.turn/solver.lifetime still wins)'
 
 _default_for()  { printf '%s\n' "$KEYS" | awk -F'|' -v k="$1" '$1==k{print $2}'; }
 _desc_for()     { printf '%s\n' "$KEYS" | awk -F'|' -v k="$1" '$1==k{print $3}'; }

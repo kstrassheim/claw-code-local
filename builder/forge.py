@@ -74,6 +74,7 @@ Env:
 from __future__ import annotations
 
 import abc
+import base64
 import json
 import os
 import re
@@ -251,6 +252,22 @@ class Forge(abc.ABC):
         """Take one label off an issue."""
 
     @abc.abstractmethod
+    def ensure_label(self, repo: str, name: str, color: str = "",
+                     description: str = "") -> bool:
+        """Make sure a label EXISTS in a repository, whatever that costs here.
+
+        At least one host refuses to put a label on an issue until the label
+        has been defined in the repository, so the first write of any new label
+        in a fresh project fails with a status that reads like a permissions
+        problem and is not one. The colour and the description come from the
+        caller: they are the bot's vocabulary, not the host's.
+
+        Already existing is SUCCESS. Every call after the first is a no-op, and
+        a caller that read "it is already there" as a failure would give up on
+        labelling anything for the second time.
+        """
+
+    @abc.abstractmethod
     def close_issue(self, repo: str, number: int, delivered: bool) -> bool:
         """Close an issue, recording WHETHER THE WORK SHIPPED.
 
@@ -291,6 +308,17 @@ class Forge(abc.ABC):
         """
 
     @abc.abstractmethod
+    def checks(self, repo: str, sha: str) -> list[dict]:
+        """Each check on a commit as {name, state}, state in the same four.
+
+        `checks_state` answers "may this be merged"; this answers "what is
+        running, and how did each one end" — which is what a summary for a
+        person and a fingerprint for a change-detector need. Both come from
+        the same reduction, so a check that reads failed in one cannot read
+        pending in the other.
+        """
+
+    @abc.abstractmethod
     def review_verdicts(self, repo: str, number: int) -> list[dict]:
         """Reviews left on a change request, oldest first."""
 
@@ -302,6 +330,101 @@ class Forge(abc.ABC):
     @abc.abstractmethod
     def security_findings(self, repo: str, number: int) -> list[dict]:
         """Security findings the host itself raised against a change."""
+
+    @abc.abstractmethod
+    def change_request_files(self, repo: str, number: int) -> list[dict]:
+        """What a change touches: [{path, added, removed, status}].
+
+        A summary, not a diff. The reviewer has its own checkout and reads the
+        diff from git; this is the shape of the change, which is what decides
+        whether it is small enough to read in one sitting.
+        """
+
+    @abc.abstractmethod
+    def submit_review(self, repo: str, number: int, verdict: str,
+                      body: str) -> bool:
+        """Leave a REVIEW — `approve`, `request-changes` or `comment`.
+
+        Distinct from a comment, and worth the separate method because the
+        hosts disagree about it fundamentally: one refuses a review from the
+        change's own author, and the bot authors everything it opens. So this
+        failing is NORMAL and is not the verdict — the verdict is the comment,
+        which is what the merge gate reads. Returning False here means the
+        review was not recorded, never that the work was rejected.
+        """
+
+    @abc.abstractmethod
+    def review_requests(self, repo: str, number: int) -> list[str]:
+        """Who has been asked to review, by account name."""
+
+    @abc.abstractmethod
+    def request_review(self, repo: str, number: int, reviewers) -> bool:
+        """Ask accounts to review a change.
+
+        False covers the refusal that matters: at least one host will not let
+        an author request review of their own work, and the bot is usually
+        both. A caller must treat that as "nobody was asked", not as an error
+        worth stopping for.
+        """
+
+    @abc.abstractmethod
+    def remove_review_request(self, repo: str, number: int,
+                              reviewers) -> bool:
+        """Withdraw a review request. Used to enforce "not until CI is green"."""
+
+    @abc.abstractmethod
+    def react(self, repo: str, number: int, comment_id, emoji: str) -> bool:
+        """Acknowledge one comment, so a person can see it was read.
+
+        Takes the ITEM as well as the comment: one host addresses a comment
+        globally and the other only within the item it belongs to. Asking for
+        both is what lets either answer.
+        """
+
+    @abc.abstractmethod
+    def failing_check_log(self, repo: str, sha: str,
+                          limit: int = 20000) -> str:
+        """The output of the first failing check on a commit, or "".
+
+        This is how the solver learns WHY CI is red rather than only that it
+        is. Truncated from the END, because a failure says what went wrong on
+        its last lines and the first lines are setup.
+        """
+
+    @abc.abstractmethod
+    def recent_change_requests(self, repo: str, state: str = "closed",
+                               limit: int = 50) -> list[dict]:
+        """Change requests by most recently updated, in the neutral shape."""
+
+    @abc.abstractmethod
+    def open_issues(self, repo: str, limit: int = 100) -> list[dict]:
+        """Every open issue in one repository, in the neutral shape."""
+
+    @abc.abstractmethod
+    def create_issue(self, repo: str, title: str, body: str = "",
+                     labels=None, assignees=None) -> int:
+        """Open an issue. Returns its number, or 0 if it could not be opened.
+
+        `assignees` is not decoration: the solver's whole queue is "issues
+        assigned to me", so an issue this bot files for itself and does not
+        assign is an issue nobody ever works.
+        """
+
+    @abc.abstractmethod
+    def branch_head(self, repo: str, branch: str) -> str:
+        """The commit at the tip of a branch, or "" when it cannot be read."""
+
+    @abc.abstractmethod
+    def file_at_ref(self, repo: str, path: str, ref: str) -> str:
+        """One file's TEXT at one commit, or "" when it is not there.
+
+        Empty means "not present", which is a legitimate answer — the callers
+        read optional configuration files that most repositories do not have.
+        """
+
+    @abc.abstractmethod
+    def comment_on_commit(self, repo: str, sha: str, body: str) -> bool:
+        """Say something against a COMMIT rather than against an item."""
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +538,15 @@ class GitHubForge(Forge):
             "labels": self._labels(raw.get("labels")),
             "state": state,
             "closedAs": closed_as,
+            # This host serves change requests from the ISSUES collection as
+            # well, and they arrive looking exactly like issues apart from one
+            # extra key. A caller that sizes one, or plans work on one, is
+            # estimating its own output — so the distinction is answered here
+            # rather than left to whoever remembers the key's name.
+            "isChangeRequest": "pull_request" in raw,
+            # WHEN it was filed. The delivery sweep needs it to tell a change
+            # that closed this issue from one that landed before it existed.
+            "createdAt": raw.get("created_at") or "",
         }
 
     def _note(self, raw: dict) -> dict:
@@ -422,6 +554,11 @@ class GitHubForge(Forge):
             "id": raw.get("id"),
             "body": raw.get("body") or "",
             "author": {"username": ((raw.get("user") or {}).get("login") or "")},
+            # WHEN it was said. "Has a person replied since the bot asked?" and
+            # "is this verdict from THIS run?" are both questions about time,
+            # and a reader without one falls back to "the newest comment",
+            # which reads an old answer as a new one.
+            "createdAt": raw.get("created_at") or "",
         }
 
     def _change_request(self, raw: dict, repo: str) -> dict:
@@ -444,6 +581,10 @@ class GitHubForge(Forge):
             "baseRef": base.get("ref") or "",
             "labels": self._labels(raw.get("labels")),
             "mergeable": raw.get("mergeable"),
+            # Who opened it. The reviewer needs this to know whether it is
+            # reviewing its own work, which decides whether a refused review
+            # is a problem or the expected answer.
+            "author": ((raw.get("user") or {}).get("login") or ""),
         }
 
     # -- discovery ------------------------------------------------------
@@ -595,6 +736,24 @@ class GitHubForge(Forge):
         return self._write("DELETE",
                            f"/repos/{repo}/issues/{number}/labels/{enc}")
 
+    def ensure_label(self, repo: str, name: str, color: str = "",
+                     description: str = "") -> bool:
+        if not name:
+            return False
+        payload = {"name": name, "color": color or "c5def5",
+                   "description": description or ""}
+        try:
+            self._transport("POST", f"{self.api}/repos/{repo}/labels",
+                            headers=self._headers(), json_body=payload)
+            return True
+        except ForgeError as exc:
+            # 422 is what "a label by that name already exists" answers with,
+            # and after the first estimate in a repository that is every call.
+            # Anything else is a real failure and is reported as one.
+            return exc.code == 422
+        except Exception:  # noqa: BLE001
+            return False
+
     def close_issue(self, repo: str, number: int, delivered: bool) -> bool:
         """Close, recording delivered versus called-off natively.
 
@@ -734,6 +893,46 @@ class GitHubForge(Forge):
             return GREEN
         return NONE
 
+    def checks(self, repo: str, sha: str) -> list[dict]:
+        if not sha:
+            return []
+        out = []
+        try:
+            raw = self._get(f"/repos/{repo}/commits/{sha}/check-runs",
+                            {"per_page": "100"})
+        except Exception:  # noqa: BLE001
+            raw = None
+        for run in ((raw or {}).get("check_runs") or []
+                    if isinstance(raw, dict) else []):
+            if not isinstance(run, dict):
+                continue
+            status = str(run.get("status") or "").lower()
+            conclusion = str(run.get("conclusion") or "").lower()
+            if status != "completed" or not conclusion:
+                state = PENDING
+            elif conclusion in FAILING_CONCLUSIONS:
+                state = FAILED
+            elif conclusion in PASSING_CONCLUSIONS:
+                state = GREEN
+            else:
+                state = PENDING
+            out.append({"name": run.get("name") or "", "state": state})
+        try:
+            combined = self._get(f"/repos/{repo}/commits/{sha}/status")
+        except Exception:  # noqa: BLE001
+            combined = None
+        for st in ((combined or {}).get("statuses") or []
+                   if isinstance(combined, dict) else []):
+            if not isinstance(st, dict):
+                continue
+            state = str(st.get("state") or "").lower()
+            out.append({
+                "name": st.get("context") or "",
+                "state": GREEN if state == "success"
+                else FAILED if state in ("failure", "error") else PENDING,
+            })
+        return out
+
     def review_verdicts(self, repo: str, number: int) -> list[dict]:
         rows = self._get(f"/repos/{repo}/pulls/{number}/reviews",
                          {"per_page": "100"})
@@ -792,6 +991,179 @@ class GitHubForge(Forge):
                 "url": a.get("html_url") or "",
             })
         return out
+
+
+    # -- the rest of what the runners ask -------------------------------
+
+    def change_request_files(self, repo: str, number: int) -> list[dict]:
+        rows = self._get(f"/repos/{repo}/pulls/{number}/files",
+                         {"per_page": "100"})
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for f in rows:
+            if not isinstance(f, dict):
+                continue
+            out.append({
+                "path": f.get("filename") or "",
+                "added": int(f.get("additions") or 0),
+                "removed": int(f.get("deletions") or 0),
+                "status": f.get("status") or "",
+            })
+        return out
+
+    def submit_review(self, repo: str, number: int, verdict: str,
+                      body: str) -> bool:
+        event = {"approve": "APPROVE",
+                 "request-changes": "REQUEST_CHANGES",
+                 "comment": "COMMENT"}.get(str(verdict or "").lower())
+        if event is None:
+            return False
+        # Expected to fail when the bot reviews its own work, which is the
+        # normal case here — the solver and the reviewer are one account.
+        return self._write("POST", f"/repos/{repo}/pulls/{number}/reviews",
+                           {"event": event, "body": body or ""})
+
+    def review_requests(self, repo: str, number: int) -> list[str]:
+        raw = self._get(f"/repos/{repo}/pulls/{number}/requested_reviewers")
+        if not isinstance(raw, dict):
+            return []
+        return [str((u or {}).get("login") or "")
+                for u in (raw.get("users") or []) if isinstance(u, dict)]
+
+    def request_review(self, repo: str, number: int, reviewers) -> bool:
+        names = [str(r) for r in (reviewers or []) if str(r).strip()]
+        if not names:
+            return False
+        # 422 when the author is among them, which is this bot on its own
+        # pull requests. `False` is the honest answer: nobody was asked.
+        return self._write("POST",
+                           f"/repos/{repo}/pulls/{number}/requested_reviewers",
+                           {"reviewers": names})
+
+    def remove_review_request(self, repo: str, number: int,
+                              reviewers) -> bool:
+        names = [str(r) for r in (reviewers or []) if str(r).strip()]
+        if not names:
+            return False
+        return self._write("DELETE",
+                           f"/repos/{repo}/pulls/{number}/requested_reviewers",
+                           {"reviewers": names})
+
+    def react(self, repo: str, number: int, comment_id, emoji: str) -> bool:
+        # The item is not part of the address here; a comment id is unique
+        # across the repository. It is taken anyway, because on the other host
+        # it is the only way to find the comment at all.
+        if not comment_id:
+            return False
+        return self._write(
+            "POST", f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+            {"content": emoji or "eyes"})
+
+    def failing_check_log(self, repo: str, sha: str,
+                          limit: int = 20000) -> str:
+        if not sha:
+            return ""
+        try:
+            raw = self._get(f"/repos/{repo}/commits/{sha}/check-runs",
+                            {"per_page": "100"})
+        except Exception:  # noqa: BLE001
+            return ""
+        runs = (raw or {}).get("check_runs") or [] if isinstance(raw, dict) else []
+        job_id = None
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            if str(run.get("conclusion") or "").lower() in FAILING_CONCLUSIONS:
+                # The check-run id IS the job id for runs this host produced
+                # itself; a check posted by anything else has no log to fetch
+                # and is skipped rather than guessed at.
+                if str(run.get("app", {}).get("slug") or "") in (
+                        "github-actions", ""):
+                    job_id = run.get("id")
+                    break
+        if not job_id:
+            return ""
+        try:
+            # Not JSON: this endpoint answers with the log itself, so the
+            # shared reader would return None on it.
+            text = self._transport(
+                "GET", f"{self.api}/repos/{repo}/actions/jobs/{job_id}/logs",
+                headers=self._headers())
+        except Exception:  # noqa: BLE001
+            return ""
+        text = text if isinstance(text, str) else ""
+        return text[-limit:] if limit and len(text) > limit else text
+
+    def recent_change_requests(self, repo: str, state: str = "closed",
+                               limit: int = 50) -> list[dict]:
+        rows = self._get(f"/repos/{repo}/pulls",
+                         {"state": state, "sort": "updated",
+                          "direction": "desc", "per_page": str(limit)})
+        if not isinstance(rows, list):
+            return []
+        return [self._change_request(r, repo) for r in rows
+                if isinstance(r, dict)]
+
+    def open_issues(self, repo: str, limit: int = 100) -> list[dict]:
+        rows = self._get(f"/repos/{repo}/issues",
+                         {"state": "open", "per_page": str(limit)})
+        if not isinstance(rows, list):
+            return []
+        # The collection serves change requests too; an issue listing that
+        # includes them makes the caller count its own output as work.
+        return [self._issue(r, repo) for r in rows
+                if isinstance(r, dict) and "pull_request" not in r]
+
+    def create_issue(self, repo: str, title: str, body: str = "",
+                     labels=None, assignees=None) -> int:
+        payload = {"title": title, "body": body or ""}
+        names = [str(l) for l in (labels or []) if str(l).strip()]
+        if names:
+            payload["labels"] = names
+        who = [str(a) for a in (assignees or []) if str(a).strip()]
+        if who:
+            payload["assignees"] = who
+        try:
+            made = self._transport("POST", f"{self.api}/repos/{repo}/issues",
+                                   headers=self._headers(), json_body=payload)
+        except Exception:  # noqa: BLE001
+            return 0
+        return int((made or {}).get("number") or 0) if isinstance(made, dict) else 0
+
+    def branch_head(self, repo: str, branch: str) -> str:
+        if not branch:
+            return ""
+        try:
+            row = self._get(f"/repos/{repo}/branches/{branch}")
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(row, dict):
+            return ""
+        return str((row.get("commit") or {}).get("sha") or "")
+
+    def file_at_ref(self, repo: str, path: str, ref: str) -> str:
+        try:
+            row = self._get(f"/repos/{repo}/contents/{path}", {"ref": ref})
+        except Exception:  # noqa: BLE001
+            # 404 is "the file is not there", which is the ordinary answer for
+            # the optional files these callers read.
+            return ""
+        if not isinstance(row, dict):
+            return ""
+        if str(row.get("encoding") or "") == "base64":
+            try:
+                return base64.b64decode(row.get("content") or "").decode(
+                    "utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                return ""
+        return str(row.get("content") or "")
+
+    def comment_on_commit(self, repo: str, sha: str, body: str) -> bool:
+        if not sha:
+            return False
+        return self._write("POST", f"/repos/{repo}/commits/{sha}/comments",
+                           {"body": body or ""})
 
 
 _VERDICTS = {
@@ -913,6 +1285,11 @@ class GitLabForge(Forge):
             "labels": [str(l) for l in (raw.get("labels") or []) if str(l).strip()],
             "state": neutral_state,
             "closedAs": closed_as,
+            # Never true here: this host keeps merge requests in their own
+            # collection, so an issue read is only ever an issue. Reported
+            # anyway so callers ask the same question of both hosts.
+            "isChangeRequest": False,
+            "createdAt": raw.get("created_at") or "",
         }
 
     @staticmethod
@@ -921,6 +1298,7 @@ class GitLabForge(Forge):
             "id": raw.get("id"),
             "body": raw.get("body") or "",
             "author": {"username": ((raw.get("author") or {}).get("username") or "")},
+            "createdAt": raw.get("created_at") or "",
         }
 
     def _change_request(self, raw: dict, repo: str) -> dict:
@@ -947,6 +1325,7 @@ class GitLabForge(Forge):
             "mergeable": (None if raw.get("merge_status") in (None, "checking",
                                                               "unchecked")
                           else raw.get("merge_status") == "can_be_merged"),
+            "author": ((raw.get("author") or {}).get("username") or ""),
         }
 
     # -- identity -------------------------------------------------------
@@ -1106,6 +1485,28 @@ class GitLabForge(Forge):
             "PUT", f"/projects/{self._project(repo)}/issues/{number}",
             {"remove_labels": str(label)})
 
+    def ensure_label(self, repo: str, name: str, color: str = "",
+                     description: str = "") -> bool:
+        if not name:
+            return False
+        # A colour is a CSS hex here and six bare digits on the other host —
+        # exactly the kind of difference no caller should have to know.
+        fields = {"name": name,
+                  "color": "#" + str(color or "c5def5").lstrip("#")}
+        if description:
+            fields["description"] = description
+        try:
+            self._transport("POST",
+                            f"{self.api}/projects/{self._project(repo)}/labels",
+                            headers=self._headers(), form_body=fields)
+            return True
+        except ForgeError as exc:
+            # Conflict is "already defined", which is success here for the
+            # same reason it is on the other host.
+            return exc.code in (409, 400)
+        except Exception:  # noqa: BLE001
+            return False
+
     def close_issue(self, repo: str, number: int, delivered: bool) -> bool:
         """Close, recording the intent WITHOUT a native close reason.
 
@@ -1194,6 +1595,34 @@ class GitLabForge(Forge):
         # `running`, and anything a newer version invents. Unknown waits.
         return PENDING
 
+    def checks(self, repo: str, sha: str) -> list[dict]:
+        if not sha:
+            return []
+        try:
+            pipelines = self._get(f"/projects/{self._project(repo)}/pipelines",
+                                  {"sha": sha, "per_page": "1"})
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(pipelines, list) or not pipelines:
+            return []
+        pid = (pipelines[0] or {}).get("id")
+        if not pid:
+            return []
+        try:
+            jobs = self._get(
+                f"/projects/{self._project(repo)}/pipelines/{pid}/jobs",
+                {"per_page": "100"})
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for job in jobs if isinstance(jobs, list) else []:
+            if not isinstance(job, dict):
+                continue
+            out.append({"name": job.get("name") or "",
+                        "state": self.reduce_pipeline(
+                            str(job.get("status") or ""))})
+        return out
+
     def review_verdicts(self, repo: str, number: int) -> list[dict]:
         """Who approved this merge request.
 
@@ -1233,6 +1662,234 @@ class GitLabForge(Forge):
             "merge request's vulnerability report, which needs an Ultimate "
             "licence and a different endpoint from the one this bot uses "
             "elsewhere. Nothing calls this on GitLab today.")
+
+
+    # -- the rest of what the runners ask -------------------------------
+
+    def change_request_files(self, repo: str, number: int) -> list[dict]:
+        row = self._get(
+            f"/projects/{self._project(repo)}/merge_requests/{number}/changes")
+        if not isinstance(row, dict):
+            return []
+        out = []
+        for ch in row.get("changes") or []:
+            if not isinstance(ch, dict):
+                continue
+            # No line counts are given here, so they are counted off the diff.
+            # The alternative — reporting zero — would make every change look
+            # like a rename to a caller deciding whether it is small.
+            diff = str(ch.get("diff") or "")
+            added = sum(1 for l in diff.splitlines()
+                        if l.startswith("+") and not l.startswith("+++"))
+            removed = sum(1 for l in diff.splitlines()
+                          if l.startswith("-") and not l.startswith("---"))
+            status = "modified"
+            if ch.get("new_file"):
+                status = "added"
+            elif ch.get("deleted_file"):
+                status = "removed"
+            elif ch.get("renamed_file"):
+                status = "renamed"
+            out.append({"path": ch.get("new_path") or ch.get("old_path") or "",
+                        "added": added, "removed": removed, "status": status})
+        return out
+
+    def submit_review(self, repo: str, number: int, verdict: str,
+                      body: str) -> bool:
+        """Approval and the note that explains it, which are separate here.
+
+        There is no single "submit a review with a verdict" call: approval is
+        its own endpoint and carries no text, so the reasoning has to be a
+        note. Both are attempted and the note is what the caller is told
+        about, because the note is the part a person reads.
+        """
+        v = str(verdict or "").lower()
+        path = f"/projects/{self._project(repo)}/merge_requests/{number}"
+        if v == "approve":
+            self._write("POST", f"{path}/approve")
+        elif v == "request-changes":
+            # Withdrawing an earlier approval is the closest thing to asking
+            # for changes. It is best-effort: not having approved before is
+            # not a failure to un-approve.
+            self._write("POST", f"{path}/unapprove")
+        elif v != "comment":
+            return False
+        if not body:
+            return True
+        return self._write("POST", f"{path}/notes", {"body": body})
+
+    def review_requests(self, repo: str, number: int) -> list[str]:
+        row = self._get(
+            f"/projects/{self._project(repo)}/merge_requests/{number}")
+        if not isinstance(row, dict):
+            return []
+        return [str((u or {}).get("username") or "")
+                for u in (row.get("reviewers") or []) if isinstance(u, dict)]
+
+    def request_review(self, repo: str, number: int, reviewers) -> bool:
+        """Reviewers are set by numeric id here, so each name is looked up.
+
+        A name that does not resolve is dropped rather than guessed at:
+        sending an id for the wrong account would ask a stranger to review.
+        """
+        ids = []
+        for name in (reviewers or []):
+            name = str(name).strip()
+            if not name:
+                continue
+            found = self._get("/users", {"username": name})
+            if isinstance(found, list) and found and isinstance(found[0], dict):
+                uid = found[0].get("id")
+                if uid:
+                    ids.append(uid)
+        if not ids:
+            return False
+        return self._write(
+            "PUT", f"/projects/{self._project(repo)}/merge_requests/{number}",
+            {"reviewer_ids": ",".join(str(i) for i in ids)})
+
+    def remove_review_request(self, repo: str, number: int,
+                              reviewers) -> bool:
+        # Reviewers are a SET here, not a collection to add to and remove
+        # from, so withdrawing is writing an empty set. The names are ignored
+        # deliberately: clearing is the only operation this host offers, and
+        # pretending otherwise would silently keep whoever was not named.
+        return self._write(
+            "PUT", f"/projects/{self._project(repo)}/merge_requests/{number}",
+            {"reviewer_ids": ""})
+
+    def react(self, repo: str, number: int, comment_id, emoji: str) -> bool:
+        # A note id is only addressable THROUGH the item it belongs to here,
+        # which is why the interface asks for both.
+        if not comment_id or not number:
+            return False
+        name = {"eyes": "eyes", "+1": "thumbsup", "-1": "thumbsdown"}.get(
+            emoji or "eyes", emoji or "eyes")
+        return self._write(
+            "POST",
+            f"/projects/{self._project(repo)}/issues/{number}"
+            f"/notes/{comment_id}/award_emoji",
+            {"name": name})
+
+    def failing_check_log(self, repo: str, sha: str,
+                          limit: int = 20000) -> str:
+        if not sha:
+            return ""
+        try:
+            pipelines = self._get(f"/projects/{self._project(repo)}/pipelines",
+                                  {"sha": sha, "per_page": "1"})
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(pipelines, list) or not pipelines:
+            return ""
+        pid = (pipelines[0] or {}).get("id")
+        if not pid:
+            return ""
+        try:
+            jobs = self._get(
+                f"/projects/{self._project(repo)}/pipelines/{pid}/jobs",
+                {"scope[]": "failed", "per_page": "20"})
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(jobs, list) or not jobs:
+            return ""
+        job_id = (jobs[0] or {}).get("id")
+        if not job_id:
+            return ""
+        try:
+            text = self._transport(
+                "GET",
+                f"{self.api}/projects/{self._project(repo)}/jobs/{job_id}/trace",
+                headers=self._headers())
+        except Exception:  # noqa: BLE001
+            return ""
+        text = text if isinstance(text, str) else ""
+        return text[-limit:] if limit and len(text) > limit else text
+
+    def recent_change_requests(self, repo: str, state: str = "closed",
+                               limit: int = 50) -> list[dict]:
+        # `closed` means something narrower here — a merge request that was
+        # abandoned — so the caller's "closed" has to ask for merged ones too,
+        # or the delivery sweep finds nothing it was looking for.
+        wanted = "all" if state == "closed" else "opened"
+        rows = self._get(
+            f"/projects/{self._project(repo)}/merge_requests",
+            {"state": wanted, "order_by": "updated_at", "sort": "desc",
+             "per_page": str(limit)})
+        if not isinstance(rows, list):
+            return []
+        return [self._change_request(r, repo) for r in rows
+                if isinstance(r, dict)]
+
+    def open_issues(self, repo: str, limit: int = 100) -> list[dict]:
+        rows = self._get(f"/projects/{self._project(repo)}/issues",
+                         {"state": "opened", "per_page": str(limit)})
+        if not isinstance(rows, list):
+            return []
+        return [self._issue(r, repo) for r in rows if isinstance(r, dict)]
+
+    def create_issue(self, repo: str, title: str, body: str = "",
+                     labels=None, assignees=None) -> int:
+        fields = {"title": title, "description": body or ""}
+        names = [str(l) for l in (labels or []) if str(l).strip()]
+        if names:
+            fields["labels"] = ",".join(names)
+        # Assignees are numeric ids here, so each account name is resolved.
+        # A name that does not resolve is dropped rather than guessed at: an
+        # id for the wrong account assigns somebody else's work to a stranger.
+        ids = []
+        for who in (assignees or []):
+            who = str(who).strip()
+            if not who:
+                continue
+            found = self._get("/users", {"username": who})
+            if isinstance(found, list) and found and isinstance(found[0], dict):
+                if found[0].get("id"):
+                    ids.append(found[0]["id"])
+        if ids:
+            fields["assignee_ids"] = ",".join(str(i) for i in ids)
+        try:
+            made = self._transport(
+                "POST", f"{self.api}/projects/{self._project(repo)}/issues",
+                headers=self._headers(), form_body=fields)
+        except Exception:  # noqa: BLE001
+            return 0
+        return int((made or {}).get("iid") or 0) if isinstance(made, dict) else 0
+
+    def branch_head(self, repo: str, branch: str) -> str:
+        if not branch:
+            return ""
+        try:
+            row = self._get(
+                f"/projects/{self._project(repo)}/repository/branches/"
+                f"{urllib.parse.quote(str(branch), safe='')}")
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(row, dict):
+            return ""
+        return str((row.get("commit") or {}).get("id") or "")
+
+    def file_at_ref(self, repo: str, path: str, ref: str) -> str:
+        try:
+            text = self._transport(
+                "GET",
+                f"{self.api}/projects/{self._project(repo)}/repository/files/"
+                f"{urllib.parse.quote(str(path), safe='')}/raw",
+                headers=self._headers(), params={"ref": ref})
+        except Exception:  # noqa: BLE001
+            return ""
+        # The raw endpoint answers with the file, not with JSON, so the shared
+        # reader hands back None for anything it could not parse — which for a
+        # file that is not JSON is every file.
+        return text if isinstance(text, str) else ""
+
+    def comment_on_commit(self, repo: str, sha: str, body: str) -> bool:
+        if not sha:
+            return False
+        return self._write(
+            "POST",
+            f"/projects/{self._project(repo)}/repository/commits/{sha}/comments",
+            {"note": body or ""})
 
 
 def _project_from_web_url(web_url: str, base: str) -> str:

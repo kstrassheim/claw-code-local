@@ -49,6 +49,7 @@ spec:
                 k8s/tools/TOOLS-k8s.md \
                 k8s/tools/TOOLS-argocd.md \
                 k8s/tools/TOOLS-terraform.md \
+                k8s/tools/TOOLS-opentofu.md \
                 k8s/tools/TOOLS-vscode.md \
                 k8s/tools/TOOLS-debug.md \
                 k8s/tools/TOOLS-security.md \

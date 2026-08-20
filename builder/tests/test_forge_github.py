@@ -339,6 +339,13 @@ class AssignedIssues(unittest.TestCase):
             "url": "https://github.com/o/r/issues/4",
             "labels": ["On Hold", "Priority::High"],
             "state": "open", "closedAs": None,
+            # This host serves change requests from the issues collection too,
+            # and they arrive looking like issues apart from one key. The
+            # distinction is answered here rather than left to a caller.
+            "isChangeRequest": False,
+            # When it was filed: the delivery sweep tells a change that closed
+            # this issue from one that landed before the issue existed.
+            "createdAt": "",
         })
 
     def test_a_short_page_ends_the_listing(self):
@@ -424,10 +431,16 @@ class Notes(unittest.TestCase):
         # lexical_guard reads `author.username`, and a second shape would mean
         # two definitions of "has the bot already asked this?".
         f, _ = gh({"/issues/5/comments": [
-            {"id": 1, "body": "hi", "user": {"login": "owner"}}]})
+            {"id": 1, "body": "hi", "user": {"login": "owner"},
+             "created_at": "2026-08-01T10:00:00Z"}]})
         self.assertEqual(f.comments("o/r", 5),
                          [{"id": 1, "body": "hi",
-                           "author": {"username": "owner"}}])
+                           "author": {"username": "owner"},
+                           # When it was said travels too: "has a person
+                           # replied SINCE the bot asked?" is a question about
+                           # time, and without it the answer degrades to "the
+                           # newest comment", which reads an old reply as new.
+                           "createdAt": "2026-08-01T10:00:00Z"}])
 
     def test_a_payload_that_is_not_a_list_is_an_error_not_an_empty_thread(self):
         # An empty thread means "nobody has said anything", which is a real

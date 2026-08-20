@@ -197,40 +197,48 @@ echo "============================================================"
 echo "[$(date -Iseconds)] reviewer start  repo=$REPO  pr=#$PR_NUMBER"
 echo "============================================================"
 
-# -- GitHub API helpers ------------------------------------------------
+# -- the code host -----------------------------------------------------
 
-GH_API="${GITHUB_API_URL:-https://api.github.com}"
-AUTH_HEADER="Authorization: Bearer $GITHUB_TOKEN"
-ACCEPT_HEADER="Accept: application/vnd.github+json"
-APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"
+# Everything this runner asks its host goes through `forge-cli`, the same
+# implementation the planners import. No URL, no auth header and no API
+# version appears below, so this reviews a change request wherever it lives.
+FORGE=(forge-cli --repo "$REPO")
 
-gh_get() { # $1 = path below the API root
-  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" "$GH_API$1"
-}
+# What a person reading this reviewer's output should see the thing called.
+# Not cosmetic: every line below goes onto a change request a human reads, and
+# calling it by the other host's name is how a review reads as if it were
+# written about somebody else's project.
+CR_NOUN="$("${FORGE[@]}" noun 2>/dev/null || echo "change request")"
+[ -n "$CR_NOUN" ] || CR_NOUN="change request"
 
-# A pull request's conversation comments are ISSUE comments — /issues/{n}/
-# comments, not /pulls/{n}/comments (those are the line-anchored review
-# comments, which nothing here reads or writes).
-post_pr_comment() { # $1 = body
-  BODY="$1" python3 -c 'import os,json;print(json.dumps({"body":os.environ["BODY"]}))' \
-  | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/issues/$PR_NUMBER/comments" >/dev/null
-}
-
-# The real review event. REQUEST_CHANGES requires a body; APPROVE does not, but
-# gets one anyway so the review reads on its own in the Files-changed view.
+# A change request's conversation is the ITEM's comments, not the
+# line-anchored review comments — nothing here reads or writes those.
 #
-# GitHub refuses both events on a pull request the token's own account
-# authored ("Can not approve your own pull request"). That is expected here —
-# the solver and the reviewer are the same account — and it is NOT a failure:
-# the RESULT comment is the machine-readable verdict and the solver's merge
-# gate keys on it, not on the review state.
-submit_review() { # $1 = APPROVE|REQUEST_CHANGES  $2 = body
-  EVENT="$1" BODY="$2" python3 -c 'import os,json;print(json.dumps({"event":os.environ["EVENT"],"body":os.environ["BODY"]}))' \
-  | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
-      -H 'Content-Type: application/json' -d @- \
-      "$GH_API/repos/$REPO/pulls/$PR_NUMBER/reviews" >/dev/null
+# The body travels through a FILE, never an argument: it is model output, and
+# a review that quotes a shell snippet contains backticks and $(...).
+post_pr_comment() { # $1 = body
+  _bodyf="$(mktemp)"
+  printf '%s' "$1" > "$_bodyf"
+  "${FORGE[@]}" comment --number "$PR_NUMBER" --body-file "$_bodyf"
+  _rc=$?
+  rm -f "$_bodyf"
+  return $_rc
+}
+
+# The real review event, as opposed to a comment.
+#
+# At least one host refuses a review from the change's own author, and here
+# the solver and the reviewer are the same account — so this failing is the
+# EXPECTED case and not a problem. The machine-readable verdict is the RESULT
+# comment, and the solver's merge gate keys on that, never on this.
+submit_review() { # $1 = approve|request-changes  $2 = body
+  _bodyf="$(mktemp)"
+  printf '%s' "$2" > "$_bodyf"
+  "${FORGE[@]}" submit-review --number "$PR_NUMBER" \
+    --verdict "$1" --body-file "$_bodyf" >/dev/null 2>&1
+  _rc=$?
+  rm -f "$_bodyf"
+  return $_rc
 }
 
 # Did THIS run post a verdict comment for THIS head?
@@ -241,7 +249,7 @@ submit_review() { # $1 = APPROVE|REQUEST_CHANGES  $2 = body
 # reviewing anything — so that head could never be re-reviewed, not even after
 # its state file was cleared.
 fetch_verdict_comment() {
-  gh_get "/repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
+  "${FORGE[@]}" comments --number "$PR_NUMBER" 2>/dev/null \
   | BOT="$BOT_LOGIN" SHA="$HEAD_SHA" SINCE="${RUN_START_EPOCH:-0}" python3 -c "
 import sys, json, os
 from datetime import datetime
@@ -263,9 +271,9 @@ try:
 except Exception:
     cs = []
 for c in reversed(cs if isinstance(cs, list) else []):
-    if ((c.get('user') or {}).get('login','').lower()) != bot:
+    if ((c.get('author') or {}).get('username','').lower()) != bot:
         continue
-    if created_epoch(c.get('created_at')) < since:
+    if created_epoch(c.get('createdAt')) < since:
         continue   # a verdict from an earlier run — not this one's result
     body = (c.get('body') or '').strip()
     if not body.startswith('🔎 REVIEW RESULT:'):
@@ -283,17 +291,15 @@ for c in reversed(cs if isinstance(cs, list) else []):
 if [ -n "${REVIEWER_BOT_LOGIN:-}" ]; then
   BOT_LOGIN="$REVIEWER_BOT_LOGIN"
 else
-  BOT_LOGIN="$(gh_get /user 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('login',''))" 2>/dev/null)"
+  BOT_LOGIN="$("${FORGE[@]}" identity 2>/dev/null)"
 fi
 if [ -z "$BOT_LOGIN" ]; then
   echo "FATAL: could not resolve bot identity from \$GITHUB_TOKEN /user — aborting"
   exit 1
 fi
 
-PR_JSON="$(gh_get "/repos/$REPO/pulls/$PR_NUMBER" 2>/dev/null)"
-if [ -z "$PR_JSON" ]; then
-  echo "FATAL: could not fetch pull request #$PR_NUMBER"; exit 1
+if ! PR_JSON="$("${FORGE[@]}" change-request --number "$PR_NUMBER")"; then
+  echo "FATAL: could not fetch $CR_NOUN #$PR_NUMBER"; exit 1
 fi
 # One line, one field per column. Empty values are emitted as `-` and turned
 # back into "" below: `read` splits on whitespace, so a single empty field
@@ -307,9 +313,8 @@ def f(v):
     v = str(v)
     return v if v.strip() else '-'
 print(f(p.get('state','')), (1 if p.get('draft') else 0),
-      f((p.get('head') or {}).get('ref','')), f((p.get('base') or {}).get('ref','')),
-      f((p.get('head') or {}).get('sha','')), f(p.get('html_url','')),
-      f((p.get('user') or {}).get('login','')))
+      f(p.get('headRef','')), f(p.get('baseRef','')),
+      f(p.get('headSha','')), f(p.get('url','')), f(p.get('author','')))
 ")
 EOF
 for _f in PR_STATE HEAD_REF BASE_REF HEAD_SHA PR_URL PR_AUTHOR; do
@@ -326,20 +331,15 @@ if [ "$PR_DRAFT" = "1" ]; then
 fi
 
 # The planner gated on green checks, but the head may have moved since. Only
-# green pull requests get reviewed; the next tick re-plans. Reuses the planner's
-# own mapping so the two cannot drift on what "green" means.
-CHECK_STATE="$(REPO="$REPO" SHA="$HEAD_SHA" LIB="${CLAW_LIB_DIR:-/usr/local/bin}" \
-  GITHUB_TOKEN="${GITHUB_TOKEN:-}" GITHUB_API_URL="$GH_API" python3 -c '
-import importlib.machinery, importlib.util, os, sys
-path = os.path.join(os.environ["LIB"], "reviewer-tick")
-if not os.path.exists(path):
-    path += ".py"
-loader = importlib.machinery.SourceFileLoader("reviewer_tick", path)
-spec = importlib.util.spec_from_loader("reviewer_tick", loader)
-mod = importlib.util.module_from_spec(spec)
-loader.exec_module(mod)
-print(mod.head_check_state(os.environ["REPO"], os.environ["SHA"]))
-' 2>/dev/null || echo unknown)"
+# green changes get reviewed; the next tick re-plans.
+#
+# The reduction is the forge's and nobody else's — this used to load the
+# PLANNER as a module to borrow its copy of it, which is a strange thing for a
+# runner to do and only made sense while the mapping lived there. One answer,
+# one place, and `unknown` is still the cautious fallback: a state that could
+# not be read must never be treated as green.
+CHECK_STATE="$("${FORGE[@]}" checks --sha "$HEAD_SHA" 2>/dev/null || echo unknown)"
+[ -n "$CHECK_STATE" ] || CHECK_STATE=unknown
 case "$CHECK_STATE" in
   green|none) : ;;
   unknown)
@@ -437,15 +437,15 @@ print(m.group(1) if m else '')
 ISSUE_SECTION="(no linked issue found — review the pull request on its own terms and say so in the verdict)"
 ISSUE_JSON=""
 if [ -n "$LINKED_ISSUE" ]; then
-  ISSUE_JSON="$(gh_get "/repos/$REPO/issues/$LINKED_ISSUE" 2>/dev/null || echo '{}')"
-  ISSUE_COMMENTS="$(gh_get "/repos/$REPO/issues/$LINKED_ISSUE/comments?per_page=100" 2>/dev/null || echo '[]')"
+  ISSUE_JSON="$("${FORGE[@]}" issue --number "$LINKED_ISSUE" 2>/dev/null || echo '{}')"
+  ISSUE_COMMENTS="$("${FORGE[@]}" comments --number "$LINKED_ISSUE" 2>/dev/null || echo '[]')"
   ISSUE_SECTION="$(ISS="$ISSUE_JSON" COMMENTS="$ISSUE_COMMENTS" NUM="$LINKED_ISSUE" python3 <<'PY'
 import os, json
 try:
     i = json.loads(os.environ.get('ISS','{}'))
 except Exception:
     i = {}
-print(f"Linked issue: #{os.environ['NUM']} — {i.get('title','')} ({i.get('html_url','')})")
+print(f"Linked issue: #{os.environ['NUM']} — {i.get('title','')} ({i.get('url','')})")
 print()
 print('### Issue body')
 print((i.get('body') or '(empty)').strip())
@@ -458,7 +458,7 @@ except Exception:
 if not cs:
     print('(no comments)')
 for c in cs if isinstance(cs, list) else []:
-    user = (c.get('user') or {}).get('login','?')
+    user = (c.get('author') or {}).get('username','?')
     text = (c.get('body') or '').strip()
     if len(text) > 800:
         text = text[:800] + '\n…[truncated]'
@@ -477,7 +477,7 @@ AGENT_MODEL_ARGS=()
 [ -z "$AGENT_THINKING" ] || AGENT_MODEL_ARGS+=(--thinking "$AGENT_THINKING")
 
 # -- diff summary ------------------------------------------------------
-DIFF_SUMMARY="$(gh_get "/repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" 2>/dev/null \
+DIFF_SUMMARY="$("${FORGE[@]}" change-request-files --number "$PR_NUMBER" 2>/dev/null \
   | python3 -c "
 import sys, json
 try:
@@ -486,8 +486,8 @@ except Exception:
     fs = []
 total = 0
 for f in fs if isinstance(fs, list) else []:
-    path = f.get('filename') or '?'
-    plus, minus = f.get('additions') or 0, f.get('deletions') or 0
+    path = f.get('path') or '?'
+    plus, minus = f.get('added') or 0, f.get('removed') or 0
     status = f.get('status') or ''
     total += plus + minus
     print(f'- {path} (+{plus}/-{minus}' + (f' {status}' if status not in ('modified','') else '') + ')')
@@ -655,7 +655,7 @@ fi
 # checks are green, and a "no findings" paragraph in every review trains the
 # reader to skip the section that will one day matter.
 SECURITY_SECTION="$(REPO="$REPO" PR_NUMBER="$PR_NUMBER" \
-  GITHUB_TOKEN="${GITHUB_TOKEN:-}" GITHUB_API_URL="$GH_API" \
+  GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
   timeout 120 python3 "${CLAW_LIB_DIR:-/usr/local/bin}/security_reports.py" 2>/dev/null || true)"
 if [ -n "$SECURITY_SECTION" ]; then
   echo "[security] $(printf '%s' "$SECURITY_SECTION" | grep -c '^- \*\*') finding(s) at or above the configured threshold — included in the review prompt"
@@ -763,15 +763,18 @@ $PROJECT_INSTRUCTIONS
 
 ## Verdict — HOW TO REPORT (strict)
 
-All communication happens ON THE PULL REQUEST (comments on #$PR_NUMBER). To
-post one, source the secrets first in any shell:
+All communication happens ON THE $CR_NOUN (comments on #$PR_NUMBER). To post
+one, write the text to a file and hand the file over:
 
     source ~/.openclaw/.runtime-secrets.env
-    curl -sf -X POST -H \"Authorization: Bearer \$GITHUB_TOKEN\" \\
-      -H \"Accept: application/vnd.github+json\" \\
-      -H \"X-GitHub-Api-Version: 2022-11-28\" \\
-      -d '{\"body\":\"<text>\"}' \\
-      $GH_API/repos/$REPO/issues/$PR_NUMBER/comments
+    cat > /tmp/verdict.md <<'EOF'
+    <text>
+    EOF
+    forge-cli --repo $REPO comment --number $PR_NUMBER --body-file /tmp/verdict.md
+
+Use a FILE, not an argument: your verdict quotes code, and backticks and
+\$(...) in an argument are executed by the shell before they ever reach the
+$CR_NOUN.
 
 - **Problems found** → post ONE comment that starts with EXACTLY this first
   line:
@@ -926,19 +929,19 @@ if [ -z "$VERDICT" ]; then
   exit 1
 fi
 
-# The formal review, so the verdict is visible where GitHub shows review state
-# (and, on a repo that requires reviews, actually gates the merge).
+# The formal review, so the verdict is visible where the host shows review
+# state (and, on a project that requires reviews, actually gates the merge).
 if [ "$VERDICT" = "approved" ]; then
-  if submit_review APPROVE "Autonomous review: approved — see the 🔎 REVIEW RESULT comment for the acceptance-criteria checklist." 2>/dev/null; then
-    echo "[review] pull request #$PR_NUMBER approved via the reviews API"
+  if submit_review approve "Autonomous review: approved — see the 🔎 REVIEW RESULT comment for the acceptance-criteria checklist."; then
+    echo "[review] $CR_NOUN #$PR_NUMBER approved as a formal review"
   else
-    echo "[review] reviews API refused APPROVE (likely the bot authored this pull request) — the RESULT comment is the source of truth"
+    echo "[review] the review was not recorded (the bot likely authored this $CR_NOUN) — the RESULT comment is the source of truth"
   fi
 else
-  if submit_review REQUEST_CHANGES "Autonomous review: changes required — see the 🔎 REVIEW RESULT comment for the findings." 2>/dev/null; then
-    echo "[review] changes requested on #$PR_NUMBER via the reviews API"
+  if submit_review request-changes "Autonomous review: changes required — see the 🔎 REVIEW RESULT comment for the findings."; then
+    echo "[review] changes requested on #$PR_NUMBER as a formal review"
   else
-    echo "[review] reviews API refused REQUEST_CHANGES (likely the bot authored this pull request) — the RESULT comment is the source of truth"
+    echo "[review] the review was not recorded (the bot likely authored this $CR_NOUN) — the RESULT comment is the source of truth"
   fi
 fi
 

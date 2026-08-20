@@ -35,30 +35,32 @@ class ParkIsVisibleAndReleasesTheSlot(ShellTestCase):
         return f"{name}.sh"
 
     def preamble(self, labels='[]', last_comment=None, state="open"):
-        """A sandbox where the API is the fake curl and state is fixture files."""
+        """A sandbox where the host is the fake seam and state is fixture files.
+
+        The records are in the bot's OWN shape, because that is what the block
+        under test now receives — labels are names, an author is a username.
+        """
         fixtures = os.path.join(self.home, "fx")
         os.makedirs(fixtures, exist_ok=True)
         import json
-        with open(os.path.join(fixtures, "repos_o_r_issues_5"), "w") as f:
+        with open(os.path.join(fixtures, "issue_5"), "w") as f:
             json.dump({"number": 5, "state": state,
-                       "labels": [{"name": n} for n in json.loads(labels)]}, f)
+                       "labels": json.loads(labels)}, f)
         comments = []
         if last_comment:
-            comments.append({"user": {"login": last_comment[0]},
+            comments.append({"id": 1,
+                             "author": {"username": last_comment[0]},
                              "body": last_comment[1]})
-        with open(os.path.join(fixtures, "repos_o_r_issues_5_comments"), "w") as f:
+        with open(os.path.join(fixtures, "comments_5"), "w") as f:
             json.dump(comments, f)
         return "\n".join([
             'set -u',
             'REPO=o/r', 'ISSUE_NUM=5', 'BOT_LOGIN=bot',
-            'GH_API=https://api.github.com',
-            'AUTH_HEADER="Authorization: Bearer t"',
-            'ACCEPT_HEADER="Accept: application/vnd.github+json"',
-            'APIV_HEADER="X-GitHub-Api-Version: 2022-11-28"',
+            'FORGE=(forge-cli --repo "$REPO")',
             f'AWAITING_HUMAN_MARKER="$PWD/awaiting-human"',
             'repo_owner_login() { echo owner; }',
-            f'export FAKE_CURL_DIR="$PWD/fx"',
-            f'export FAKE_CURL_LOG="$PWD/curl.log"',
+            f'export FAKE_FORGE_DIR="$PWD/fx"',
+            f'export FAKE_FORGE_LOG="$PWD/forge.log"',
         ])
 
     def test_parking_adds_the_on_hold_label(self):
@@ -68,10 +70,17 @@ class ParkIsVisibleAndReleasesTheSlot(ShellTestCase):
             f'. "{blk}"',
             'park_on_hold',
         ]))
-        log = open(os.path.join(self.home, "curl.log")).read() if \
-            os.path.exists(os.path.join(self.home, "curl.log")) else ""
-        self.assertIn("/issues/5/labels", log,
+        path = os.path.join(self.home, "forge.log")
+        log = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
+        # The VERB is the assertion. It used to be a URL fragment, which was
+        # always standing in for "it added a label" and could only be read by
+        # someone who knew the endpoint.
+        self.assertIn("add-labels", log,
                       f"no label write was attempted. out={out} err={err}")
+        # Defined before applied: at least one host refuses to put an
+        # undefined label on an issue, so a park in a fresh repository would
+        # silently do nothing without this.
+        self.assertIn("ensure-label", log)
         self.assertIn("parked On Hold", out)
 
     def test_an_already_parked_issue_is_not_relabelled(self):

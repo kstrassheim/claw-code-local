@@ -273,6 +273,36 @@ RUN ARCH=$(dpkg --print-architecture) \
  && terraform version | head -1 \
  && terraform-mcp-server --version 2>&1 | head -1 || true
 
+# OpenTofu CLI + its registry MCP.
+#
+# Alongside terraform, not instead of it. A project's state file and provider
+# lockfile are written by whichever binary produced them, and running the other
+# one against them is at best a rewrite and at worst a state migration nobody
+# asked for — so the bot carries both and uses whichever the repository has
+# committed to.
+#
+# The MCP is an npm package rather than a release binary. It is pinned exactly
+# and installed at build time: `npx` would fetch it on first use, from a pod
+# whose egress is restricted, at the moment the agent is trying to do
+# something else.
+ARG OPENTOFU_VERSION
+ARG OPENTOFU_MCP_VERSION
+USER root
+RUN ARCH=$(dpkg --print-architecture) \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends unzip \
+ && curl -fsSL -o /tmp/tofu.zip \
+      "https://github.com/opentofu/opentofu/releases/download/v${OPENTOFU_VERSION}/tofu_${OPENTOFU_VERSION}_linux_${ARCH}.zip" \
+ && unzip -q -o /tmp/tofu.zip -d /tmp/tofu \
+ && install -m 0755 /tmp/tofu/tofu /usr/local/bin/tofu \
+ && rm -rf /tmp/tofu.zip /tmp/tofu \
+ && npm install -g --no-audit --no-fund --loglevel=error \
+      "@opentofu/opentofu-mcp-server@${OPENTOFU_MCP_VERSION}" \
+ && apt-get purge -y --auto-remove unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && tofu version | head -1 \
+ && command -v opentofu-mcp-server
+
 # Chromium. libnss3-tools provides `certutil`, used at pod start to trust the
 # internal CA in Chromium's NSS store (see render-config.sh) so the tester can
 # open internal HTTPS deploy URLs without ERR_CERT_AUTHORITY_INVALID.
@@ -670,6 +700,7 @@ COPY --chmod=0755 reviewer-runner.sh       /usr/local/bin/reviewer-runner
 # Estimation — sizes a story on the cheap planning model one tick before the
 # solver picks it up, so the solver can route by size.
 COPY --chmod=0755 estimate-runner.sh       /usr/local/bin/estimate-runner
+COPY --chmod=0755 forge-cli                /usr/local/bin/forge-cli
 
 # Shared Python modules. Installed FLAT and extension-less alongside the
 # scripts because that is how they are imported at runtime — by bare name,

@@ -48,6 +48,14 @@ class FakeForge(forge.Forge):
         self.linked: dict[int, list[int]] = {}         # issue -> change requests
         self.verdicts: dict[int, list[dict]] = {}
         self.checks: dict[str, str] = {}               # sha -> state
+        self.files: dict[int, list[dict]] = {}         # change request -> files
+        self.requested: dict[int, list[str]] = {}      # change request -> asked
+        self.check_logs: dict[str, str] = {}           # sha -> failure output
+        self.check_list: dict[str, list] = {}          # sha -> [{name, state}]
+        self.recent: list[dict] = []                   # recently updated
+        self.branches: dict[str, str] = {}             # branch -> head sha
+        self.files_at_ref: dict = {}                   # (path, ref) -> text
+        self.next_issue_number = 100
         self.default_checks = forge.NONE
         self.repos: list[str] = []
         self.heads: dict[str, tuple[str, str]] = {}
@@ -129,6 +137,77 @@ class FakeForge(forge.Forge):
 
     def remove_label(self, repo: str, number: int, label: str) -> bool:
         return self._record("unlabel", repo, number, label)
+
+    # -- the rest of what the runners ask ---------------------------------
+
+    def checks(self, repo: str, sha: str) -> list[dict]:
+        self._maybe_raise("checks")
+        return list(self.check_list.get(sha, []))
+
+    def change_request_files(self, repo: str, number: int) -> list[dict]:
+        self._maybe_raise("change_request_files")
+        return list(self.files.get(number, []))
+
+    def submit_review(self, repo: str, number: int, verdict: str,
+                      body: str) -> bool:
+        return self._record("review", repo, number, (verdict, body))
+
+    def review_requests(self, repo: str, number: int) -> list[str]:
+        self._maybe_raise("review_requests")
+        return list(self.requested.get(number, []))
+
+    def request_review(self, repo: str, number: int, reviewers) -> bool:
+        return self._record("request-review", repo, number, list(reviewers))
+
+    def remove_review_request(self, repo: str, number: int,
+                              reviewers) -> bool:
+        return self._record("unrequest-review", repo, number, list(reviewers))
+
+    def react(self, repo: str, number: int, comment_id, emoji: str) -> bool:
+        return self._record("react", repo, number, (comment_id, emoji))
+
+    def failing_check_log(self, repo: str, sha: str, limit: int = 20000) -> str:
+        self._maybe_raise("failing_check_log")
+        return self.check_logs.get(sha, "")
+
+    def recent_change_requests(self, repo: str, state: str = "closed",
+                               limit: int = 50) -> list[dict]:
+        self._maybe_raise("recent_change_requests")
+        return list(self.recent)[:limit]
+
+    def open_issues(self, repo: str, limit: int = 100) -> list[dict]:
+        self._maybe_raise("open_issues")
+        return [i for i in self.issues if i.get("repo") == repo][:limit]
+
+    def create_issue(self, repo: str, title: str, body: str = "",
+                     labels=None, assignees=None) -> int:
+        if not self._record("create-issue", repo, None,
+                            {"title": title, "body": body,
+                             "labels": list(labels or []),
+                             "assignees": list(assignees or [])}):
+            return 0
+        self.next_issue_number += 1
+        return self.next_issue_number
+
+    def branch_head(self, repo: str, branch: str) -> str:
+        self._maybe_raise("branch_head")
+        return self.branches.get(branch, "")
+
+    def file_at_ref(self, repo: str, path: str, ref: str) -> str:
+        self._maybe_raise("file_at_ref")
+        return self.files_at_ref.get((path, ref), self.files_at_ref.get(path, ""))
+
+    def comment_on_commit(self, repo: str, sha: str, body: str) -> bool:
+        return self._record("commit-comment", repo, None, (sha, body))
+
+    def ensure_label(self, repo: str, name: str, color: str = "",
+                     description: str = "") -> bool:
+        # Recorded against the repository rather than an issue: defining a
+        # label is a repository-wide act, and a test asserting "it was defined
+        # before it was applied" needs to see the order.
+        return self._record("define-label", repo, None,
+                            {"name": name, "color": color,
+                             "description": description})
 
     def close_issue(self, repo: str, number: int, delivered: bool) -> bool:
         return self._record("close", repo, number, delivered)
