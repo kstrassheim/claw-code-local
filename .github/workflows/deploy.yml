@@ -97,8 +97,37 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clone Upstream OpenClaw
+      # The upstream image is built ONCE PER UPSTREAM REF, not once per deploy.
+      #
+      # It used to be rebuilt every time, and that cost far more than the ~12
+      # minutes it spent: the base build is multi-stage, and BuildKit's inline
+      # cache records only the FINAL stage, so its `build` and `runtime-assets`
+      # stages re-ran on every deploy however well the cache worked. A base
+      # image that is rebuilt is a base image with a NEW ID, and the image ID
+      # of `FROM` is part of the cache key of every layer above it — so our own
+      # Dockerfile, ninety-odd layers of it, could never reuse a single one.
+      # It did not: zero cache hits, every run, eighteen minutes.
+      #
+      # The ref is pinned in VERSIONS and changes about monthly, so it is
+      # keyed by REF rather than kept under one moving `buildcache-base` tag.
+      # A hit skips the clone and the base build entirely; a miss is the first
+      # deploy after an upstream bump and pays what it always paid.
+      - name: Reuse The Upstream Image For This Ref
+        id: base
         if: steps.skip.outputs.skip != 'true'
+        run: |
+          if docker pull "${IMAGE_NAME}:base-${UPSTREAM_REF}" 2>/dev/null; then
+            docker tag "${IMAGE_NAME}:base-${UPSTREAM_REF}" \
+                       "openclaw-base:${UPSTREAM_REF}"
+            echo ">> reusing the upstream image already built for ${UPSTREAM_REF}"
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo ">> no upstream image for ${UPSTREAM_REF} yet — building it"
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clone Upstream OpenClaw
+        if: steps.skip.outputs.skip != 'true' && steps.base.outputs.have != 'true'
         run: |
           git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
           cd _openclaw_src
@@ -106,7 +135,7 @@ jobs:
           git -c advice.detachedHead=false checkout "${UPSTREAM_REF}"
 
       - name: Build Upstream Image
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.skip.outputs.skip != 'true' && steps.base.outputs.have != 'true'
         env:
           DOCKER_BUILDKIT: "1"
         run: |
@@ -143,6 +172,106 @@ jobs:
           # Pushing a freshly built cache is what REPLACES a corrupt one, so
           # the recovery is self-healing rather than one-shot.
           docker push "${IMAGE_NAME}:buildcache-base" || true
+          # And the ref-keyed copy, which is what every LATER deploy of this
+          # same upstream ref pulls instead of doing any of the above. Pushed
+          # last: a tag that exists must name an image that was built, or the
+          # next run reuses a half-pushed base and fails in a way that reads
+          # like a code change broke the build.
+          docker tag "openclaw-base:${UPSTREAM_REF}" \
+                     "${IMAGE_NAME}:base-${UPSTREAM_REF}"
+          docker push "${IMAGE_NAME}:base-${UPSTREAM_REF}" || true
+
+      # A KEPT TAG IS NEVER GARBAGE COLLECTED, so this deletes its own.
+      #
+      # The registry's weekly `garbage-collect --delete-untagged` reclaims
+      # manifests that no tag points at. `base-<ref>` IS a tag, so without
+      # this every upstream bump would leave a whole base image behind for
+      # good — on a disk that is shared and has filled before.
+      #
+      # Deletion is by MANIFEST DIGEST, because the API has no delete-a-tag:
+      # removing a digest removes every tag that names it. So a digest any
+      # KEPT tag also names is left alone — the tags of one unchanged build
+      # routinely share a digest, and `latest` and the running version tag
+      # usually do — or this would delete the deployed image while reporting
+      # that it tidied up an old base.
+      #
+      # Never fatal: a deploy that shipped must not read as failed because
+      # the housekeeping after it could not reach the registry.
+      - name: Forget Base Images For Superseded Upstream Refs
+        if: steps.skip.outputs.skip != 'true' && steps.base.outputs.have != 'true'
+        continue-on-error: true
+        env:
+          REGISTRY_USERNAME: ${{ secrets.OPENCLAW_REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.OPENCLAW_REGISTRY_PASSWORD }}
+        run: |
+          python3 - <<'CLEANUP'
+          import base64, json, os, ssl, urllib.error, urllib.request
+
+          host = os.environ["REGISTRY"]
+          repo = "openclaw/claw-code-local"
+          keep_ref = os.environ["UPSTREAM_REF"]
+          api = f"https://{host}/v2/{repo}"
+          cred = base64.b64encode(
+              f'{os.environ["REGISTRY_USERNAME"]}:{os.environ["REGISTRY_PASSWORD"]}'
+              .encode()).decode()
+          # The registry serves a certificate from the cluster's own CA, which
+          # the runner does not carry. This talks to it by IP inside the
+          # cluster and sends credentials, not anonymous requests.
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+          ACCEPT = ", ".join([
+              "application/vnd.docker.distribution.manifest.v2+json",
+              "application/vnd.docker.distribution.manifest.list.v2+json",
+              "application/vnd.oci.image.manifest.v1+json",
+              "application/vnd.oci.image.index.v1+json",
+          ])
+
+          def call(method, path, accept=False):
+              req = urllib.request.Request(f"{api}{path}", method=method)
+              req.add_header("Authorization", f"Basic {cred}")
+              if accept:
+                  req.add_header("Accept", ACCEPT)
+              return urllib.request.urlopen(req, timeout=30, context=ctx)
+
+          try:
+              with call("GET", "/tags/list") as r:
+                  tags = json.load(r).get("tags") or []
+          except Exception as exc:
+              print(f">> could not list tags ({exc}) — nothing cleaned")
+              raise SystemExit(0)
+
+          def digest(tag):
+              try:
+                  with call("GET", f"/manifests/{tag}", accept=True) as r:
+                      return r.headers.get("Docker-Content-Digest") or ""
+              except Exception:
+                  return ""
+
+          stale = [t for t in tags
+                   if t.startswith("base-") and t != f"base-{keep_ref}"]
+          if not stale:
+              print(">> no base image from a superseded upstream ref")
+              raise SystemExit(0)
+
+          keep = {digest(t) for t in tags if t not in stale}
+          keep.discard("")
+
+          for tag in stale:
+              d = digest(tag)
+              if not d:
+                  continue
+              if d in keep:
+                  print(f">> keeping {tag}: a tag still in use names the same image")
+                  continue
+              try:
+                  call("DELETE", f"/manifests/{d}").close()
+                  print(f">> forgot {tag} — the weekly collection reclaims its blobs")
+              except urllib.error.HTTPError as exc:
+                  print(f">> could not delete {tag}: HTTP {exc.code}")
+              except Exception as exc:
+                  print(f">> could not delete {tag}: {exc}")
+          CLEANUP
 
       - name: Extend Image with Python Packages
         if: steps.skip.outputs.skip != 'true'

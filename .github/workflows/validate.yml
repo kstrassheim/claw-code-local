@@ -172,7 +172,6 @@ jobs:
     runs-on: arc-runner-scale-claw-code-local
     env:
       IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
-      OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -262,13 +261,11 @@ jobs:
             exit 1
           fi
 
-      - name: Clone Upstream OpenClaw
-        run: |
-          git clone --depth 1 "${OPENCLAW_REPO}" _openclaw_src
-          cd _openclaw_src
-          git fetch --tags --force
-          git -c advice.detachedHead=false checkout "${UPSTREAM_REF}"
-
+      # The base image is TAKEN, not built. It used to be cloned from upstream
+      # and rebuilt here as well — twelve minutes of it — and then the step
+      # below passed the MIRRORED image as BASE_IMAGE and the locally built
+      # one was never used by anything. What this job verifies is that our own
+      # Dockerfile builds on top of the base, and that is unaffected.
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
         run: |
           SRC_TAG="${UPSTREAM_REF#v}"
@@ -279,12 +276,6 @@ jobs:
           else
             docker buildx imagetools create --tag "${DST}" "${SRC}"
           fi
-
-      - name: Build Upstream Image
-        run: |
-          docker build \
-            -t "openclaw-base:${UPSTREAM_REF}" \
-            _openclaw_src
 
       - name: Extend Image with Python Packages
         run: |
