@@ -87,13 +87,43 @@ jobs:
           test -n "${REGISTRY_PASSWORD:-}"
           echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
 
+      # `docker manifest inspect` is a CLI-SIDE HTTPS call. It does not go
+      # through the dind dockerd, so the /etc/docker/certs.d mount that lets
+      # `docker pull` and `docker push` trust mainpi.local:30500 is invisible
+      # to it. The CA is mounted on the runner pod at
+      # /usr/local/share/ca-certificates/, but nothing has folded it into the
+      # bundle Go reads, so the call fails with `x509: certificate signed by
+      # unknown authority`.
+      #
+      # Which was invisible, because the check below sends that error to
+      # /dev/null and reads a non-zero exit as "the image is not built yet".
+      # So the skip NEVER fired: every deploy rebuilt and re-pushed an image
+      # that already existed, including deploys of commits that do not change
+      # the image at all. Twenty minutes, every time.
+      #
+      # validate.yml hit this first and documents it against
+      # `buildx imagetools`; the same fix is the same one line.
+      - name: Trust The Registry CA From The Runner Itself
+        run: |
+          sudo update-ca-certificates 2>&1 | tail -3
+
       - name: Skip If Image Already Built
         id: skip
         run: |
-          if docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+          # Errors are reported rather than swallowed. "Cannot reach the
+          # registry" and "the image is not there" lead to the same decision —
+          # build it — but only one of them is a problem, and the difference
+          # has to be visible in the log or it stays invisible for months.
+          if err="$(docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 >/dev/null)"; then
             echo ">> ${IMAGE_NAME}:${IMAGE_TAG} already in registry, skipping build"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
+            case "$err" in
+              *"manifest unknown"*|*"not found"*|*"no such manifest"*)
+                echo ">> ${IMAGE_NAME}:${IMAGE_TAG} is not built yet" ;;
+              *)
+                echo "::warning::could not ask the registry whether ${IMAGE_TAG} exists — building it. ${err}" ;;
+            esac
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
