@@ -2681,6 +2681,14 @@ openclaw agent --local \
   --session-id "$SESSION_ID" \
   --message "$INITIAL_PROMPT" || echo "[agent] turn 1 exited non-zero ($?) — continuing into poll loop"
 
+# If the turn ended by ASKING the human, do not sit on the lock. The poll
+# loop below would otherwise hold this repository's only spawn slot for the
+# whole run lifetime — hours — while sleeping five minutes at a time waiting
+# for a reply, and every other issue in the repository would simply never
+# start. Parking here releases the slot immediately; the planner re-picks this
+# issue (ranked last) the moment a reply lands.
+if yield_if_awaiting_human; then exit 0; fi
+
 # -- poll loop --------------------------------------------------------
 
 START_TIME=$(date +%s)
@@ -2692,6 +2700,11 @@ while :; do
     echo "[$(date -Iseconds)] max lifetime reached — exiting"
     break
   fi
+
+  # Re-checked EVERY iteration, not only after the first turn: a later turn
+  # can end in a question just as the first one can, and a lock held through
+  # a five-minute sleep is the same starvation whichever turn caused it.
+  if yield_if_awaiting_human; then break; fi
 
   # Exit when the issue is closed (full wipe) or when any open PR
   # linked to this issue exists (preserve cursor for next tick).
