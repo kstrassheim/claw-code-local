@@ -426,6 +426,24 @@ echo "============================================================"
 echo "[$(date -Iseconds)] fixer start  repo=$REPO  issue=#$ISSUE_NUM"
 echo "============================================================"
 
+# Record the STORY this run is working, and place it in the current sprint.
+#
+# Estimation records it too, and that is not enough on its own: an issue that
+# already carries a size is never handed to the estimator again — the planner
+# sends it straight here — so every story sized before this existed, and every
+# story a human sized by hand, would never be written at all. The reports then
+# read zero for work that was implemented and merged, which looks like an
+# answer rather than like a missing record.
+#
+# The write is a merge on a deterministic id, so calling it from both places
+# fills in what each one knows and blanks nothing. Never fatal: the run is the
+# product, the bookkeeping about it is not.
+if command -v planning-story >/dev/null 2>&1; then
+  planning-story --repo "$REPO" --issue "$ISSUE_NUM" \
+    --title "$ISSUE_TITLE" --url "$ISSUE_URL" \
+    --points "${STORY_POINTS:-}" || true
+fi
+
 # -- GH API helpers ---------------------------------------------------
 
 GH_API="https://api.github.com"

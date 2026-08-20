@@ -419,4 +419,33 @@ if [ -n "$NOTE_PAYLOAD" ]; then
     || echo "[estimate] WARNING: could not post the estimate comment"
 fi
 
+# Record the STORY, and place it in the sprint it is being worked in.
+#
+# This is the first moment the story has both things that make it worth
+# recording: a size, and a decision to work it. Until it is written there is
+# nothing for the delivery sweep to attach a merge to and nothing for a sprint
+# report to count — every bucket reads zero, for work that was estimated,
+# implemented and merged. A report that says zero is worse than one that
+# errors, because zero looks like an answer.
+#
+# Re-estimating is safe: the id is deterministic and the write is an upsert.
+# Never fatal — the estimate itself is already posted, and bookkeeping about
+# the work must not fail the work.
+if [ -n "${POINTS:-}" ] && command -v planning-story >/dev/null 2>&1; then
+  ISSUE_TITLE="$(printf '%s' "$ISSUE_JSON" | python3 -c \
+    'import sys,json; print((json.load(sys.stdin) or {}).get("title",""))' 2>/dev/null || echo "")"
+  ISSUE_LABELS="$(printf '%s' "$ISSUE_JSON" | python3 -c \
+    'import sys,json; print(",".join(str((l or {}).get("name","")) for l in ((json.load(sys.stdin) or {}).get("labels") or [])))' 2>/dev/null || echo "")"
+  planning-story \
+    --host "${PLANNING_HOST:-github}" \
+    --repo "$REPO" \
+    --issue "$ISSUE_NUM" \
+    --title "$ISSUE_TITLE" \
+    --url "https://github.com/$REPO/issues/$ISSUE_NUM" \
+    --points "$POINTS" \
+    --estimator "${AGENT_MODEL_NAME:-planning}" \
+    --labels "$ISSUE_LABELS" \
+    2>&1 || true
+fi
+
 exit 0

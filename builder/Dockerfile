@@ -717,6 +717,7 @@ COPY --chmod=0644 project-instructions.sh /usr/local/bin/project-instructions.sh
 # Planning / reporting surface.
 COPY --chmod=0755 planning              /usr/local/bin/planning
 COPY --chmod=0755 planning-record       /usr/local/bin/planning-record
+COPY --chmod=0755 planning-story        /usr/local/bin/planning-story
 COPY --chmod=0755 record-deliveries     /usr/local/bin/record-deliveries
 
 # Notification and rendering helpers.
