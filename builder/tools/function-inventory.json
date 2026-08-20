@@ -92,6 +92,7 @@
     "heartbeat-issue-tick.py:list_all_assigned_open_issues",
     "heartbeat-issue-tick.py:list_locked_repos",
     "heartbeat-issue-tick.py:list_wait_markers",
+    "heartbeat-issue-tick.py:newest_is_the_bot",
     "heartbeat-issue-tick.py:read_allowlist",
     "heartbeat-issue-tick.py:status_of_issue",
     "issue_priority.py:_normalise",

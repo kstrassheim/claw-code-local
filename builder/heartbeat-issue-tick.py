@@ -92,6 +92,26 @@ HTTP_TIMEOUT = 15
 ON_HOLD = "on hold"
 
 
+# The API roots, as CONSTANTS rather than literals scattered through the file.
+#
+# This planner discovers GitHub issues only. That is a real limitation, not a
+# stylistic one: the bot is meant to work GitLab projects in parallel, and the
+# discovery half for GitLab is not written yet. Centralising the base here does
+# not add that support — it removes the reason it would have to be retro-fitted
+# into a dozen call sites when it is added, and makes the GitHub assumption
+# visible in one place instead of implicit in every URL.
+#
+# GITHUB_API is overridable for GitHub Enterprise, which costs nothing and is
+# the same substitution a second platform will need.
+GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
+
+# Present so the gap is stated rather than merely absent: when GitLab
+# discovery lands it reads these, exactly as the GitHub half reads GITHUB_API
+# and GITHUB_TOKEN. Empty means "skip GitLab", which is today's behaviour.
+GITLAB_URL = os.environ.get("GITLAB_URL", "").rstrip("/")
+GITLAB_TOKEN = os.environ.get("GITLAB_API_TOKEN", "")
+
+
 def _read(path: str) -> str:
     with open(path) as f:
         return f.read().strip()
@@ -118,7 +138,7 @@ def list_all_assigned_open_issues() -> dict[str, list[dict]]:
     page = 1
     while True:
         batch = gh_get(
-            "https://api.github.com/issues",
+            f"{GITHUB_API}/issues",
             {"filter": "assigned", "state": "open", "per_page": 100, "page": page},
         )
         for i in batch:
@@ -174,7 +194,7 @@ def bot_login() -> str:
     global _BOT_LOGIN_CACHE
     if _BOT_LOGIN_CACHE is None:
         try:
-            me = gh_get("https://api.github.com/user")
+            me = gh_get(f"{GITHUB_API}/user")
             _BOT_LOGIN_CACHE = str((me or {}).get("login") or "")
         except Exception:  # noqa: BLE001
             _BOT_LOGIN_CACHE = ""
@@ -294,7 +314,7 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
     number = issue["number"]
     try:
         comments = gh_get(
-            f"https://api.github.com/repos/{repo}/issues/{number}/comments",
+            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
             {"per_page": 100})
     except Exception:  # noqa: BLE001
         # Could not find out whether it was already asked. Asking again would
@@ -314,7 +334,7 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
     mention = repo.split("/", 1)[0]
     body = lexical_guard.ask_note(hit, mention, bot)
     if not gh_post(
-            f"https://api.github.com/repos/{repo}/issues/{number}/comments",
+            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
             {"body": body}):
         sys.stderr.write(f"  {repo}#{number}: could not post the "
                          "confirmation question — not spawning\n")
@@ -322,11 +342,91 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
 
     # On Hold is what keeps the planner from re-reading this issue every five
     # minutes, and what the human removes to say "go ahead".
-    gh_post(f"https://api.github.com/repos/{repo}/issues/{number}/labels",
+    gh_post(f"{GITHUB_API}/repos/{repo}/issues/{number}/labels",
             {"labels": ["On Hold"]})
     sys.stderr.write(f"  asked before spawning {repo}#{number}: "
                      f"{hit.get('hit', '')}\n")
     return True
+
+
+def human_has_answered(repo: str, issue: dict, bot: str) -> bool:
+    """Has a person replied since the bot last asked?
+
+    WHY THE PLANNER ASKS THIS AND NOT THE SOLVER.
+
+    An issue parked awaiting a human ranks LAST so the bot moves on to work it
+    can influence. The obvious design is to let the SOLVER clear the park when
+    it next runs and sees a reply — which is what the comment here used to
+    claim happened.
+
+    It cannot. Ranked last, with any backlog at all, the issue is never
+    spawned; never spawned, the marker is never cleared; never cleared, it
+    stays ranked last. The park becomes permanent the moment there is other
+    work, and answering the question does not release it. Observed on an
+    issue that sat seven hours after the human replied, with the reply sitting
+    unread on the issue the whole time.
+
+    So the planner decides it, from the API, without needing the solver to run
+    at all. Both places a person can answer are checked, because the handoff
+    asks them to act in either: a comment on the ISSUE, or a comment or review
+    on the pull request. Either resumes the issue.
+
+    Fails toward RESUMING. An API error here means the issue is worked
+    normally rather than parked, and the cost of being wrong that way is one
+    spawn that exits in seconds — against a park that never lifts.
+    """
+    number = issue.get("number")
+    if not number:
+        return True
+
+    def newest_is_the_bot(comments) -> bool:
+        rows = [c for c in (comments or []) if isinstance(c, dict)]
+        if not rows:
+            return False          # nothing said at all — nobody is waiting
+        author = ((rows[-1].get("user") or {}).get("login") or "").lower()
+        return author == (bot or "").lower()
+
+    issue_comments = gh_get(
+        f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
+        {"per_page": "100"})
+    if not isinstance(issue_comments, list):
+        return True               # cannot tell → resume
+    if not newest_is_the_bot(issue_comments):
+        return True               # a person spoke last
+
+    # They may have answered on the pull request instead — that is where a
+    # handoff asks them to act.
+    for pr in open_prs_for_issue(repo, number):
+        pr_comments = gh_get(
+            f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments", {"per_page": "100"})
+        if isinstance(pr_comments, list) and not newest_is_the_bot(pr_comments):
+            return True
+        reviews = gh_get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews",
+                         {"per_page": "100"})
+        if isinstance(reviews, list):
+            for r in reviews:
+                who = ((r.get("user") or {}).get("login") or "").lower()
+                if who and who != (bot or "").lower():
+                    return True
+    return False
+
+
+def open_prs_for_issue(repo: str, number: int) -> list[int]:
+    """Open pull requests that close this issue, by body keyword or branch."""
+    prs = gh_get(f"{GITHUB_API}/repos/{repo}/pulls",
+                 {"state": "open", "per_page": "100"})
+    if not isinstance(prs, list):
+        return []
+    out = []
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        head = ((pr.get("head") or {}).get("ref") or "")
+        body = pr.get("body") or ""
+        if head.startswith(f"issue-{number}-") or                 re.search(rf"\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\s+#{number}\b",
+                          body, re.IGNORECASE):
+            out.append(pr.get("number"))
+    return [n for n in out if n]
 
 
 def k8s_find_openclaw_pod(namespace: str) -> str:
@@ -578,7 +678,12 @@ def main() -> int:
                 # on to work it can influence. The solver drops the marker the
                 # moment the human answers, which puts the issue straight back
                 # into the ordinary order.
-                if (repo, i["number"]) in awaiting_human:
+                # ...but ONLY while the person is still silent. Checking the
+                # marker alone made the park permanent: ranked last, the issue
+                # is never spawned, so the solver never runs to clear it. The
+                # answer has to lift the rank without the solver's help.
+                if (repo, i["number"]) in awaiting_human \
+                        and not human_has_answered(repo, i, bot_login()):
                     return 3
                 return 1 if status_of_issue(i) == issue_status.IN_PROGRESS else 2
 

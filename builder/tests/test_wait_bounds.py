@@ -448,9 +448,16 @@ class WaitRanking(PlannerTestCase):
         os.makedirs(self.markers, exist_ok=True)
         self.markers_readable = True
         self._ttl = tick.REVIEW_WAIT_TTL
+        # These tests are about RANKING, so the human is held silent. Whether a
+        # reply lifts the park is a separate question with its own tests — see
+        # test_park_lifts_on_reply. Without this the ranking would depend on a
+        # live API call and the subject under test would not be the ranking.
+        self._answered = tick.human_has_answered
+        tick.human_has_answered = lambda repo, issue, bot: False
 
     def tearDown(self):
         tick.REVIEW_WAIT_TTL = self._ttl
+        tick.human_has_answered = self._answered
         shutil.rmtree(self.pod_home, ignore_errors=True)
         super().tearDown()
 
