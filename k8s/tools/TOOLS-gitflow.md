@@ -28,7 +28,8 @@ branch — NOT "two related issues sharing a branch", NOT
 `feature/issue-A-B-...` combining them. Each open assigned issue
 gets its own dedicated cycle through Steps 2.5–7. Period.
 
-- No sub-branches. No parallel branches. No parallel PRs/MRs. Ever.
+- No sub-branches. No parallel branches for ONE issue. No second
+  PR/MR for an issue that already has one. Ever.
 - **No combined branches either** — if you're tempted to name a
   branch `feature/issue-X-Y` or `feature/issues-A-B-C` because
   the issues "seem related", STOP. Pick the older issue, work
@@ -40,8 +41,19 @@ gets its own dedicated cycle through Steps 2.5–7. Period.
   `-clean`, `-v2`, `-fix`, `-rebase`, `-and-<other>`,
   `-with-<feature>`, `-X-Y` variants. If something's wrong on
   the branch, fix it on that branch — don't open a sibling.
-- ONE PR/MR per repo at a time. **Never open a second** while one
-  is already open in the same repo.
+- ONE open PR/MR per ISSUE. Never open a second for an issue that
+  already has one.
+
+  **Per issue — not per repository.** A repository may legitimately
+  carry several open pull requests at once, one per issue. This used
+  to read "one per repo at a time", which is wrong in a specific and
+  costly way: when a pull request is parked waiting on a HUMAN — a
+  sign-off, or checks the bot could not get green — that wait can
+  last days, and a per-repo rule would stop all other work in that
+  repository for the duration. The planner is built for exactly this:
+  an issue waiting on a person ranks LAST and the next issue takes
+  the slot. The rule must not forbid what the planner is designed to
+  do.
 - A new branch is only created from a **FRESHLY-ADVANCED `main`**
   (or whatever the project's default branch is named):
   ```
@@ -269,14 +281,29 @@ git checkout -b feature/issue-<number>     # off the freshly-advanced default br
 ### Step 2.5 — STALE-BRANCH CLEANUP (mandatory, run TWICE per cycle: once at session start, once after a successful merge)
 
 The mantra "1 issue = 1 branch = 1 PR/MR" can only hold if
-leftover branches from past violations are deleted. List every
-remote branch authored by you that is NOT the default branch
-and NOT the branch for your current target issue. Delete each:
+leftover branches from past violations are deleted.
+
+⛔ **NEVER touch a branch whose pull request is still OPEN and whose
+issue is still OPEN.** That is not a leftover — it is another issue's
+live work, very possibly a pull request parked waiting for a human to
+sign it off or to look at checks the bot could not fix. Closing it as
+"superseded" and deleting the branch destroys work that was escalated
+to a person and is waiting on them, and the person finds out by
+discovering their review request has vanished.
+
+A branch is a leftover only when BOTH are true: nothing open points at
+it, and it is not your current target. List every remote branch
+authored by you that is NOT the default branch, NOT the branch for
+your current target issue, and has NO open pull request linked to an
+open issue. Delete each:
 
 ```
 # list branches via provider MCP (list_branches)
 # for each branch whose tip-commit author == you (whoami):
-#   - if it's `main`/`master` or `feature/issue-<current-target>`: keep
+#   - if it's `main`/`master` or the branch for your current target: keep
+#   - if it has an OPEN PR/MR whose linked issue is still OPEN: KEEP.
+#     Another issue is live on it, or it is parked awaiting a human.
+#     Do not close it, do not delete it, do not comment on it.
 #   - else: close any open PR/MR for it with "Closed: superseded by
 #           feature/issue-<target> per 1-issue-1-PR rule" comment,
 #           then delete the branch (provider MCP delete_branch /

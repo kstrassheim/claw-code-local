@@ -928,7 +928,9 @@ for c in reversed(cs if isinstance(cs, list) else []):
     # The sha is tolerated in whatever markdown the reviewer wrapped it in.
     # The verdict line is WRITTEN BY THE AGENT from a prompt template, and a
     # model formats a commit hash as code far more often than not — the real
-    # comment reads (sha `211f3ea...`), not (sha 211f3ea...). A strict pattern
+    # comment reads (sha \x60211f3ea...\x60), not a bare (sha 211f3ea...) —
+    # and that is a literal backtick, spelled as an escape because THIS COMMENT
+    # is inside the same double-quoted shell string as the code. A strict pattern
     # matched neither, so the sha parsed EMPTY, every verdict looked like it
     # belonged to some other commit, and the solver waited for a verdict it had
     # already been given. 113 ticks on one issue before anyone noticed.
