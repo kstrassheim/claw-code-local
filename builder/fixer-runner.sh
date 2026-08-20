@@ -1275,9 +1275,123 @@ escalate_once() { # $1 = marker file, $2 = fingerprint, $3 = body, $4 = log tag
   # is: a comment that cannot be posted now will not post better on the next
   # tick, and retrying it forever is the spam this file is built to avoid.
   printf '%s' "$fp" > "$marker"
-  # The wait is now on a person, so the planner should work other issues.
-  touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+  # The wait is now on a person, so the planner should work other issues —
+  # and the issue must SHOW that on GitHub, not only in a marker file.
+  park_on_hold
   return 0
+}
+
+# -- parking on a human ------------------------------------------------
+# Waiting on a person has to be VISIBLE on the issue, not only in a marker
+# file on a volume nobody can read.
+#
+# The marker is what the planner ranks on; the `On Hold` label is what a human
+# sees, and it is the label they remove to hand the issue back. Setting only
+# the marker parks the issue invisibly: the board still shows it in progress,
+# nobody knows it is waiting on them, and the only sign is that it quietly
+# stopped moving.
+#
+# Creating the label if the repository lacks it is deliberate — a project that
+# has never been worked by the bot has no `On Hold`, and a park that silently
+# fails to label is the invisible park again.
+park_on_hold() {
+  local labels
+  touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+
+  labels="$(curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+      "$GH_API/repos/$REPO/issues/$ISSUE_NUM" 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+names = [str((l or {}).get('name','')) for l in (d.get('labels') or [])]
+print('\\n'.join(names))
+" 2>/dev/null)"
+
+  # Already parked: do not write again. A no-op label write still appends a
+  # timeline event, and this runs every five minutes.
+  if printf '%s\n' "$labels" | tr 'A-Z' 'a-z' | tr -d ' -_' | grep -qx "onhold"; then
+    echo "[park] #$ISSUE_NUM is already On Hold"
+    return 0
+  fi
+
+  # Best-effort create; 422 means it already exists, which is fine.
+  printf '%s' '{"name":"On Hold","color":"eee600","description":"Parked, waiting on a person. Only a human removes it."}' \
+    | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+        -H 'Content-Type: application/json' -d @- \
+        "$GH_API/repos/$REPO/labels" >/dev/null 2>&1 || true
+
+  if printf '%s' '{"labels":["On Hold"]}' \
+    | curl -fsSL -X POST -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+        -H 'Content-Type: application/json' -d @- \
+        "$GH_API/repos/$REPO/issues/$ISSUE_NUM/labels" >/dev/null 2>&1; then
+    echo "[park] #$ISSUE_NUM parked On Hold — waiting on a person"
+  else
+    echo "[park] WARNING: could not add On Hold to #$ISSUE_NUM"
+  fi
+}
+
+# Is the newest comment on the issue the BOT asking a human something that
+# nobody has answered?
+#
+# This is how an agent-initiated block is detected. The wrapper's own
+# escalations park themselves; a question the AGENT decided to ask does not,
+# and without this the issue stays workable, holds the repository's single
+# spawn slot, and starves every other issue while waiting on a person who has
+# not been told they are being waited on.
+bot_awaiting_human_reply() {
+  local target
+  target="$(repo_owner_login 2>/dev/null)"
+  [ -n "$target" ] || return 1
+  curl -fsSL -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$APIV_HEADER" \
+    "$GH_API/repos/$REPO/issues/$ISSUE_NUM/comments?per_page=100" 2>/dev/null \
+  | BOT="$BOT_LOGIN" MENTION="$target" python3 -c "
+import sys, json, os
+bot = os.environ['BOT'].lower()
+mention = os.environ['MENTION']
+try:
+    cs = json.load(sys.stdin)
+except Exception:
+    cs = []
+cs = cs if isinstance(cs, list) else []
+if not cs:
+    sys.exit(1)
+last = cs[-1]
+author = ((last.get('user') or {}).get('login') or '').lower()
+body = last.get('body') or ''
+# The newest comment must be the BOT's and must @-mention the human. If the
+# human replied after it, the newest comment is theirs and the wait is over.
+sys.exit(0 if (author == bot and mention and ('@' + mention) in body) else 1)
+" 2>/dev/null
+}
+
+# Park and release the repo lock when the bot is waiting on a person and there
+# is no open pull request carrying the work. Returns 0 when the caller should
+# yield.
+yield_if_awaiting_human() {
+  local open_prs cnt
+  # A CLOSED issue is FINISHED, not waiting on anyone — check this FIRST. The
+  # agent closes the issue itself when a human revokes it, and its closing
+  # comment is then the newest bot comment, which reads exactly like an
+  # unanswered question. Parking here would re-open work that was just closed.
+  if [ "$(fetch_issue_state 2>/dev/null || echo open)" = "closed" ]; then
+    rm -f "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+    echo "[yield] #$ISSUE_NUM is CLOSED — not parking; releasing the repo lock"
+    return 0
+  fi
+  # An open pull request means the work is in flight, not blocked on a person;
+  # the review and approval gates own that path.
+  open_prs="$(fetch_open_prs_for_issue 2>/dev/null || echo '[]')"
+  cnt="$(printf '%s' "$open_prs" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
+  [ "$cnt" -ge 1 ] && return 1
+  if bot_awaiting_human_reply; then
+    park_on_hold
+    echo "[yield] awaiting a human reply — releasing the repo lock so other issues run"
+    return 0
+  fi
+  return 1
 }
 
 # -- autonomous-review retry -------------------------------------------
@@ -1844,6 +1958,33 @@ fi
 # In any of those cases, save the new state and fall through to the initial
 # agent invocation. Otherwise exit silently.
 WAKE_REASON=""
+
+# BEFORE anything else: if the bot is waiting on a person and no pull request
+# carries the work, park the issue visibly and release the repo lock so other
+# issues can run.
+#
+# This is the agent-initiated block, and nothing else detects it. The
+# wrapper's own escalations park themselves; a question the AGENT chose to ask
+# — "blocked on one fact only you can read out of the cluster" — used to leave
+# the issue labelled in progress and fully workable, so it held the
+# repository's single spawn slot indefinitely while waiting on someone who had
+# no idea they were being waited on. The other issues in that repository
+# simply never ran.
+#
+# A human replying makes their comment the newest, so the next tick sees no
+# unanswered question, un-parks and carries on.
+if [ -z "$EXISTING_PR_NUMBER" ] && yield_if_awaiting_human; then
+  exit 0
+fi
+
+# The human answered: the newest comment is no longer the bot's unanswered
+# question, so the park is over. Clearing the marker here rather than waiting
+# for the label to be removed by hand means an answer alone is enough.
+if [ -f "$AWAITING_HUMAN_MARKER" ] && ! bot_awaiting_human_reply; then
+  rm -f "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+  echo "[park] a human has replied — clearing the awaiting-human park"
+fi
+
 if [ -n "$EXISTING_PR_NUMBER" ]; then
   # A rebase conflict is the third wake trigger, and the one nothing else can
   # see: it is neither a mention nor a CI change, so without this the run
