@@ -2,9 +2,9 @@
 """
 reviewer-tick: emit a JSON spawn plan for the pr-reviewer CronJob.
 
-Finds every OPEN pull request across GitHub where the bot has been asked for a
-review, then queries the openclaw container's filesystem to skip pull requests
-that:
+Finds every OPEN change request the bot should look at — on every code host
+this deployment has credentials for — then queries the openclaw container's
+filesystem to skip the ones that:
   - belong to a repo with a reviewer-runner already in flight (lock dir under
     ~/.openclaw/.reviewer-locks/<owner>__<name>/ — one reviewer per repo,
     because the review checkout can't be shared)
@@ -16,35 +16,25 @@ reviews green pull requests. The issue-solver likewise waits for green before
 requesting a review; for human-authored pull requests this makes the reviewer
 wait for CI instead of reviewing code that does not build.
 
-HOW THE PULL REQUESTS ARE FOUND
--------------------------------
-GitHub has no cross-repo "pull requests awaiting my review" list endpoint, so
-this uses the search API:
+HOW THE CHANGE REQUESTS ARE FOUND
+---------------------------------
+`forge.reviewable_change_requests` answers that, and each host answers it its
+own way — see forge.py for why authorship rather than a review request is the
+primary signal on one of them, and why a listing result carries no head
+commit anywhere.
 
-    GET /search/issues?q=is:pr+is:open+author:<bot-login>
-    GET /search/issues?q=is:pr+is:open+review-requested:<bot-login>
-
-Search is a different service from the REST API and behaves like one:
-
-  - its own rate limit (30 requests/minute for an authenticated token, versus
-    5000/hour for the core API), which is why exactly ONE search runs per tick
-    and everything else is a core-API call;
-  - its own response shape — `items[]` of issue-shaped objects, with the
-    repository named only by `repository_url`, and no head SHA;
-  - eventual consistency: a review request made seconds ago may not be indexed
-    yet. It shows up on the next tick, which is the safe direction.
-
-Crucially the search result carries NO check state and no head commit, and
-neither does `GET /repos/{o}/{r}/pulls`. The gate therefore costs a per-pull-
-request fetch: the pull request itself, then its head commit's check-runs and
-classic statuses. That is 3 core calls per candidate, capped by
-REVIEWER_MAX_PRS.
+That last part is what the gate costs: the listing has no check state and no
+head commit, so each candidate is fetched (`change_request`) and its head
+commit's CI reduced (`checks_state`). Capped by REVIEWER_MAX_PRS.
 
 Pull requests in repos that are not on the bot's allowed-projects list are
 dropped before any of that — see project_allowlist.py and `project-allow`.
 Being asked for a review is how someone REQUESTS one; the list is the answer.
 
-The script is read-only against both GitHub and the openclaw pod.
+EVERY QUESTION GOES THROUGH forge.py. This file contains no request, no
+endpoint and no host-specific field name.
+
+The script is read-only against both the code host and the openclaw pod.
 
 Output (stdout):
   {
@@ -58,7 +48,10 @@ cron-reviewer-spawn.sh consumes the plan and kubectl-exec's a reviewer-runner
 into the openclaw pod for each entry with toSpawn=true.
 
 Env:
-  GITHUB_TOKEN              bot's PAT (already wired)
+  GITHUB_TOKEN              bot's credentials on GitHub
+  GITLAB_URL / GITLAB_API_TOKEN
+                            bot's credentials on GitLab; unset means the host
+                            is skipped, which is the normal state
   REVIEWER_TTL_SECONDS      stale-lock cutoff, default 7200 (reviews run the
                             app locally — give them tester-like time)
   REVIEWER_MAX_PRS          safety cap on pull requests per tick (default 8)
@@ -69,16 +62,20 @@ import os
 import ssl
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import forge  # noqa: E402
 import issue_priority  # noqa: E402
 import review_subject  # noqa: E402
+from forge import FAILED, GREEN, NONE, PENDING  # noqa: E402
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_API = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+# The code hosts this deployment has credentials for, and nothing else. Built
+# once so the whole tick asks the same objects; replaced by the tests, which
+# drive a fake in its place and so make no request at all.
+FORGES = forge.configured()
+
 TTL_SECONDS = int(os.environ.get("REVIEWER_TTL_SECONDS", "7200"))
 MAX_PRS = int(os.environ.get("REVIEWER_MAX_PRS", "8"))
 
@@ -86,214 +83,59 @@ K8S_SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 K8S_API = "https://kubernetes.default.svc"
 HTTP_TIMEOUT = 15
 
-# What a completed check-run conclusion means for the gate.
-#
-# `action_required` is a failure on purpose: it will never turn green on its
-# own, so waiting for it is waiting forever. `stale` is NOT — GitHub marks a
-# run stale when a newer run supersedes it, so the honest answer is "the real
-# answer has not arrived yet".
-PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
-FAILING_CONCLUSIONS = frozenset({
-    "failure", "timed_out", "cancelled", "canceled", "action_required",
-    "startup_failure",
-})
-
-GREEN, FAILED, PENDING, NONE = "green", "failed", "pending", "none"
-
 
 def _read(path: str) -> str:
     with open(path) as f:
         return f.read().strip()
 
 
-def gh_get(url: str, params: dict | None = None) -> list | dict:
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "reviewer-tick/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        # Search answers 403 for its own rate limit, which is a separate
-        # budget from the core API's and is worth naming: "GitHub 403" on a
-        # tick that made one request reads like a permission problem and is
-        # not one.
-        if e.code == 403 and (e.headers or {}).get("X-RateLimit-Remaining") == "0":
-            raise RuntimeError(
-                f"GitHub rate limit exhausted on {url} "
-                f"(resets at {(e.headers or {}).get('X-RateLimit-Reset', '?')})"
-            ) from None
-        raise RuntimeError(f"GitHub {e.code} on {url}: {body[:200]}") from None
-
-
 def bot_login() -> str:
-    u = gh_get(f"{GITHUB_API}/user")
-    return u.get("login", "") if isinstance(u, dict) else ""
+    """Who this tick is reviewing as, across every configured host.
+
+    One name per host in principle; in practice a deployment authenticates as
+    one account and the plan reports it for the operator's benefit. The first
+    host that answers names the tick.
+    """
+    for f in FORGES:
+        name = f.bot_identity()
+        if name:
+            return name
+    return ""
 
 
 def list_reviewable_prs(login: str) -> list[dict]:
-    """Open pull requests this bot should review: its OWN, plus any it was
-    asked to review.
+    """Open change requests this bot should review, most recent first.
 
-    TWO SEARCHES, AND THE FIRST ONE IS THE IMPORTANT ONE.
-
-    The obvious design is "review what I was asked to review" — the solver
-    requests the bot as reviewer, the reviewer picks it up. That is impossible
-    here. GitHub refuses to let a pull request's AUTHOR be added as its
-    reviewer:
-
-        422  Review cannot be requested from pull request author.
-
-    The bot authors every pull request it opens, so it can never appear in its
-    own `review-requested:` results. Keying discovery on that alone deadlocks
-    the whole pipeline silently: the solver waits for a verdict, the reviewer
-    never sees the pull request, and every tick costs nothing and does nothing
-    — which reads as "the bot is idle" rather than as a fault.
-
-    So authorship is the primary signal. `review-requested:` is kept because
-    it is the only way to catch a pull request a HUMAN asked the bot to look
-    at, including via a team, which authorship would miss.
-
-    Results are merged and de-duplicated: a pull request the bot authored AND
-    was somehow requested on must be reviewed once, not twice.
+    `login` is not passed on: each host resolves its own identity, because two
+    hosts are two accounts and asking one of them about the other's login
+    finds nothing. It stays in the signature because an empty one still means
+    "we could not establish who we are", and reviewing as nobody would pick up
+    every open change request in every permitted project.
     """
     if not login:
         return []
-
-    def search(query: str) -> list[dict]:
-        data = gh_get(
-            f"{GITHUB_API}/search/issues",
-            {
-                "q": query,
-                "sort": "updated",
-                "order": "desc",
-                "per_page": str(MAX_PRS),
-            },
-        )
-        items = data.get("items", []) if isinstance(data, dict) else []
-        return [i for i in items if isinstance(i, dict)]
-
-    seen: set[tuple[str, int]] = set()
-    out: list[dict] = []
-    for query in (f"is:pr is:open author:{login}",
-                  f"is:pr is:open review-requested:{login}"):
-        for item in search(query):
-            key = (repo_of(item), item.get("number"))
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(item)
-    return out[:MAX_PRS]
+    return FORGES.reviewable_change_requests(MAX_PRS)
 
 
 def repo_of(item: dict) -> str:
-    """`owner/name` from a search item's repository_url.
-
-    Search results do not carry the repository as a field — only the API URL
-    of it, `https://api.github.com/repos/<owner>/<name>`.
-    """
-    url = (item or {}).get("repository_url") or ""
-    marker = "/repos/"
-    if marker not in url:
-        return ""
-    return url.split(marker, 1)[1].strip("/")
+    """The repository a discovery record names."""
+    return (item or {}).get("repo") or ""
 
 
-def pull_request(repo: str, number: int) -> dict:
-    """The pull request itself. Needed because neither search nor the pulls
-    LIST endpoint carries the head SHA the whole gate turns on."""
-    try:
-        pr = gh_get(f"{GITHUB_API}/repos/{repo}/pulls/{number}")
-    except Exception:
-        return {}
-    return pr if isinstance(pr, dict) else {}
-
-
-def check_state(check_runs, combined_status) -> str:
-    """Reduce a head commit's CI to one of green / failed / pending / none.
-
-    Both halves matter and neither replaces the other: GitHub Actions and
-    anything else using the Checks API report as check-runs, while older
-    integrations post classic commit statuses. A repo can use either, or both,
-    and a gate that reads only one of them approves a pull request whose real
-    CI is red.
-
-    Precedence is failed > pending > green:
-      - a failure is decisive — waiting for the rest of a red build changes
-        nothing;
-      - anything unfinished, or any conclusion this code does not recognise,
-        means wait. Never treat "I don't know what that means" as passing.
-
-    `none` is its own answer: no check-runs and no statuses at all. That is a
-    repository with no CI wired up, not a build in progress — see the caller
-    for why it is allowed to proceed.
-    """
-    runs = (check_runs or {}).get("check_runs") or []
-    statuses = (combined_status or {}).get("statuses") or []
-
-    failed = pending = passed = 0
-
-    for run in runs:
-        if not isinstance(run, dict):
-            continue
-        status = str(run.get("status") or "").lower()
-        conclusion = str(run.get("conclusion") or "").lower()
-        if status != "completed" or not conclusion:
-            pending += 1
-        elif conclusion in FAILING_CONCLUSIONS:
-            failed += 1
-        elif conclusion in PASSING_CONCLUSIONS:
-            passed += 1
-        else:
-            pending += 1
-
-    for st in statuses:
-        if not isinstance(st, dict):
-            continue
-        state = str(st.get("state") or "").lower()
-        if state == "success":
-            passed += 1
-        elif state in ("failure", "error"):
-            failed += 1
-        else:
-            # `pending`, and anything unrecognised.
-            pending += 1
-
-    if failed:
-        return FAILED
-    if pending:
-        return PENDING
-    if passed:
-        return GREEN
-    return NONE
+def change_request(repo: str, number: int) -> dict:
+    """The change request itself. Needed because no listing endpoint on any
+    host carries the head commit the whole gate turns on."""
+    return FORGES.of(repo).change_request(repo, number)
 
 
 def head_check_state(repo: str, sha: str) -> str:
-    """The gate for one head commit. Two calls, because the two CI mechanisms
-    are two endpoints. A lookup that fails is `pending`: an unknown CI state
-    must never read as green."""
-    if not sha:
-        return PENDING
-    try:
-        runs = gh_get(f"{GITHUB_API}/repos/{repo}/commits/{sha}/check-runs",
-                      {"per_page": "100"})
-    except Exception:
-        return PENDING
-    try:
-        combined = gh_get(f"{GITHUB_API}/repos/{repo}/commits/{sha}/status",
-                          {"per_page": "100"})
-    except Exception:
-        return PENDING
-    return check_state(runs, combined)
+    """The gate for one head commit, as the host reduces it.
+
+    The reduction lives in the forge and nowhere else — see forge.py on why
+    every caller seeing raw payloads would re-derive it differently, and why
+    `none` must not read as `pending`.
+    """
+    return FORGES.of(repo).checks_state(repo, sha)
 
 
 # ---- pod-side queries -------------------------------------------------
@@ -468,8 +310,10 @@ def permission_reason(code: int | None) -> str:
 
 
 def main() -> None:
-    if not GITHUB_TOKEN:
-        print(json.dumps({"error": "GITHUB_TOKEN not set", "prs": []}))
+    if not FORGES:
+        print(json.dumps({"error": "no code host is configured (set "
+                                   "GITHUB_TOKEN, or GITLAB_URL and "
+                                   "GITLAB_API_TOKEN)", "prs": []}))
         return
     namespace = k8s_namespace()
     pod = find_openclaw_pod(namespace)
@@ -528,17 +372,15 @@ def main() -> None:
             out.append(entry)
             continue
 
-        pr = pull_request(repo, number)
+        pr = change_request(repo, number)
         if not pr:
             entry.update(toSpawn=False, reason="pr-fetch-failed")
             out.append(entry)
             continue
-        head = pr.get("head") or {}
-        base = pr.get("base") or {}
         entry.update({
-            "headSha": head.get("sha") or "",
-            "headRef": head.get("ref") or "",
-            "baseRef": base.get("ref") or "",
+            "headSha": pr.get("headSha") or "",
+            "headRef": pr.get("headRef") or "",
+            "baseRef": pr.get("baseRef") or "",
         })
 
         if (pr.get("state") or "") != "open":

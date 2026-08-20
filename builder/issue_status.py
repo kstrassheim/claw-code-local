@@ -208,6 +208,35 @@ def status_of(labels, *, state: str = "open",
     return TO_DO
 
 
+# How a close is recorded, in intent rather than in any host's spelling. The
+# two are what a caller actually knows: the work shipped, or it was called
+# off. Which field or label a code host writes that into is the forge's
+# business — see forge.py.
+DELIVERED = "delivered"
+REVOKED = "revoked"
+
+
+def status_of_item(labels, *, state: str = "open",
+                   closed_as: str | None = None) -> str:
+    """`status_of` for a work item in the bot's own vocabulary.
+
+    The planners never see a host's native close reason — they see whether the
+    work was DELIVERED or REVOKED — so this is the entry point they use, and
+    `status_of` stays as the one that speaks the field directly for readers
+    that already hold one.
+
+    `closed_as=None` on a closed item means the host recorded no intent at
+    all, which every such item predates the distinction: those were
+    deliveries, and that is what `status_of` has always said about them.
+    """
+    reason = None
+    if closed_as == REVOKED:
+        reason = NOT_PLANNED
+    elif closed_as == DELIVERED:
+        reason = COMPLETED
+    return status_of(labels, state=state, state_reason=reason)
+
+
 def is_workable(status: str) -> bool:
     """True when a planner may pick this issue up."""
     return (normalize(status) or TO_DO) in WORKABLE

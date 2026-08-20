@@ -20,9 +20,10 @@ planner applies them:
 and then the ordering rules, which decide WHICH issue a repo's single slot
 goes to.
 
-No network and no pod: `gh_get`, `gh_post` and the kubectl exec are replaced.
-The exec stub answers by inspecting the script it was handed, so the allowlist
-read and the queue publish are exercised for real rather than stubbed away.
+No network and no pod: the planner talks to a FAKE FORGE, and the kubectl
+exec is replaced. The exec stub answers by inspecting the script it was
+handed, so the allowlist read and the queue publish are exercised for real
+rather than stubbed away.
 """
 
 import contextlib
@@ -30,6 +31,8 @@ import io
 import json
 import unittest
 
+import fakeforge
+import forge
 from harness import load_script
 
 tick = load_script("heartbeat-issue-tick.py")
@@ -38,16 +41,20 @@ ALLOWED = "o/r"
 
 
 def issue(number, *, title="a task", labels=(), state="open",
-          state_reason=None, body="", repo=ALLOWED):
+          closed_as=None, body="", repo=ALLOWED):
+    """One issue in the shape a forge hands back — see forge.py."""
     return {
+        "forge": forge.GITHUB,
+        "repo": repo,
         "number": number,
         "title": title,
         "body": body,
         "state": state,
-        "state_reason": state_reason,
-        "html_url": f"https://github.com/{repo}/issues/{number}",
-        "repository_url": f"https://api.github.com/repos/{repo}",
-        "labels": [{"name": n} for n in labels],
+        # How a close was recorded, in intent: the work shipped, or it was
+        # called off. Never a host's own field.
+        "closedAs": closed_as,
+        "url": f"https://example.invalid/{repo}/issues/{number}",
+        "labels": list(labels),
     }
 
 
@@ -57,47 +64,48 @@ class PlannerTestCase(unittest.TestCase):
     maxDiff = None
 
     def setUp(self):
-        self.issues = []
         self.allowlist_text = ALLOWED + "\n"
         self.allowlist_readable = True
         self.locked = set()
-        self.comments = {}          # issue number -> list of comment dicts
-        self.posted = []            # (url, payload)
         self.published = []         # every queue-state snippet handed to exec
+
+        self.forge = fakeforge.FakeForge(identity="bot")
 
         self._saved = {
             k: getattr(tick, k) for k in
-            ("gh_get", "gh_post", "kubectl_exec_capture",
-             "k8s_find_openclaw_pod", "_read", "GITHUB_TOKEN",
-             "MAX_PER_REPO", "_BOT_LOGIN_CACHE")
+            ("kubectl_exec_capture", "k8s_find_openclaw_pod", "_read",
+             "FORGES", "MAX_PER_REPO")
         }
-        tick.gh_get = self._gh_get
-        tick.gh_post = self._gh_post
         tick.kubectl_exec_capture = self._exec
         tick.k8s_find_openclaw_pod = lambda ns: "openclaw-0"
         tick._read = lambda path: "claw-code-local"
-        tick.GITHUB_TOKEN = "token"
-        tick._BOT_LOGIN_CACHE = "bot"
+        tick.FORGES = forge.Forges([self.forge])
 
     def tearDown(self):
         for k, v in self._saved.items():
             setattr(tick, k, v)
 
+    # -- what the forge is holding --------------------------------------
+
+    @property
+    def issues(self):
+        return self.forge.issues
+
+    @issues.setter
+    def issues(self, rows):
+        self.forge.issues = list(rows)
+
+    @property
+    def comments(self):
+        """Issue number -> notes, as the forge would hand them back."""
+        return self.forge.notes
+
+    @property
+    def posted(self):
+        """Everything the planner asked the forge to write, in order."""
+        return self.forge.writes
+
     # -- the fakes ------------------------------------------------------
-
-    def _gh_get(self, url, params=None):
-        if url.endswith("/issues") and "repos/" not in url:
-            return list(self.issues)
-        if url.endswith("/comments"):
-            number = int(url.rsplit("/issues/", 1)[1].split("/")[0])
-            return list(self.comments.get(number, []))
-        if url.endswith("/user"):
-            return {"login": "bot"}
-        raise AssertionError(f"unexpected GET {url}")
-
-    def _gh_post(self, url, payload):
-        self.posted.append((url, payload))
-        return True
 
     def _exec(self, namespace, pod, *cmd, timeout=15):
         """Answer the way the pod would, keyed on what was asked."""
@@ -215,7 +223,7 @@ class StatusFilter(PlannerTestCase):
         # The lister asks for open issues only, but the status gate must not
         # depend on that: a state that changed between the fetch and the plan
         # would otherwise spawn a solver on a delivered story.
-        self.issues = [issue(1, state="closed", state_reason="completed")]
+        self.issues = [issue(1, state="closed", closed_as="delivered")]
         self.assertEqual(self.spawned(self.plan()), [])
 
     def test_an_unknown_status_label_does_not_wedge_the_rest_of_the_tick(self):
@@ -369,22 +377,19 @@ class AskBeforeSpawning(PlannerTestCase):
     def test_the_question_itself_is_posted(self):
         self.issues = [issue(1, body=self.DESTRUCTIVE)]
         self.plan()
-        bodies = [p["body"] for url, p in self.posted if url.endswith("/comments")]
+        bodies = self.forge.writes_of("comment")
         self.assertEqual(len(bodies), 1, self.posted)
         self.assertIn(tick.lexical_guard.ASK_MARKER, bodies[0])
 
     def test_the_issue_is_parked_so_the_question_is_not_re_asked_every_tick(self):
         self.issues = [issue(1, body=self.DESTRUCTIVE)]
         self.plan()
-        labels = [p for url, p in self.posted if url.endswith("/labels")]
-        self.assertEqual(labels, [{"labels": ["On Hold"]}])
+        self.assertEqual(self.forge.writes_of("labels"), [["On Hold"]])
 
     def test_a_question_already_on_the_record_is_not_asked_twice(self):
         self.issues = [issue(1, body=self.DESTRUCTIVE, labels=["On Hold"])]
-        self.comments[1] = [{
-            "id": 5, "user": {"login": "bot"},
-            "body": f"🛑 {tick.lexical_guard.ASK_MARKER}\n\nwell?",
-        }]
+        self.comments[1] = [fakeforge.note(
+            f"🛑 {tick.lexical_guard.ASK_MARKER}\n\nwell?", "bot", 5)]
         # Parked, so it never even reaches the guard — and nothing is posted.
         plan = self.plan()
         self.assertEqual(self.spawned(plan), [])
@@ -394,10 +399,8 @@ class AskBeforeSpawning(PlannerTestCase):
         # The label was taken off but the answer never came: the guard still
         # sees its own note and declines to spawn, rather than asking again.
         self.issues = [issue(1, body=self.DESTRUCTIVE)]
-        self.comments[1] = [{
-            "id": 5, "user": {"login": "bot"},
-            "body": f"🛑 {tick.lexical_guard.ASK_MARKER}\n\nwell?",
-        }]
+        self.comments[1] = [fakeforge.note(
+            f"🛑 {tick.lexical_guard.ASK_MARKER}\n\nwell?", "bot", 5)]
         plan = self.plan()
         self.assertEqual(self.spawned(plan), [])
         self.assertEqual(self.posted, [])
@@ -417,9 +420,49 @@ class AskBeforeSpawning(PlannerTestCase):
         # An issue that should have been questioned and could not be is an
         # issue to leave alone — the safe direction is the one that does no
         # work.
-        tick.gh_post = lambda url, payload: False
+        self.forge.writes_fail = True
         self.issues = [issue(1, body=self.DESTRUCTIVE)]
         self.assertEqual(self.spawned(self.plan()), [])
+
+
+class TwoHostsInOneTick(PlannerTestCase):
+    """Which host answers is decided per issue, not per deployment.
+
+    The property a global switch cannot have, and the reason the seam exists:
+    a repository on each host is planned in the SAME tick, and every question
+    about either one goes back to the host that found it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.other = fakeforge.FakeForge(forge.GITLAB, identity="bot",
+                                         noun="merge request")
+        tick.FORGES = forge.Forges([self.forge, self.other])
+        self.allowlist_text = "o/r\ngroup/app\n"
+
+    def test_both_hosts_are_planned_in_one_tick(self):
+        self.forge.issues = [issue(1)]
+        self.other.issues = [{**issue(2, repo="group/app"),
+                              "forge": forge.GITLAB}]
+        plan = self.plan()
+        self.assertEqual(self.spawned(plan), [1])
+        self.assertEqual(self.spawned(plan, "group/app"), [2])
+
+    def test_the_question_is_asked_on_the_host_that_found_the_issue(self):
+        # A write sent to the wrong host is a comment on somebody else's
+        # project — or, more usually, a 404 and a silently unasked question.
+        self.other.issues = [{**issue(2, repo="group/app",
+                                      body="Please remove the test suite."),
+                              "forge": forge.GITLAB}]
+        self.plan()
+        self.assertEqual(self.forge.writes, [])
+        self.assertEqual([w[0] for w in self.other.writes],
+                         ["comment", "labels"])
+
+    def test_one_host_answering_nothing_does_not_stop_the_other(self):
+        self.forge.issues = [issue(1)]
+        self.other.issues = []
+        self.assertEqual(self.spawned(self.plan()), [1])
 
 
 if __name__ == "__main__":

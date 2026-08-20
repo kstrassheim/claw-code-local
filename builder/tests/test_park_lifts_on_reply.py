@@ -10,112 +10,92 @@ With any backlog at all the park becomes permanent, and answering the question
 does not release it. Observed on an issue that sat seven hours after the human
 had replied, the reply unread on the issue the whole time.
 
-So the PLANNER decides it from the API, without the solver running. Both
-places a person can answer are checked, because a handoff asks them to act in
-either: the issue, or the pull request.
+So the PLANNER decides it from the code host, without the solver running.
+Both places a person can answer are checked, because a handoff asks them to
+act in either: the issue, or the change request.
+
+The planner asks a FORGE, not an API, so this drives a fake one. Which host
+answered is not a question the park has an opinion about.
 """
 
 import unittest
-from unittest import mock
 
+import fakeforge
+import forge
 from harness import load
 
 
 class ParkLiftsWhenAnswered(unittest.TestCase):
     def setUp(self):
         self.h = load("heartbeat-issue-tick")
+        self.forge = fakeforge.FakeForge(identity="bot")
+        self.h.FORGES = forge.Forges([self.forge])
 
-    def responses(self, issue_comments=None, pr_list=None,
-                  pr_comments=None, reviews=None):
-        """Route gh_get by URL shape so a test states only what it cares about."""
-        def fake(url, params=None):
-            if url.endswith("/pulls"):
-                return pr_list if pr_list is not None else []
-            if "/pulls/" in url and url.endswith("/reviews"):
-                return reviews if reviews is not None else []
-            if "/issues/" in url and url.endswith("/comments"):
-                # Distinguish the PR's comment thread from the issue's.
-                if pr_comments is not None and "/issues/7/" in url:
-                    return pr_comments
-                return issue_comments if issue_comments is not None else []
-            return []
-        return fake
-
-    def answered(self, **kw):
-        with mock.patch.object(self.h, "gh_get", self.responses(**kw)):
-            return self.h.human_has_answered("o/r", {"number": 5}, "bot")
+    def answered(self, issue_comments=None, linked=None,
+                 cr_comments=None, verdicts=None):
+        """One park decision, with only what a test cares about filled in."""
+        f = self.forge
+        f.notes[5] = list(issue_comments or [])
+        f.linked[5] = list(linked or [])
+        f.change_request_notes[7] = list(cr_comments or [])
+        f.verdicts[7] = list(verdicts or [])
+        return self.h.human_has_answered("o/r", {"number": 5}, "bot")
 
     def test_the_bots_unanswered_question_is_still_a_wait(self):
         self.assertFalse(self.answered(
-            issue_comments=[{"user": {"login": "bot"}, "body": "@owner ?"}]))
+            issue_comments=[fakeforge.note("@owner ?", "bot")]))
 
     def test_a_reply_on_the_issue_lifts_the_park(self):
         # The exact case that sat for seven hours.
         self.assertTrue(self.answered(issue_comments=[
-            {"user": {"login": "bot"}, "body": "@owner ?"},
-            {"user": {"login": "owner"}, "body": "fix it autonomously"},
+            fakeforge.note("@owner ?", "bot"),
+            fakeforge.note("fix it autonomously", "owner"),
         ]))
 
-    def test_a_reply_on_the_pull_request_lifts_it_too(self):
-        # A handoff asks the person to act on the PR, so that is where they
-        # often answer. Missing this parks an issue that was answered.
+    def test_a_reply_on_the_change_request_lifts_it_too(self):
+        # A handoff asks the person to act on the change request, so that is
+        # where they often answer. Missing this parks an issue that was
+        # answered.
         self.assertTrue(self.answered(
-            issue_comments=[{"user": {"login": "bot"}, "body": "@owner ?"}],
-            pr_list=[{"number": 7, "head": {"ref": "issue-5-fix"}, "body": ""}],
-            pr_comments=[{"user": {"login": "bot"}, "body": "asked"},
-                         {"user": {"login": "owner"}, "body": "go ahead"}]))
+            issue_comments=[fakeforge.note("@owner ?", "bot")],
+            linked=[7],
+            cr_comments=[fakeforge.note("asked", "bot"),
+                         fakeforge.note("go ahead", "owner")]))
 
     def test_a_review_by_a_person_lifts_it(self):
         self.assertTrue(self.answered(
-            issue_comments=[{"user": {"login": "bot"}, "body": "@owner ?"}],
-            pr_list=[{"number": 7, "head": {"ref": "issue-5-fix"}, "body": ""}],
-            pr_comments=[{"user": {"login": "bot"}, "body": "asked"}],
-            reviews=[{"user": {"login": "owner"}, "state": "COMMENTED"}]))
+            issue_comments=[fakeforge.note("@owner ?", "bot")],
+            linked=[7],
+            cr_comments=[fakeforge.note("asked", "bot")],
+            verdicts=[{"author": "owner", "verdict": "commented"}]))
 
     def test_the_bots_own_review_does_not_count_as_an_answer(self):
         self.assertFalse(self.answered(
-            issue_comments=[{"user": {"login": "bot"}, "body": "@owner ?"}],
-            pr_list=[{"number": 7, "head": {"ref": "issue-5-fix"}, "body": ""}],
-            pr_comments=[{"user": {"login": "bot"}, "body": "asked"}],
-            reviews=[{"user": {"login": "bot"}, "state": "APPROVED"}]))
+            issue_comments=[fakeforge.note("@owner ?", "bot")],
+            linked=[7],
+            cr_comments=[fakeforge.note("asked", "bot")],
+            verdicts=[{"author": "bot", "verdict": "approved"}]))
 
     def test_no_comments_at_all_is_not_a_wait(self):
         # Nobody has been asked anything, so nobody is being waited on.
         self.assertTrue(self.answered(issue_comments=[]))
 
-    def test_an_api_failure_resumes_rather_than_parks(self):
+    def test_a_failure_to_read_resumes_rather_than_parks(self):
         # Being wrong this way costs one spawn that exits in seconds. Being
         # wrong the other way is a park that never lifts.
-        with mock.patch.object(self.h, "gh_get", lambda *a, **k: {"message": "boom"}):
-            self.assertTrue(
-                self.h.human_has_answered("o/r", {"number": 5}, "bot"))
+        self.forge.raises["comments"] = forge.ForgeError("boom")
+        self.assertTrue(
+            self.h.human_has_answered("o/r", {"number": 5}, "bot"))
 
-
-class LinkingPullRequestsToTheIssue(unittest.TestCase):
-    def setUp(self):
-        self.h = load("heartbeat-issue-tick")
-
-    def prs(self, rows):
-        with mock.patch.object(self.h, "gh_get", lambda *a, **k: rows):
-            return self.h.open_prs_for_issue("o/r", 5)
-
-    def test_the_runners_branch_naming_links_it(self):
-        self.assertEqual(
-            self.prs([{"number": 7, "head": {"ref": "issue-5-fix"}, "body": ""}]), [7])
-
-    def test_a_closing_keyword_links_it(self):
-        self.assertEqual(
-            self.prs([{"number": 8, "head": {"ref": "whatever"},
-                       "body": "closes #5"}]), [8])
-
-    def test_a_mere_mention_does_not(self):
-        self.assertEqual(
-            self.prs([{"number": 9, "head": {"ref": "x"},
-                       "body": "unlike #5, this one"}]), [])
-
-    def test_another_issues_branch_does_not(self):
-        self.assertEqual(
-            self.prs([{"number": 10, "head": {"ref": "issue-51-fix"}, "body": ""}]), [])
+    def test_an_unreadable_change_request_resumes_too(self):
+        # Same direction, one question further in: the issue thread says the
+        # bot spoke last, and the place the person was asked to answer cannot
+        # be read at all.
+        self.forge.notes[5] = [fakeforge.note("@owner ?", "bot")]
+        self.forge.linked[5] = [7]
+        self.forge.raises["change_request_comments"] = forge.ForgeError("boom")
+        self.assertTrue(
+            self.h.human_has_answered("o/r", {"number": 5}, "bot"))
 
 
 if __name__ == "__main__":

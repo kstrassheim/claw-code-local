@@ -4,7 +4,7 @@ tester-tick: emit a JSON spawn plan for the tester CronJob.
 
 The candidate list is the ALLOWED-PROJECTS LIST — the repositories the owner
 permitted with `projects add` — and not a "recently pushed" query against the
-GitHub API. That is a correctness fix, not a shortcut: a query sorted by push
+code host. That is a correctness fix, not a shortcut: a query sorted by push
 date returns the most recently active repositories, so a permitted repository
 that is simply quiet sits below the cut and is never tested at all, silently
 and forever. The permitted list names exactly what may be tested, so there is
@@ -23,7 +23,10 @@ And before any of that, the whole tick is held back while the issue solver or
 the pull-request reviewer still have work queued — "first solve and merge,
 then test". See queue_state.py, including why a stale marker must FAIL OPEN.
 
-The script is read-only against both GitHub and the openclaw pod.
+EVERY QUESTION GOES THROUGH forge.py. This file contains no request, no
+endpoint and no host-specific field name.
+
+The script is read-only against both the code host and the openclaw pod.
 
 Output (stdout):
   {
@@ -39,7 +42,10 @@ cron-tester-spawn.sh consumes the plan and kubectl-exec's a tester-
 runner into the openclaw pod for each repo with toSpawn=true.
 
 Env:
-  GITHUB_TOKEN              bot's PAT (already wired)
+  GITHUB_TOKEN              bot's credentials on GitHub
+  GITLAB_URL / GITLAB_API_TOKEN
+                            bot's credentials on GitLab; unset means the host
+                            is skipped, which is the normal state
   TESTER_TTL_SECONDS        stale-lock cutoff, default 7200 (2h — tester
                             runs are slower than fixer, give them more
                             time before considering a lock stale)
@@ -51,16 +57,20 @@ import os
 import ssl
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import forge  # noqa: E402
 import project_allowlist  # noqa: E402
 import queue_state  # noqa: E402
 from project_allowlist import Allowlist  # noqa: E402
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+# The code hosts this deployment has credentials for, and nothing else. Built
+# once so the whole tick asks the same objects; replaced by the tests, which
+# drive a fake in its place and so make no request at all.
+FORGES = forge.configured()
+
 TTL_SECONDS = int(os.environ.get("TESTER_TTL_SECONDS", "7200"))
 MAX_REPOS = int(os.environ.get("TESTER_MAX_REPOS", "8"))
 
@@ -74,49 +84,16 @@ def _read(path: str) -> str:
         return f.read().strip()
 
 
-def gh_get(url: str, params: dict | None = None) -> list | dict:
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "tester-tick/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        raise RuntimeError(f"GitHub {e.code} on {url}: {body[:200]}") from None
-
-
 def discover_repos() -> list[str]:
-    """Repos the bot user owns OR collaborates on, most recently pushed first.
+    """Repos the bot owns OR collaborates on, most recently pushed first.
 
     The FALLBACK candidate source, used only when the allowed-projects list
     could not be read. It is not the normal path precisely because of the
-    ordering: `sort=pushed` plus a per_page cap means a quiet repository can
-    never appear, and a tester that silently stops covering a repository is
+    ordering: activity-sorted plus a cap means a quiet repository can never
+    appear, and a tester that silently stops covering a repository is
     indistinguishable from one that finds nothing wrong with it.
     """
-    # /user/repos returns all repos the authed user can access:
-    # owned, collaborator, org-member. affiliation=owner,collaborator
-    # excludes org-membership noise. `type` is mutually exclusive with
-    # `affiliation` (GitHub returns 422), so we only send affiliation.
-    repos = gh_get(
-        "https://api.github.com/user/repos",
-        {
-            "affiliation": "owner,collaborator",
-            "sort": "pushed",
-            "direction": "desc",
-            "per_page": str(MAX_REPOS),
-        },
-    )
-    return [r["full_name"] for r in repos][:MAX_REPOS]
+    return FORGES.accessible_repos(MAX_REPOS)
 
 
 def candidate_repos(allowed: Allowlist) -> list[str]:
@@ -147,20 +124,16 @@ def candidate_repos(allowed: Allowlist) -> list[str]:
 
 def head_sha_for_default_branch(full_name: str) -> tuple[str, str]:
     """Return (default_branch, head_sha). Empty strings if anything
-    goes wrong — caller treats that as "skip this repo"."""
-    try:
-        repo = gh_get(f"https://api.github.com/repos/{full_name}")
-    except Exception:
+    goes wrong — caller treats that as "skip this repo".
+
+    No configured host is one of the things that can go wrong, and it is
+    reported the same way: the repository is skipped with a reason rather than
+    the tick dying, so a deployment missing its credentials still says what it
+    could not do for every repository it was asked about.
+    """
+    if not FORGES:
         return ("", "")
-    default_branch = repo.get("default_branch") or "main"
-    try:
-        branch = gh_get(
-            f"https://api.github.com/repos/{full_name}/branches/{default_branch}"
-        )
-    except Exception:
-        return (default_branch, "")
-    sha = ((branch.get("commit") or {}).get("sha")) or ""
-    return (default_branch, sha)
+    return FORGES.of(full_name).default_branch_head(full_name)
 
 
 # ---- pod-side queries -------------------------------------------------

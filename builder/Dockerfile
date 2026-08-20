@@ -680,6 +680,10 @@ COPY --chmod=0755 estimate-runner.sh       /usr/local/bin/estimate-runner
 # A module that is merged but not listed here is deployed and then absent:
 # the code that imports it raises ImportError on every tick, in a CronJob log
 # nobody reads. `test_shipped_modules` exists to fail the build instead.
+# The code-host seam. Every planner and every runner asks its questions
+# through this, so a build without it is a build where nothing can talk to
+# anything.
+COPY --chmod=0644 forge.py              /usr/local/bin/forge.py
 COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
 COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
 COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py

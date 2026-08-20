@@ -2,8 +2,9 @@
 """
 heartbeat-issue-tick: emit a JSON spawn plan for the issue-watcher CronJob.
 
-Lists every open GitHub issue assigned to the bot (one cross-repo call),
-then queries the openclaw container's filesystem to see which repos
+Lists every open issue assigned to the bot, on every code host this
+deployment has credentials for (one cross-project call each), then
+queries the openclaw container's filesystem to see which repos
 already have an in-flight fixer (lockdir under
 ~/.openclaw/projects/<repo>/.fixer.lock). At most ONE fixer per repo
 runs at a time — they share the on-disk checkout, so two subprocesses
@@ -40,11 +41,20 @@ What survives all four is ordered by issue_priority WITHIN the
 in-flight rules, never over them: an issue already `In progress` is
 finished before a fresh one is started, whatever the labels say.
 
-The script writes to GitHub for exactly ONE reason — gate 4's question.
-Everything else it does is read-only.
+The script writes to the code host for exactly ONE reason — gate 4's
+question. Everything else it does is read-only.
+
+EVERY QUESTION GOES THROUGH forge.py. This file contains no request, no
+endpoint and no host-specific field name: it decides, and the forge answers.
+Which forge answers is decided PER ISSUE, from where the issue was
+discovered, so a deployment with two hosts works both in the same tick and a
+deployment with one behaves exactly as it always did.
 
 Env:
-  GITHUB_TOKEN              — bot's PAT (already wired)
+  GITHUB_TOKEN              — bot's credentials on GitHub
+  GITLAB_URL / GITLAB_API_TOKEN
+                            — bot's credentials on GitLab; unset means the
+                              host is skipped, which is the normal state
   HEARTBEAT_MAX_PER_REPO    (default 1)
   HEARTBEAT_TTL_SECONDS     (default 3600)
   REVIEW_WAIT_TTL           (default 7200) — how long an awaiting-review
@@ -58,7 +68,6 @@ import ssl
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -67,6 +76,7 @@ import urllib.request
 # /usr/local/bin keeps a checkout running against its own siblings.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import forge  # noqa: E402
 import issue_priority  # noqa: E402
 import issue_status  # noqa: E402
 import lexical_guard  # noqa: E402
@@ -75,7 +85,6 @@ import queue_state  # noqa: E402
 import story_estimate  # noqa: E402
 from project_allowlist import Allowlist  # noqa: E402
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 MAX_PER_REPO = int(os.environ.get("HEARTBEAT_MAX_PER_REPO", "1"))
 TTL_SECONDS = int(os.environ.get("HEARTBEAT_TTL_SECONDS", "3600"))
 # How long the solver's "I asked for a review and am waiting" marker is
@@ -92,24 +101,13 @@ HTTP_TIMEOUT = 15
 ON_HOLD = "on hold"
 
 
-# The API roots, as CONSTANTS rather than literals scattered through the file.
+# The code hosts this deployment has credentials for, and nothing else.
 #
-# This planner discovers GitHub issues only. That is a real limitation, not a
-# stylistic one: the bot is meant to work GitLab projects in parallel, and the
-# discovery half for GitLab is not written yet. Centralising the base here does
-# not add that support — it removes the reason it would have to be retro-fitted
-# into a dozen call sites when it is added, and makes the GitHub assumption
-# visible in one place instead of implicit in every URL.
-#
-# GITHUB_API is overridable for GitHub Enterprise, which costs nothing and is
-# the same substitution a second platform will need.
-GITHUB_API = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
-
-# Present so the gap is stated rather than merely absent: when GitLab
-# discovery lands it reads these, exactly as the GitHub half reads GITHUB_API
-# and GITHUB_TOKEN. Empty means "skip GitLab", which is today's behaviour.
-GITLAB_URL = os.environ.get("GITLAB_URL", "").rstrip("/")
-GITLAB_TOKEN = os.environ.get("GITLAB_API_TOKEN", "")
+# Built once at import so the whole tick asks the same objects — which is also
+# what makes the identity lookup a single request rather than one per issue.
+# Replaceable by the tests, which drive a fake in its place and so make no
+# request at all.
+FORGES = forge.configured()
 
 
 def _read(path: str) -> str:
@@ -117,88 +115,36 @@ def _read(path: str) -> str:
         return f.read().strip()
 
 
-def gh_get(url: str, params: dict | None = None) -> list | dict:
-    if params:
-        url = f"{url}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "openclaw-issue-watcher",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-        return json.loads(r.read())
-
-
 def list_all_assigned_open_issues() -> dict[str, list[dict]]:
-    by_repo: dict[str, list[dict]] = {}
-    page = 1
-    while True:
-        batch = gh_get(
-            f"{GITHUB_API}/issues",
-            {"filter": "assigned", "state": "open", "per_page": 100, "page": page},
-        )
-        for i in batch:
-            if "pull_request" in i:
-                continue
-            repo = i["repository_url"].rsplit("/repos/", 1)[1]
-            by_repo.setdefault(repo, []).append(i)
-        if len(batch) < 100:
-            break
-        page += 1
-    return by_repo
+    """Every open issue assigned to the bot, keyed by `owner/name`.
 
-
-def gh_post(url: str, payload: dict) -> bool:
-    """POST to the API. False on any failure — the planner never crashes.
-
-    The planner is read-only apart from gate 4's question, and a question it
-    could not ask is not a reason to stop planning every other repository in
-    the tick. The caller decides what a failed write means; here it is only
-    reported.
+    One call per host, merged. The forge each repository came from is recorded
+    as it goes, so every later question about that repository — its comments,
+    its change requests — goes back to the host that answered the first one.
     """
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
-            "User-Agent": "openclaw-issue-watcher",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT):
-            return True
-    except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"gh_post {url}: {type(e).__name__}: {e}\n")
-        return False
+    return FORGES.assigned_open_issues()
 
 
-_BOT_LOGIN_CACHE = None
+def forge_of(item) -> forge.Forge:
+    """The host an issue (or a repository name) belongs to."""
+    return FORGES.of(item)
 
 
-def bot_login() -> str:
-    """The login `$GITHUB_TOKEN` authenticates as, or "".
+def bot_login(f: forge.Forge) -> str:
+    """The account name a host's credentials authenticate as, or "".
 
     Resolved rather than configured for the same reason the solver resolves
     it: sibling deployments run under different accounts, and a hardcoded
     login makes "has the bot already asked this?" answer about somebody else.
+
+    An identity that cannot be read is "" rather than a failure: the tick has
+    a dozen other things to do, and every caller of this treats an unknown
+    login as "nobody has spoken yet", which is the cautious direction.
     """
-    global _BOT_LOGIN_CACHE
-    if _BOT_LOGIN_CACHE is None:
-        try:
-            me = gh_get(f"{GITHUB_API}/user")
-            _BOT_LOGIN_CACHE = str((me or {}).get("login") or "")
-        except Exception:  # noqa: BLE001
-            _BOT_LOGIN_CACHE = ""
-    return _BOT_LOGIN_CACHE
+    try:
+        return f.bot_identity()
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def read_allowlist(namespace: str, pod: str) -> Allowlist:
@@ -224,14 +170,13 @@ def read_allowlist(namespace: str, pod: str) -> Allowlist:
 
 
 def label_names(issue: dict) -> list[str]:
-    """Every label name on an issue, whatever shape the API handed back."""
-    out = []
-    for raw in issue.get("labels") or []:
-        name = raw.get("name", "") if isinstance(raw, dict) else raw
-        name = str(name or "").strip()
-        if name:
-            out.append(name)
-    return out
+    """Every label name on an issue.
+
+    A list of names is what the forge hands back, whatever the host called
+    them underneath. Kept as a function rather than inlined because it is
+    read in four places and one of them is the plan the spawner consumes.
+    """
+    return [str(n) for n in (issue.get("labels") or []) if str(n).strip()]
 
 
 def _fold(name: str) -> str:
@@ -258,36 +203,22 @@ def is_on_hold(issue: dict) -> bool:
 
 
 def status_of_issue(issue: dict) -> str:
-    """The work-item status of an issue, in issue_status' vocabulary."""
-    return issue_status.status_of(
+    """The work-item status of an issue, in issue_status' vocabulary.
+
+    A CLOSED issue says how it ended, in intent — the work shipped, or it was
+    called off — and that beats any label still stuck to it. Which field or
+    label the host recorded that in is the forge's business; the answer here
+    is the same either way.
+    """
+    return issue_status.status_of_item(
         label_names(issue),
         state=issue.get("state") or "open",
-        state_reason=issue.get("state_reason"),
+        closed_as=issue.get("closedAs"),
     )
 
 
-def _as_notes(comments) -> list[dict]:
-    """GitHub comments in the shape lexical_guard reads.
-
-    The guard is shared with the solver and speaks one note shape; GitHub
-    calls the author `user.login`. Translating here rather than teaching the
-    module a second shape keeps one definition of "has the bot already asked
-    this?" — two would eventually disagree, and the half that says "do
-    nothing" always wins.
-    """
-    out = []
-    for c in comments if isinstance(comments, list) else []:
-        if not isinstance(c, dict):
-            continue
-        out.append({
-            "id": c.get("id"),
-            "body": c.get("body") or "",
-            "author": {"username": ((c.get("user") or {}).get("login") or "")},
-        })
-    return out
-
-
-def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
+def ask_before_spawning(f: forge.Forge, repo: str, issue: dict,
+                        bot: str) -> bool:
     """True ⟺ this issue must NOT be spawned: it asks for something
     destructive and a human has to confirm first.
 
@@ -313,9 +244,7 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
 
     number = issue["number"]
     try:
-        comments = gh_get(
-            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
-            {"per_page": 100})
+        comments = f.comments(repo, number)
     except Exception:  # noqa: BLE001
         # Could not find out whether it was already asked. Asking again would
         # spam the issue; spawning would skip the gate. Do neither.
@@ -323,7 +252,7 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
                          "not spawning\n")
         return True
 
-    if lexical_guard.already_asked(_as_notes(comments), bot):
+    if lexical_guard.already_asked(comments, bot):
         # The question is on the record. It is released by a human taking the
         # On Hold label off, which is checked before this — so reaching here
         # means the question is still open.
@@ -333,17 +262,14 @@ def ask_before_spawning(repo: str, issue: dict, bot: str) -> bool:
     # later, and pinging the author would then ping the bot.
     mention = repo.split("/", 1)[0]
     body = lexical_guard.ask_note(hit, mention, bot)
-    if not gh_post(
-            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
-            {"body": body}):
+    if not f.post_comment(repo, number, body):
         sys.stderr.write(f"  {repo}#{number}: could not post the "
                          "confirmation question — not spawning\n")
         return True
 
     # On Hold is what keeps the planner from re-reading this issue every five
     # minutes, and what the human removes to say "go ahead".
-    gh_post(f"{GITHUB_API}/repos/{repo}/issues/{number}/labels",
-            {"labels": ["On Hold"]})
+    f.add_labels(repo, number, ["On Hold"])
     sys.stderr.write(f"  asked before spawning {repo}#{number}: "
                      f"{hit.get('hit', '')}\n")
     return True
@@ -366,67 +292,43 @@ def human_has_answered(repo: str, issue: dict, bot: str) -> bool:
     issue that sat seven hours after the human replied, with the reply sitting
     unread on the issue the whole time.
 
-    So the planner decides it, from the API, without needing the solver to run
-    at all. Both places a person can answer are checked, because the handoff
-    asks them to act in either: a comment on the ISSUE, or a comment or review
-    on the pull request. Either resumes the issue.
+    So the planner decides it, from the host, without needing the solver to
+    run at all. Both places a person can answer are checked, because the
+    handoff asks them to act in either: a comment on the ISSUE, or a comment
+    or a review on the change request. Either resumes the issue.
 
-    Fails toward RESUMING. An API error here means the issue is worked
-    normally rather than parked, and the cost of being wrong that way is one
-    spawn that exits in seconds — against a park that never lifts.
+    Fails toward RESUMING. Anything we cannot read here means the issue is
+    worked normally rather than parked, and the cost of being wrong that way
+    is one spawn that exits in seconds — against a park that never lifts.
     """
     number = issue.get("number")
     if not number:
         return True
 
-    def newest_is_the_bot(comments) -> bool:
-        rows = [c for c in (comments or []) if isinstance(c, dict)]
+    def newest_is_the_bot(notes) -> bool:
+        rows = [c for c in (notes or []) if isinstance(c, dict)]
         if not rows:
             return False          # nothing said at all — nobody is waiting
-        author = ((rows[-1].get("user") or {}).get("login") or "").lower()
+        author = ((rows[-1].get("author") or {}).get("username") or "").lower()
         return author == (bot or "").lower()
 
-    issue_comments = gh_get(
-        f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
-        {"per_page": "100"})
-    if not isinstance(issue_comments, list):
-        return True               # cannot tell → resume
-    if not newest_is_the_bot(issue_comments):
-        return True               # a person spoke last
+    f = forge_of(issue if issue.get("forge") else repo)
+    try:
+        if not newest_is_the_bot(f.comments(repo, number)):
+            return True           # a person spoke last
 
-    # They may have answered on the pull request instead — that is where a
-    # handoff asks them to act.
-    for pr in open_prs_for_issue(repo, number):
-        pr_comments = gh_get(
-            f"{GITHUB_API}/repos/{repo}/issues/{pr}/comments", {"per_page": "100"})
-        if isinstance(pr_comments, list) and not newest_is_the_bot(pr_comments):
-            return True
-        reviews = gh_get(f"{GITHUB_API}/repos/{repo}/pulls/{pr}/reviews",
-                         {"per_page": "100"})
-        if isinstance(reviews, list):
-            for r in reviews:
-                who = ((r.get("user") or {}).get("login") or "").lower()
+        # They may have answered on the change request instead — that is where
+        # a handoff asks them to act.
+        for cr in f.open_change_requests_for_issue(repo, number):
+            if not newest_is_the_bot(f.change_request_comments(repo, cr)):
+                return True
+            for verdict in f.review_verdicts(repo, cr):
+                who = str(verdict.get("author") or "").lower()
                 if who and who != (bot or "").lower():
                     return True
+    except Exception:  # noqa: BLE001
+        return True               # cannot tell → resume
     return False
-
-
-def open_prs_for_issue(repo: str, number: int) -> list[int]:
-    """Open pull requests that close this issue, by body keyword or branch."""
-    prs = gh_get(f"{GITHUB_API}/repos/{repo}/pulls",
-                 {"state": "open", "per_page": "100"})
-    if not isinstance(prs, list):
-        return []
-    out = []
-    for pr in prs:
-        if not isinstance(pr, dict):
-            continue
-        head = ((pr.get("head") or {}).get("ref") or "")
-        body = pr.get("body") or ""
-        if head.startswith(f"issue-{number}-") or                 re.search(rf"\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\s+#{number}\b",
-                          body, re.IGNORECASE):
-            out.append(pr.get("number"))
-    return [n for n in out if n]
 
 
 def k8s_find_openclaw_pod(namespace: str) -> str:
@@ -555,8 +457,9 @@ def list_wait_markers(namespace: str, pod: str) -> tuple[set, set]:
 
 
 def main() -> int:
-    if not GITHUB_TOKEN:
-        json.dump({"error": "GITHUB_TOKEN not set"}, sys.stdout)
+    if not FORGES:
+        json.dump({"error": "no code host is configured (set GITHUB_TOKEN, "
+                            "or GITLAB_URL and GITLAB_API_TOKEN)"}, sys.stdout)
         return 1
     try:
         namespace = _read(f"{K8S_SA_DIR}/namespace")
@@ -567,8 +470,8 @@ def main() -> int:
     started = time.time()
     try:
         issues_by_repo = list_all_assigned_open_issues()
-    except urllib.error.HTTPError as e:
-        json.dump({"error": f"list assigned issues: {e.code} {e.reason}"}, sys.stdout)
+    except forge.ForgeError as e:
+        json.dump({"error": f"list assigned issues: {e}"}, sys.stdout)
         return 2
 
     try:
@@ -598,6 +501,11 @@ def main() -> int:
     }
 
     for repo, all_issues in sorted(issues_by_repo.items()):
+        # Which host this repository lives on, decided from where its issues
+        # were discovered rather than from a deployment-wide setting. Read
+        # once per repository: every question below asks the same one.
+        f = forge_of(all_issues[0] if all_issues else repo)
+
         # Permission first: before the lock lookup, before any per-issue call,
         # before the destructive-wording question is even considered. Someone
         # assigning the bot an issue is a request; this list is the answer.
@@ -630,9 +538,15 @@ def main() -> int:
             held = {id(i) for i in parked}
             workable = [i for i in workable if id(i) not in held]
 
+        # Who this tick speaks as on THIS host. Resolved here rather than at
+        # the top of the loop so a repository the owner refused costs no
+        # request at all — the gate above is first for that reason, and an
+        # identity lookup would have quietly undone it.
+        bot = bot_login(f)
+
         # Ask about destructive-sounding work BEFORE spawning anything.
         questioned = [i for i in workable
-                      if ask_before_spawning(repo, i, bot_login())]
+                      if ask_before_spawning(f, repo, i, bot)]
         if questioned:
             asked = {id(i) for i in questioned}
             workable = [i for i in workable if id(i) not in asked]
@@ -683,7 +597,7 @@ def main() -> int:
                 # is never spawned, so the solver never runs to clear it. The
                 # answer has to lift the rank without the solver's help.
                 if (repo, i["number"]) in awaiting_human \
-                        and not human_has_answered(repo, i, bot_login()):
+                        and not human_has_answered(repo, i, bot):
                     return 3
                 return 1 if status_of_issue(i) == issue_status.IN_PROGRESS else 2
 
@@ -697,7 +611,7 @@ def main() -> int:
                 {
                     "issueNumber": i["number"],
                     "title": i["title"],
-                    "url": i["html_url"],
+                    "url": i["url"],
                     "labels": label_names(i),
                     "status": status_of_issue(i),
                     "priority": issue_priority.label_for(
