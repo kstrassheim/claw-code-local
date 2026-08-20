@@ -205,6 +205,7 @@
     "reviewer-runner.sh:_stop_agent",
     "reviewer-runner.sh:created_epoch",
     "reviewer-runner.sh:fetch_verdict_comment",
+    "reviewer-runner.sh:gh_get",
     "reviewer-runner.sh:lock_is_stale",
     "reviewer-runner.sh:on_exit",
     "reviewer-runner.sh:post_pr_comment",

@@ -448,6 +448,23 @@ class TwoHostsInOneTick(PlannerTestCase):
         self.assertEqual(self.spawned(plan), [1])
         self.assertEqual(self.spawned(plan, "group/app"), [2])
 
+    def test_forge_of_routes_an_issue_by_the_stamp_discovery_left_on_it(self):
+        # `forge_of` is what every write in this tick goes through. Routing on
+        # the repository NAME alone is not enough: names are unique within a
+        # host and not across them, so two projects called `group/app` on two
+        # hosts are one key. The stamp is the only thing that tells them apart.
+        gh_issue = issue(1)
+        gl_issue = {**issue(2, repo="group/app"), "forge": forge.GITLAB}
+        self.assertIs(tick.forge_of(gh_issue), self.forge)
+        self.assertIs(tick.forge_of(gl_issue), self.other)
+
+    def test_forge_of_falls_back_to_the_first_host_for_an_unknown_name(self):
+        # A bare repository name that discovery never saw — the tester's
+        # candidates arrive this way. One host configured makes this the only
+        # possible answer; two makes it a guess, and the guess is logged
+        # rather than silently correct.
+        self.assertIs(tick.forge_of("never/discovered"), self.forge)
+
     def test_the_question_is_asked_on_the_host_that_found_the_issue(self):
         # A write sent to the wrong host is a comment on somebody else's
         # project — or, more usually, a 404 and a silently unasked question.

@@ -179,6 +179,63 @@ class CloseSemantics(unittest.TestCase):
                     status)
 
 
+class StatusFromNeutralIntent(unittest.TestCase):
+    """`status_of_item` — the entry point the planners actually use.
+
+    They never see a host's native close reason. They see whether the work was
+    DELIVERED or REVOKED, because one of the two hosts has no such field and
+    writes the intent as a label instead. This is where that vocabulary meets
+    the status model; `status_of` stays as the one that speaks the native
+    field, for a reader that already holds one.
+    """
+
+    def setUp(self):
+        self.s = load("issue_status")
+
+    def test_delivered_and_revoked_reach_the_statuses_they_mean(self):
+        self.assertEqual(
+            self.s.status_of_item([], state="closed", closed_as="delivered"),
+            self.s.DONE)
+        self.assertEqual(
+            self.s.status_of_item([], state="closed", closed_as="revoked"),
+            self.s.WONT_DO)
+
+    def test_a_close_with_no_recorded_intent_is_a_delivery(self):
+        # Every item closed before any host recorded intent has none, and all
+        # of them shipped. Reading absence as "called off" would revoke the
+        # entire history at once, and the bot reopens what it thinks was
+        # abandoned.
+        self.assertEqual(self.s.status_of_item([], state="closed"),
+                         self.s.DONE)
+
+    def test_an_open_item_still_reads_its_status_from_the_labels(self):
+        # The close intent is irrelevant while the item is open, and the
+        # label is the only thing that says whether work has started.
+        self.assertEqual(
+            self.s.status_of_item(["status::in progress"], state="open"),
+            self.s.IN_PROGRESS)
+        self.assertEqual(self.s.status_of_item([], state="open"),
+                         self.s.TO_DO)
+
+    def test_it_agrees_with_the_native_reading_on_every_status(self):
+        # Two entry points to one model. If they can disagree, then which
+        # planner asked decides what the status is.
+        for status in self.s.STATUSES:
+            with self.subTest(status=status):
+                add, _ = self.s.label_updates([], status)
+                reason = self.s.close_reason(status)
+                state = "closed" if status in self.s.TERMINAL else "open"
+                closed_as = None
+                if reason == "completed":
+                    closed_as = "delivered"
+                elif reason == "not_planned":
+                    closed_as = "revoked"
+                self.assertEqual(
+                    self.s.status_of_item(add, state=state,
+                                          closed_as=closed_as),
+                    self.s.status_of(add, state=state, state_reason=reason))
+
+
 class LabelDefinitions(unittest.TestCase):
     def setUp(self):
         self.s = load("issue_status")

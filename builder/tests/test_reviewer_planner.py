@@ -214,6 +214,37 @@ class Ordering(PlannerTestCase):
         self.assertEqual(self.entry(self.plan(), 7)["priority"], "High")
 
 
+class TheCheckGate(PlannerTestCase):
+    """`head_check_state` — the planner's one question about CI.
+
+    It delegates, and that is the whole content of it: the reduction from a
+    host's own vocabulary to green/failed/pending/none lives in the forge and
+    nowhere else. A planner that re-derived it would be a second opinion about
+    whether a change request is safe to look at, and the two would disagree
+    the first time a host added a conclusion nobody here had heard of.
+    """
+
+    def test_it_answers_with_what_the_host_reduced_the_checks_to(self):
+        self.forge.checks["abc"] = forge.GREEN
+        self.assertEqual(rt.head_check_state(REPO, "abc"), forge.GREEN)
+
+    def test_a_commit_with_no_checks_is_not_the_same_as_one_still_running(self):
+        # `none` and `pending` lead to opposite decisions — review it now
+        # versus wait — so the planner must be able to tell them apart.
+        self.forge.checks.update({"nothing": forge.NONE, "waiting": forge.PENDING})
+        self.assertEqual(rt.head_check_state(REPO, "nothing"), forge.NONE)
+        self.assertEqual(rt.head_check_state(REPO, "waiting"), forge.PENDING)
+        self.assertNotEqual(forge.NONE, forge.PENDING)
+
+    def test_the_question_goes_to_the_host_the_repository_belongs_to(self):
+        other = fakeforge.FakeForge(forge.GITLAB, identity="bot")
+        other.checks["abc"] = forge.FAILED
+        self.forge.checks["abc"] = forge.GREEN
+        rt.FORGES = forge.Forges([self.forge, other])
+        rt.FORGES.remember("group/app", other)
+        self.assertEqual(rt.head_check_state("group/app", "abc"), forge.FAILED)
+
+
 class NothingConfigured(PlannerTestCase):
     def test_a_deployment_with_no_credentials_says_so(self):
         rt.FORGES = forge.Forges([])
