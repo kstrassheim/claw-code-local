@@ -58,7 +58,10 @@ leaving the agent with no capability list at all.
 ## Repository layout
 
 ```
-builder/        Dockerfile and per-MCP source for the openclaw image
+builder/        Dockerfile, the runner scripts, and the ConfigMap
+                generator that ships them without an image rebuild
+  tools-md/     TOOLS-*.md capability docs + ORDER (assembled into
+                the TOOLS.md the agent reads)
   heartbeat-issue-tick.py   Issue-solver planner
   cron-issue-spawn.sh       Issue-solver spawner
   fixer-runner.sh           Issue-solver runner
@@ -73,7 +76,6 @@ builder/        Dockerfile and per-MCP source for the openclaw image
   tests/        Standard-library unittest suite (no pytest, no pip)
   tools/        Repository checks run by CI
 k8s/            Kustomize bundle deployed by Argo CD
-  tools/        TOOLS-*.md fragments concatenated into TOOLS.md
   006-mongodb.yaml          Planning database, own pod and volume
   050-issue-watcher.yaml    Issue-solver CronJob, RBAC, chat skill
   051-tester.yaml           Deployment-tester CronJob, RBAC, chat skill
@@ -425,10 +427,12 @@ main:
 | `check-tools-docs` | a tools document not assembled, or truncated past the bootstrap cap |
 | `check-llm-secrets` | no model provider configured |
 | `verify-skills-locked` | the agent could gain an unreviewed capability |
-| `verify-build` | the image not building, an unlisted bundled skill, or the runtime lockdown not holding |
+| `verify-build` | the image not building, an unlisted bundled skill, or the runtime lockdown not holding. **Skipped when `OPENCLAW_VERSION` is unchanged** — the tag already exists, so there is no new image to verify |
 
 The cheap checks run on hosted runners and the image build depends on all of
-them, so a failing test costs about a minute rather than an arm64 image build
+them, so a failing test costs about a minute rather than an arm64 image build.
+On a push to main, Deploy waits for those same checks before building
+anything: a commit whose tests fail produces no image, no push and no tag
 on the single self-hosted scale set.
 
 The test suite is standard-library `unittest` — no pytest and no pip
@@ -494,23 +498,104 @@ For a fresh cluster, applied once out-of-band:
    `publish-secrets` job creates `openclaw-secrets` directly via
    kubectl. From then on, every push to `main` re-applies it.
 
-## Bumping versions
+## When a version bump is required — and when it is not
 
-Everything pinned lives in [`VERSIONS`](VERSIONS). Common cases:
+Read this before editing anything in this repository. Bumping
+`OPENCLAW_VERSION` costs a full image rebuild plus a ~1.8GB pull on the
+node (four to five minutes during which the gateway is down and every
+CronJob tick reports `no Running openclaw pod`). Most changes do not
+need one, and bumping out of habit is the expensive mistake.
 
-- New openclaw release: bump `OPENCLAW_UPSTREAM` and
-  `OPENCLAW_VERSION`. The build workflow's "Pin Image Tag" step
-  updates `k8s/kustomization.yaml` automatically — no manual edit.
-- New CLI version (gh, glab, terraform, aws, gcloud, aliyun,
-  code-server): bump the corresponding entry; the workflow rebuilds
-  the image and pushes a fresh tag.
+**The rule: bump only when the IMAGE itself must change.**
 
-Bumping `OPENCLAW_VERSION` is also how you ship updates to the
-issue-watcher wrapper scripts under `builder/` — they're baked into
-the image, so a new tag is needed for them to land.
+| You changed | Bump `OPENCLAW_VERSION`? | How it reaches the cluster |
+| --- | --- | --- |
+| `builder/*.py`, `builder/*.sh`, `forge-cli`, `mermaid-render` | **No** | ConfigMap → Argo → next CronJob tick |
+| `builder/tools-md/*.md` (capability docs) | **No** | ConfigMap → Argo → next **pod restart** |
+| `k8s/*.yaml` (manifests, skills, resources) | **No** | Argo applies them directly |
+| `builder/Dockerfile` | **Yes** | nothing else rebuilds the image |
+| A pin in `VERSIONS` (a CLI, MCP server, scanner, mermaid-cli…) | **Yes** | same |
+| A **new** file under `builder/` | **Yes**, unless you also add it to `builder/kustomization.yaml` | see the trap below |
+| `.github/workflows/*` | **No** | the workflow file is read per run |
+
+### Why script edits need no bump
+
+Everything under `builder/` ships **twice**: baked into the image, and
+generated into ConfigMaps by
+[`builder/kustomization.yaml`](builder/kustomization.yaml). The
+ConfigMaps mount at `/opt/claw-scripts`, which comes first on both
+`PATH` and `PYTHONPATH`, so the mounted copy wins.
+
+That ordering is deliberate and gives three properties:
+
+- **Edit → live without a rebuild.** Argo applies the ConfigMap and
+  kubelet refreshes the files in place, no pod restart. Runners are
+  spawned fresh per tick, so the next tick runs the new code.
+- **A failed mount degrades to stale, never to missing.** The image's
+  copy is still there. Nothing is ever absent.
+- **A ConfigMap can add a file the image does not have.** Useful for a
+  brand-new script; the image catches up at the next bump.
+
+The tools documents work the same way, with one difference: they are
+assembled into a single `TOOLS.md` by `render-config` at pod start, so
+they land on the next **restart** rather than the next tick.
+
+### The trap: a new file under `builder/`
+
+Adding a file does not automatically put it in a ConfigMap. If you add
+`builder/my-helper.sh` and only add the `COPY` to the Dockerfile, it
+ships **only** in the image and therefore needs a bump — and every later
+edit to it needs another one. Add it to `builder/kustomization.yaml` as
+well, under whichever half runs it:
+
+- `claw-scripts-planner` — anything a CronJob executes, and the modules
+  those import
+- `claw-scripts-runner` — the long-running runners and the libraries
+  they `_source_lib`
+
+Use the **installed** name as the key (`my-helper=my-helper.sh`) so the
+same name resolves whichever copy wins. `tests/test_scripts_from_configmap.py`
+checks the wiring; `tests/test_cron_image.py` re-derives what the cron
+image must carry and fails if the two drift.
+
+CI-only scripts (`verify-skills-locked.sh`, `verify-lockdown-effective.sh`,
+`probe-skill-dirs.sh`) belong in neither — they run against the checkout
+and the built image, never in a pod.
+
+### What happens when you do bump
+
+`OPENCLAW_VERSION` is the image tag *and* the cache key. The build is
+skipped outright when the tag already exists — in the Deploy workflow
+and in the pull-request image check — so an unchanged version costs
+nothing in either place. A new value rebuilds and re-pushes both the
+agent image and the CronJob image, which share the tag on purpose: they
+carry the same scripts and must not drift.
+
+Other pins in [`VERSIONS`](VERSIONS) (a CLI, an MCP server, a scanner)
+also require an `OPENCLAW_VERSION` bump to ship — changing the pin alone
+rebuilds nothing, because the tag has not moved.
 
 `workflow_dispatch` accepts an optional `git_ref` input to build any
 upstream openclaw tag/branch/commit without editing `VERSIONS`.
+
+### Checking what is actually live
+
+The deployed commit is recorded by Argo, not inferred:
+
+```
+kubectl get application -n argocd claw-code-local-manifests \
+  -o jsonpath='{.status.sync.revision}'
+```
+
+For the image specifically, read the tag off the workload:
+
+```
+kubectl get deploy -n claw-code-local openclaw \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+A script change moves the first and leaves the second alone. That is the
+normal, healthy case — not a sign the deploy failed.
 
 ## License
 
