@@ -389,6 +389,7 @@ jobs:
     # rather than their sum.
     needs: [publish-secrets]
     env:
+      REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
       IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local-cron
     steps:
       - name: Checkout
@@ -404,16 +405,44 @@ jobs:
           fi
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
 
+      # The registry is authenticated. Credentials reach the job from the
+      # runner's own environment; without this step the build succeeds and the
+      # PUSH fails with "no basic auth credentials", several minutes in.
+      - name: Log In To Registry
+        run: |
+          test -n "${REGISTRY_USERNAME:-}"
+          test -n "${REGISTRY_PASSWORD:-}"
+          echo "${REGISTRY_PASSWORD}" | docker login "${REGISTRY}" --username "${REGISTRY_USERNAME}" --password-stdin
+
+      # `docker manifest inspect` below is a CLI-SIDE HTTPS call: it does not
+      # go through the dind dockerd, so the certs.d mount that lets push and
+      # pull trust the registry is invisible to it. Same one line as the agent
+      # build, for the same reason.
+      - name: Trust The Registry CA From The Runner Itself
+        run: |
+          sudo update-ca-certificates 2>&1 | tail -3
+
       - name: Skip If Already Built
         id: skip
         # Same cache-key reasoning as the agent image: the tag IS the key, and
         # re-pushing the same one ships nothing. Both images carry the same
         # OPENCLAW_VERSION so a bump rebuilds the pair and they cannot drift.
+        #
+        # Errors are reported rather than swallowed: "cannot reach the
+        # registry" and "not built yet" lead to the same decision, but only
+        # one of them is a problem, and swallowing it hid a broken skip for
+        # months on the agent build.
         run: |
-          if docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+          if err="$(docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 >/dev/null)"; then
+            echo ">> ${IMAGE_NAME}:${IMAGE_TAG} already in registry, skipping build"
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "${IMAGE_NAME}:${IMAGE_TAG} already exists — skipping"
           else
+            case "$err" in
+              *"manifest unknown"*|*"not found"*|*"no such manifest"*)
+                echo ">> ${IMAGE_NAME}:${IMAGE_TAG} is not built yet" ;;
+              *)
+                echo "::warning::could not ask the registry whether ${IMAGE_TAG} exists — building it. ${err}" ;;
+            esac
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
