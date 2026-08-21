@@ -605,6 +605,20 @@ spec:
             app: issue-watcher
         spec:
           serviceAccountName: issue-watcher
+          # Pinned to datapi. The image is ~1.8GB and these fire every
+          # 5-10 minutes; unpinned they landed on whichever node caught them,
+          # so mainpi kept re-pulling it minutes after it was pruned — churning
+          # snapshots on the node that also holds etcd and the registry and has
+          # ~9GB free. datapi already runs the openclaw Deployment from the same
+          # image and has ~108GB free, so the layers are there already.
+          # The toleration is required: datapi carries data=true:NoSchedule.
+          nodeSelector:
+            kubernetes.io/hostname: datapi
+          tolerations:
+            - key: data
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
           restartPolicy: Never
           imagePullSecrets:
             - name: registry-pull-secret
