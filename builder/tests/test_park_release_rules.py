@@ -155,6 +155,37 @@ class MergeBlockedPark(ParkRelease):
         self.assertFalse(self.release([note(BLOCKED, "bot", 1)]))
 
 
+class PullRequestBranchInIsolation(unittest.TestCase):
+    """`_release_pr_park` returns None for "I don't know", not False.
+
+    False would mean "not released" and would swallow the @-mention rule
+    underneath it — so an unreadable pull request would silently disable the
+    reply path as well.
+    """
+
+    def setUp(self):
+        self.h = load("heartbeat-issue-tick")
+        self.forge = fakeforge.FakeForge(identity="bot")
+
+    def test_an_ask_without_a_pull_request_number_defers(self):
+        self.assertIsNone(self.h._release_pr_park(
+            self.forge, "o/r", 5, "On Hold", "approval",
+            {"id": 1, "pr": None, "sha": SHA}, [], "bot"))
+
+    def test_no_verdict_yet_defers(self):
+        self.forge.verdicts[94] = []
+        self.assertIsNone(self.h._release_pr_park(
+            self.forge, "o/r", 5, "On Hold", "approval",
+            {"id": 1, "pr": 94, "sha": SHA}, [], "bot"))
+
+    def test_a_label_that_will_not_come_off_is_reported_as_not_released(self):
+        self.forge.verdicts[94] = [approved()]
+        self.forge.writes_fail = True
+        self.assertIs(self.h._release_pr_park(
+            self.forge, "o/r", 5, "On Hold", "approval",
+            {"id": 1, "pr": 94, "sha": SHA}, [], "bot"), False)
+
+
 class SignOffPredicate(unittest.TestCase):
     """`approval_release` is imported by the planner AND the solver's gate.
 
@@ -192,6 +223,85 @@ class SignOffPredicate(unittest.TestCase):
             verdicts=[rejected()], bot="bot", sha=SHA))
         self.assertIsNone(approval_release.changes_requested(
             verdicts=[approved()], bot="bot", sha=SHA))
+
+
+class ReadingTheAsk(unittest.TestCase):
+    """Which park an issue is in is read off the bot's own note.
+
+    No extra state file, and nothing that can drift out of step with the
+    labels: the ask the solver posted IS the record of what it is waiting for.
+    """
+
+    def test_approval_ask_finds_the_pull_request_and_the_commit(self):
+        got = approval_release.approval_ask([note(ASK, "bot", 7)], "bot")
+        self.assertEqual(got, {"id": 7, "pr": 94, "sha": "8beb9b59"})
+
+    def test_merge_blocked_ask_is_a_different_wait(self):
+        self.assertIsNone(approval_release.merge_blocked_ask(
+            [note(ASK, "bot", 7)], "bot"))
+        self.assertEqual(
+            approval_release.merge_blocked_ask([note(BLOCKED, "bot", 7)],
+                                               "bot")["pr"], 94)
+
+    def test_an_ask_somebody_else_posted_is_not_the_bots_wait(self):
+        # Anyone can quote the bot. Only the bot parks the issue.
+        self.assertIsNone(approval_release.approval_ask(
+            [note(ASK, "impostor", 7)], "bot"))
+
+    def test_the_newest_ask_wins_when_the_solver_asked_twice(self):
+        # A push re-asks, and the sign-off has to be about the commit named by
+        # the ask that is still open.
+        newer = ASK.replace("8beb9b59", "ffff0000")
+        got = approval_release.approval_ask(
+            [note(ASK, "bot", 1), note(newer, "bot", 9)], "bot")
+        self.assertEqual(got["sha"], "ffff0000")
+
+    def test_newest_park_ask_names_the_kind(self):
+        self.assertEqual(
+            approval_release.newest_park_ask(
+                [note(ASK, "bot", 1), note(BLOCKED, "bot", 2)], "bot")[0],
+            "blocked")
+        self.assertEqual(
+            approval_release.newest_park_ask(
+                [note(BLOCKED, "bot", 1), note(ASK, "bot", 2)], "bot")[0],
+            "approval")
+
+    def test_newest_park_ask_says_nothing_when_the_bot_never_asked(self):
+        self.assertEqual(approval_release.newest_park_ask([], "bot"),
+                         (None, None))
+
+
+class UnwrappingWhatTheForgeReturned(unittest.TestCase):
+    """One fact, three shapes. GitHub nests the login under `author.login`,
+    GitLab under `author.username`, and a review verdict carries it bare."""
+
+    def test_login_reads_either_nesting(self):
+        self.assertEqual(approval_release._login({"author": {"login": "a"}}), "a")
+        self.assertEqual(approval_release._login({"author": {"username": "b"}}), "b")
+
+    def test_login_of_something_that_is_not_a_note_is_empty(self):
+        self.assertEqual(approval_release._login(None), "")
+        self.assertEqual(approval_release._login({}), "")
+
+    def test_author_folds_the_login_for_comparison(self):
+        self.assertEqual(approval_release._author({"author": {"login": "Bot"}}),
+                         "bot")
+
+    def test_norm_folds_and_trims(self):
+        self.assertEqual(approval_release._norm("  Bot  "), "bot")
+        self.assertEqual(approval_release._norm(None), "")
+
+    def test_newest_ignores_system_notes(self):
+        # A forge's own timeline events are not the bot speaking.
+        rows = [dict(note(ASK, "bot", 3), system=True)]
+        self.assertIsNone(approval_release._newest(rows, "bot",
+                                                   approval_release._ASK))
+
+    def test_prose_removes_what_the_author_did_not_say(self):
+        self.assertNotIn("lgtm", approval_release._prose("`lgtm`").lower())
+        self.assertNotIn("lgtm", approval_release._prose("> lgtm").lower())
+        self.assertNotIn("lgtm", approval_release._prose("http://x/lgtm").lower())
+        self.assertIn("lgtm", approval_release._prose("lgtm").lower())
 
 
 class NoInvisibleParks(unittest.TestCase):

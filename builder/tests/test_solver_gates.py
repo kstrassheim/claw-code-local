@@ -182,6 +182,7 @@ class RunnerBlock(ShellTestCase):
             'AWAITING_HUMAN_MARKER="$PWD/awaiting-human"',
             'REVIEW_WAIT_TTL="${REVIEW_WAIT_TTL:-7200}"',
             'APPROVAL_ASKED_FILE="$PWD/approval-asked"',
+            'MERGE_REFUSED_FILE="$PWD/merge-refused"',
             'APPROVAL_GRANTED_FILE="$PWD/approval-granted"',
             'SYNC_FP_FILE="$PWD/sync-fp"',
             'SYNC_RETRY_FILE="$PWD/sync-retries"',
@@ -675,16 +676,18 @@ class MergeOrder(RunnerBlock):
         self.fixture("review-verdicts_7", [])
         self.kubectl("echo false")
 
-    def merge(self, refuse_merge=False, **overrides):
+    def merge(self, refuse_merge=False, refusal="", **overrides):
         return self.sh(
             self.preamble(**overrides)
-            + self.sources("api", "status", "facts", "review", "approval", "merge")
+            + self.sources("api", "status", "facts", "review", "approval",
+                           "merge", "escalate")
             + 'RUN_OUTCOME=""\n'
             # The fake curl answers a PUT it has no fixture for by falling back
             # to the pull request's own fixture, so refusal is expressed here
             # rather than by deleting a file. Everything else — the gates and
             # the order they run in — is still the runner's own code.
-            + ("merge_pr() { return 1; }\n" if refuse_merge else "")
+            + (f"merge_pr() {{ MERGE_REFUSAL={_q(refusal)}; return 1; }}\n"
+               if refuse_merge else "")
             + "if maybe_merge_green_pr 7; then echo MERGED; else echo NOT_MERGED; fi\n")
 
     def merged(self):
@@ -747,6 +750,84 @@ class MergeOrder(RunnerBlock):
         self.assertIn("NOT_MERGED", out, out + err)
         self.assertEqual(self.merged(), [])
         self.assertEqual(self.state("approval-asked"), self.HEAD)
+
+    def probe(self, script):
+        """Run one merge-block function on its own, with its state file local."""
+        return self.sh(
+            self.preamble()
+            + self.sources("api", "status", "facts", "review", "approval",
+                           "merge", "escalate")
+            + script)
+
+    # -- telling a blip apart from a locked door --------------------------
+
+    def test_merge_refusal_is_permanent_recognises_a_closed_door(self):
+        for said in ("HTTP 403 Forbidden", "405 Method Not Allowed",
+                     "refusing: protected branch", "review required"):
+            rc, out, err = self.probe(
+                f'MERGE_REFUSAL={_q(said)}\n'
+                'if merge_refusal_is_permanent; then echo SHUT; else echo BLIP; fi\n')
+            self.assertIn("SHUT", out, f"{said!r}: {out}{err}")
+
+    def test_merge_refusal_is_permanent_lets_an_ordinary_failure_retry(self):
+        rc, out, err = self.probe(
+            'MERGE_REFUSAL="502 Bad Gateway"\n'
+            'if merge_refusal_is_permanent; then echo SHUT; else echo BLIP; fi\n')
+        self.assertIn("BLIP", out, out + err)
+
+    def test_merge_refusal_count_counts_the_same_commit(self):
+        rc, out, err = self.probe(
+            'merge_refusal_count aaaa; echo; merge_refusal_count aaaa; echo\n')
+        self.assertEqual(out.split(), ["1", "2"], out + err)
+
+    def test_merge_refusal_count_starts_over_when_the_head_moves(self):
+        # A new commit is a new question: it must not inherit the old one's
+        # strikes and park on its first attempt.
+        rc, out, err = self.probe(
+            'merge_refusal_count aaaa; echo; merge_refusal_count aaaa; echo; '
+            'merge_refusal_count bbbb; echo\n')
+        self.assertEqual(out.split(), ["1", "2", "1"], out + err)
+
+    def test_merge_refusal_count_survives_having_nowhere_to_write(self):
+        # `set -u` is on in the runner. The counter is an optimisation; the
+        # merge is not, and an unset state path must not abort the run.
+        rc, out, err = self.sh(
+            self.preamble()
+            + self.sources("api", "status", "facts", "review", "approval",
+                           "merge", "escalate")
+            + 'unset MERGE_REFUSED_FILE\n'
+            + 'merge_refusal_count aaaa; echo\n')
+        self.assertEqual(out.split(), ["1"], out + err)
+
+    # -- what happens when the door stays shut ----------------------------
+
+    def test_a_first_refusal_is_retried_not_parked(self):
+        rc, out, err = self.merge(refuse_merge=True)
+        self.assertIn("retrying next tick", out, out + err)
+        self.assertEqual(self.asked("add-labels"), [],
+                         "parked an issue on a single transient refusal")
+
+    def test_a_permission_refusal_parks_immediately(self):
+        # Retrying a protected branch every five minutes forever is the wrong
+        # answer, and a silent one.
+        rc, out, err = self.merge(refuse_merge=True,
+                                  refusal="403 Forbidden: protected branch")
+        self.assertIn("will stay refused", out, out + err)
+        self.assertTrue(self.asked("comment"), self.requests())
+
+    def test_the_same_commit_refused_three_times_parks(self):
+        for _ in range(3):
+            rc, out, err = self.merge(refuse_merge=True)
+        self.assertIn("refused 3 times", out, out + err)
+        self.assertTrue(self.asked("comment"), self.requests())
+
+    def test_park_merge_blocked_asks_a_person_and_labels_the_issue(self):
+        rc, out, err = self.probe(
+            'park_merge_blocked 7 abc1234abc1234 "the host said no"\n')
+        self.assertTrue(self.asked("comment"), self.requests())
+        self.assertTrue(self.asked("add-labels"), self.requests())
+        self.assertTrue(os.path.exists(os.path.join(self.home, "awaiting-human")),
+                        "parked without the marker the planner ranks on")
 
     def test_a_refused_merge_leaves_the_pull_request_open(self):
         # Branch protection, a required check the API disagrees about, a race
