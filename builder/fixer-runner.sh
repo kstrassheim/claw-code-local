@@ -1957,7 +1957,14 @@ Reply with \`@$BOT_LOGIN\` and your choice and I'll proceed."
     # argument — a file removes both the payload and the problem.
     if post_issue_comment "$ASK_BODY"; then
       touch "$LEXICAL_ASKED_MARKER"
-      echo "[lexical-guard] ASK posted, marker written, exiting without agent invocation"
+      # The wait is now on a person, so SAY so on the issue. The marker above
+      # lives on a volume only this pod can read: without the label the issue
+      # keeps showing as in progress, nobody knows the bot is waiting on them,
+      # and the only symptom is that it quietly stopped moving — which is the
+      # invisible park park_on_hold exists to prevent. The escalation path has
+      # always called it; this one asked just as hard and never did.
+      park_on_hold
+      echo "[lexical-guard] ASK posted, parked On Hold, exiting without agent invocation"
       exit 0
     else
       echo "[lexical-guard] WARNING: failed to post ASK comment — falling through to agent invocation"

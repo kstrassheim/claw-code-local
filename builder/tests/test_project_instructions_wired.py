@@ -102,3 +102,40 @@ class AMissingFileChangesNothing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskingAPersonIsVisibleOnTheIssue(unittest.TestCase):
+    """Every path that stops and waits for a human must park On Hold.
+
+    The marker files live on a volume only the solver pod can read. Without
+    the label the issue still reads as in progress: nobody knows the bot is
+    waiting on them, and the only symptom is that it quietly stopped moving.
+    `park_on_hold` exists to prevent exactly that and says so in its own
+    comment — but the lexical-guard ASK, which stops just as hard as an
+    escalation, only touched its marker and exited. Seen on
+    k8s-ultimate-web-stack#113: asked at 02:20, still unlabelled hours later.
+    """
+
+    def setUp(self):
+        with open(os.path.join(BUILDER, "fixer-runner.sh"), encoding="utf-8") as fh:
+            self.src = fh.read()
+
+    def block_after(self, needle, lines=14):
+        i = self.src.index(needle)
+        return "\n".join(self.src[i:].splitlines()[:lines])
+
+    def test_the_lexical_guard_ask_parks_before_exiting(self):
+        block = self.block_after('if post_issue_comment "$ASK_BODY"; then')
+        self.assertIn("park_on_hold", block,
+                      "the ASK stops and waits for a person but never labels the issue")
+
+    def test_the_escalation_path_still_parks(self):
+        # The path that always did it — pinned so a refactor cannot drop it.
+        self.assertIn("park_on_hold", self.block_after("escalated '$fp' to @", 12))
+
+    def test_park_on_hold_is_defined_before_both_callers(self):
+        definition = self.src.index("\npark_on_hold() {")
+        for caller in [m for m in range(len(self.src))
+                       if self.src.startswith("      park_on_hold\n", m)]:
+            self.assertGreater(caller, definition,
+                               "park_on_hold called before it is defined")
