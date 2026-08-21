@@ -29,10 +29,10 @@ resources:
 images:
   - name: claw-code-local
     newName: mainpi.local:30500/openclaw/claw-code-local
-    newTag: v2026.7.1-2.19
+    newTag: v2026.7.1-2.20
   # The CronJobs run an orchestrator, not an agent: a stdlib-only planner and
   # some kubectl. Same tag as the image above and pinned in the same commit —
   # they share their scripts, so the pair must not drift.
   - name: claw-code-local-cron
     newName: mainpi.local:30500/openclaw/claw-code-local-cron
-    newTag: v2026.7.1-2.18
+    newTag: v2026.7.1-2.20
