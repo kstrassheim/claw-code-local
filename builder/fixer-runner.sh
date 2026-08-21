@@ -626,6 +626,19 @@ most_recent_comment_id() {
   | python3 -c "import sys,json; print(max((c.get('id') or 0 for c in json.load(sys.stdin)), default=0))"
 }
 
+# The id of the bot's own ASK note, or 0. This is where the cursor belongs on
+# a FIRST run of an issue the planner already asked about — see the cursor
+# block below for why anchoring at the newest note swallows the answer.
+ask_note_id() {
+  BOT="$BOT_LOGIN" "${FORGE[@]}" comments --number "$ISSUE_NUM" 2>/dev/null \
+  | python3 -c "
+import json, os, sys
+sys.path.insert(0, os.environ.get('PYTHONPATH','').split(os.pathsep)[0])
+import lexical_guard
+print(lexical_guard.ask_note_id(json.load(sys.stdin), os.environ.get('BOT','')) or 0)
+" 2>/dev/null || echo 0
+}
+
 # CI fingerprint: a stable token for the CI state on the PR head. The
 # head SHA is part of the fingerprint so a new push (even one whose CI
 # settles with the exact same set of check conclusions as the previous
@@ -1818,15 +1831,32 @@ PY
 
 SESSION_ID="issue-${REPO//\//-}-${ISSUE_NUM}-$(date +%s)"
 
-# Anchor the comment cursor at the latest existing comment so first
+# Anchor the comment cursor at the latest existing comment so the first
 # poll doesn't pick up old ones.
+#
+# EXCEPT when the PLANNER asked the destructive-change question before this
+# run existed. Then the newest note IS the human's reply, and anchoring on it
+# swallows the answer: the run sees no new @-mention, concludes the question
+# is unanswered and parks the issue again — while the planner, reading the
+# same reply, releases it and re-spawns. A tick every five minutes, forever,
+# doing nothing. Anchoring at the ASK note instead makes the reply new, which
+# is what it is: nobody has acted on it yet. A run whose own earlier turn
+# asked already has a cursor file and takes the branch above, so this only
+# applies to the planner-asked case it was written for.
 if [ -f "$CURSOR_FILE" ]; then
   LAST_SEEN_ID="$(cat "$CURSOR_FILE")"
   echo "[cursor] resumed from $CURSOR_FILE = $LAST_SEEN_ID"
 else
-  LAST_SEEN_ID="$(most_recent_comment_id)"
+  ASK_ID="$(ask_note_id)"
+  case "$ASK_ID" in ''|*[!0-9]*) ASK_ID=0 ;; esac
+  if [ "$ASK_ID" -gt 0 ]; then
+    LAST_SEEN_ID="$ASK_ID"
+    echo "[cursor] initialised at the ASK note $LAST_SEEN_ID — the planner asked, so replies after it are unread"
+  else
+    LAST_SEEN_ID="$(most_recent_comment_id)"
+    echo "[cursor] initialised at $LAST_SEEN_ID"
+  fi
   echo "$LAST_SEEN_ID" > "$CURSOR_FILE"
-  echo "[cursor] initialised at $LAST_SEEN_ID"
 fi
 
 # -- early-exit gates -------------------------------------------------

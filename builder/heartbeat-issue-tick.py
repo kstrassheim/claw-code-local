@@ -29,8 +29,9 @@ order, because each one is cheaper than the one after it:
   2. the work-item STATUS is one a planner may pick up — issue_status;
      Done / Won't do / Duplicate are finished or somebody else's call;
   3. the issue is not parked `On Hold`, which is how a pending question
-     is recorded. A human removing the label hands the issue back — the
-     bot never removes it, so the release is always a deliberate act;
+     is recorded. The person hands it back by removing the label or by
+     replying with an @-mention of the bot — the ask offers both, and
+     release_hold reads the second. Nothing else lifts it;
   4. the wording does not ask for something destructive —
      lexical_guard. That question is posted from HERE rather than from
      the solver, because asking costs one regex over text this tick
@@ -195,9 +196,11 @@ def _fold(name: str) -> str:
 def is_on_hold(issue: dict) -> bool:
     """True while the issue is parked waiting on a person.
 
-    The bot never removes this label. That is the whole design: the release
-    is a deliberate human act, so an issue cannot drift back into the queue
-    because a run decided the question had been answered well enough.
+    The release stays a deliberate human act — an issue cannot drift back
+    into the queue because a run decided the question had been answered well
+    enough. What counts as the act is the one the ask names: removing the
+    label, or replying with an @-mention of the bot. `release_hold` reads
+    the second and takes the label off; nothing else lifts it.
     """
     return any(_fold(name) == ON_HOLD for name in label_names(issue))
 
@@ -273,6 +276,95 @@ def ask_before_spawning(f: forge.Forge, repo: str, issue: dict,
     sys.stderr.write(f"  asked before spawning {repo}#{number}: "
                      f"{hit.get('hit', '')}\n")
     return True
+
+
+def on_hold_label_name(issue: dict) -> str:
+    """The park label as THIS issue spells it, or "".
+
+    `remove_label` deletes by exact name, and the park is recognised through
+    `_fold` — so `Status::On Hold` and `on-hold` are both a park, and neither
+    can be removed by passing the literal "On Hold". The spelling has to come
+    back off the issue it is being removed from.
+    """
+    for name in label_names(issue):
+        if _fold(name) == ON_HOLD:
+            return name
+    return ""
+
+
+def release_hold(f: forge.Forge, repo: str, issue: dict, bot: str) -> bool:
+    """Take `On Hold` off when the person has answered. True if released.
+
+    WHY THE BOT MAY LIFT ITS OWN PARK.
+    The ask promises it: "Reply mentioning `@bot` (or remove the On Hold
+    label) and I'll proceed" — see lexical_guard.ask_body. Only the
+    parenthetical was ever wired, so the reply the message asks for did
+    nothing: the label gate below drops the issue before any comment is read,
+    and the answer sits unread forever. Observed on eight issues answered
+    within ten minutes of each other, none of which moved.
+
+    WHAT COUNTS AS AN ANSWER.
+    A reply that @-mentions the bot, posted after the bot asked. Not merely
+    "a person spoke last" — that is `human_has_answered`, which ranks a
+    MARKER park and is deliberately looser because the cost of being wrong
+    there is one spawn that exits in seconds. This park guards
+    destructive-sounding work, so the bar is the one the ask names, and
+    bystander chatter on the issue is not a go-ahead.
+
+    Fails toward STAYING PARKED. Every unreadable case here ends in False:
+    a park that outlives its answer costs a reply; a park lifted on a
+    question nobody answered costs whatever the issue asked for.
+    """
+    number = issue.get("number")
+    name = on_hold_label_name(issue)
+    if not number or not name:
+        return False
+    bot = str(bot or "").lower()
+    if not bot:
+        return False
+    try:
+        notes = f.comments(repo, number)
+    except Exception:  # noqa: BLE001
+        return False
+
+    def _id(note) -> int | None:
+        try:
+            return int(note.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def _author(note) -> str:
+        return str(((note.get("author") or {}).get("username") or "")).lower()
+
+    # Where the wait started. The ASK note when the guard asked; otherwise the
+    # bot's newest note, which is where a solver-side park (fixer-runner's
+    # `park`) put the question. Without an anchor the bot never spoke, so
+    # this is not its park to lift.
+    anchor = lexical_guard.ask_note_id(notes, bot)
+    if anchor is None:
+        mine = [n for n in notes if isinstance(n, dict) and _author(n) == bot]
+        ids = [i for i in (_id(n) for n in mine) if i is not None]
+        anchor = max(ids) if ids else None
+    if anchor is None:
+        return False
+
+    mention = f"@{bot}"
+    for note in notes:
+        if not isinstance(note, dict) or note.get("system"):
+            continue
+        nid = _id(note)
+        if nid is None or nid <= anchor or _author(note) == bot:
+            continue
+        if mention not in str(note.get("body") or "").lower():
+            continue
+        if f.remove_label(repo, number, name):
+            sys.stderr.write(f"  released {repo}#{number}: "
+                             f"'{name}' removed — answered in note {nid}\n")
+            return True
+        sys.stderr.write(f"  {repo}#{number}: answered but could not remove "
+                         f"'{name}' — staying parked\n")
+        return False
+    return False
 
 
 def human_has_answered(repo: str, issue: dict, bot: str) -> bool:
@@ -529,20 +621,30 @@ def main() -> int:
                     if issue_status.is_workable(status_of_issue(i))]
         dropped_by_status = len(all_issues) - len(workable)
 
+        # Who this tick speaks as on THIS host. Resolved here rather than at
+        # the top of the loop so a repository the owner refused costs no
+        # request at all — the allowlist gate is first for that reason, and an
+        # identity lookup would have quietly undone it. It now has to be known
+        # BEFORE the On Hold gate, which reads who said what.
+        bot = bot_login(f)
+
         # On Hold: a question is pending, so the issue is not the bot's to
-        # move. Applied after the status gate so the two are reported apart —
-        # "closed" and "waiting on a person" are different situations and a
-        # tick that spawned nothing has to say which one it was.
-        parked = [i for i in workable if is_on_hold(i)]
+        # move — until the person answers. `release_hold` takes the label off
+        # when they have, which is what the ask told them to do; anything it
+        # cannot read stays parked. Applied after the status gate so the two
+        # are reported apart — "closed" and "waiting on a person" are
+        # different situations and a tick that spawned nothing has to say
+        # which one it was.
+        parked = []
+        for i in workable:
+            if not is_on_hold(i):
+                continue
+            if release_hold(f, repo, i, bot):
+                continue          # answered: label gone, stays workable
+            parked.append(i)
         if parked:
             held = {id(i) for i in parked}
             workable = [i for i in workable if id(i) not in held]
-
-        # Who this tick speaks as on THIS host. Resolved here rather than at
-        # the top of the loop so a repository the owner refused costs no
-        # request at all — the gate above is first for that reason, and an
-        # identity lookup would have quietly undone it.
-        bot = bot_login(f)
 
         # Ask about destructive-sounding work BEFORE spawning anything.
         questioned = [i for i in workable
