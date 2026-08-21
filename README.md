@@ -44,12 +44,16 @@ finished image and fails on anything unlisted, because `rm -rf` on a
 path upstream has moved exits 0 and removes nothing. At runtime the
 skill directories are root-owned and read-only, so the agent's surface
 area is exactly what is wired in `builder/` and described in
-`k8s/tools/`.
+`builder/tools-md/`.
 
 The full per-tool capability description lives in
-[`k8s/tools/`](k8s/tools/) — those `.md` files are concatenated at
-deploy time into a `TOOLS.md` ConfigMap and mounted into the pod, so
-the agent's "what can I do" answer matches the deployment exactly.
+[`builder/tools-md/`](builder/tools-md/) — those `.md` files are
+concatenated, in the order given by `ORDER` beside them, into the
+`TOOLS.md` the agent reads. They ship twice: baked into the image, and
+as the `claw-tools-parts` ConfigMap which overlays them at runtime.
+`render-config` assembles the document at pod start from whichever is
+present, so a ConfigMap that fails to apply costs freshness rather than
+leaving the agent with no capability list at all.
 
 ## Repository layout
 
@@ -76,7 +80,7 @@ k8s/            Kustomize bundle deployed by Argo CD
   052-reviewer.yaml         Reviewer CronJob, RBAC, chat skill
   053-projects.yaml         Permission chat skill
   054-planning.yaml         Planning / product-owner chat skill
-argocd/         Argo CD AppProject + Applications + PreSync hook
+argocd/         Argo CD AppProject + Applications
 .github/
   workflows/    image build, secret apply, validation, CodeQL
 VERSIONS        Pinned upstream versions (openclaw + every CLI baked in)
@@ -114,10 +118,11 @@ VERSIONS        Pinned upstream versions (openclaw + every CLI baked in)
   result to a private registry, and commits a pinning update to
   `k8s/kustomization.yaml`'s `newTag:` so Argo CD picks up the new
   tag on the next reconcile.
-- Argo CD watches `k8s/` (Kustomize) and auto-syncs. The PreSync hook
-  in [`argocd/hooks/`](argocd/hooks/) regenerates the `openclaw-tools-md`
-  ConfigMap from `k8s/tools/` and rolls the pod when the assembled
-  TOOLS.md changes.
+- Argo CD watches `k8s/` (Kustomize) and auto-syncs. The scripts and the
+  tools documents are generated into ConfigMaps from `builder/` by
+  `builder/kustomization.yaml`, so editing one is a ConfigMap update
+  rather than an image rebuild — no version bump, no pull, and for the
+  scripts no restart either.
 
 The destination namespace is `claw-code-local`. The Kustomize
 `images:` override pins the openclaw image tag; the build workflow's

@@ -5,7 +5,7 @@ TWO SILENT FAILURES, ONE CHECK
 
 1. THE CONCATENATION IS NOT A GLOB.
    The PreSync hook assembles the agent's ambient TOOLS.md by `cat`-ing a
-   hardcoded list of files. A new k8s/tools/*.md that nobody adds to that list
+   hardcoded list of files. A new builder/tools-md/*.md that nobody adds to ORDER
    is written, reviewed, merged and then never loaded — and nothing anywhere
    says so. The document simply has no effect, which reads as "the agent
    ignores its instructions" rather than as a missing line in a shell script.
@@ -34,8 +34,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-TOOLS_DIR = os.path.join(ROOT, "k8s", "tools")
-HOOK = os.path.join(ROOT, "argocd", "hooks", "010-pre-sync.yaml")
+TOOLS_DIR = os.path.join(ROOT, "builder", "tools-md")
+# The concatenation order, which used to live inside the ArgoCD pre-sync hook.
+# Moving it beside the documents is what lets the image build and render-config
+# assemble the same file — the hook was the only copy, and only the cluster
+# ever read it.
+ORDER = os.path.join(TOOLS_DIR, "ORDER")
 CONFIG = os.path.join(ROOT, "k8s", "010-openclaw-config.yaml")
 
 # Headroom over the current size. A cap set to exactly today's byte count
@@ -58,19 +62,19 @@ def main() -> int:
         print(f"ERROR: no documents found in {TOOLS_DIR}", file=sys.stderr)
         return 2
 
-    with open(HOOK, encoding="utf-8") as f:
-        hook = f.read()
-    listed = re.findall(r"k8s/tools/([A-Za-z0-9._-]+\.md)", hook)
+    with open(ORDER, encoding="utf-8") as f:
+        listed = [ln.strip() for ln in f
+                  if ln.strip() and not ln.lstrip().startswith("#")]
 
     print("== every tools document is assembled ==")
     missing = [n for n in on_disk if n not in listed]
     for name in missing:
-        fail(f"k8s/tools/{name} exists but the PreSync hook never cats it — "
+        fail(f"builder/tools-md/{name} exists but ORDER never names it — "
              f"it will be merged and then silently never loaded")
     stale = [n for n in listed if n not in on_disk]
     for name in stale:
-        fail(f"the PreSync hook cats k8s/tools/{name}, which does not exist — "
-             f"the assembly step will fail at sync time")
+        fail(f"ORDER names builder/tools-md/{name}, which does not exist — "
+             f"the image build fails, and so does assembly at pod start")
     if not missing and not stale:
         print(f"  ok:   all {len(on_disk)} documents are in the assembly list")
 

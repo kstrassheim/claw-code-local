@@ -180,6 +180,47 @@ data:
     #!/bin/sh
     set -eu
 
+    # ------------------------------------------------------------------
+    # TOOLS.md, assembled from the parts.
+    #
+    # The parts are mounted from the claw-tools-parts ConfigMap and are also
+    # baked into the image; whichever is present wins in that order, so a
+    # ConfigMap that fails to apply leaves the agent with an older document
+    # rather than none. It used to leave it with none, and the agent is told
+    # to treat anything absent from TOOLS.md as a capability it does not have.
+    #
+    # ORDER travels with the parts, and the image build used the same file, so
+    # build-time and start-time assembly cannot disagree about the sequence.
+    # ------------------------------------------------------------------
+    TOOLS_SRC=""
+    for d in /opt/claw-tools /usr/local/share/claw-tools; do
+      [ -f "$d/ORDER" ] && { TOOLS_SRC="$d"; break; }
+    done
+    if [ -n "$TOOLS_SRC" ]; then
+      _out="/home/node/.openclaw/workspace/TOOLS.md"
+      mkdir -p "$(dirname "$_out")"
+      : > "$_out.tmp"
+      _missing=""
+      grep -v '^#' "$TOOLS_SRC/ORDER" | grep -v '^[[:space:]]*$' | while IFS= read -r f; do
+        if [ -f "$TOOLS_SRC/$f" ]; then
+          cat "$TOOLS_SRC/$f" >> "$_out.tmp"
+        else
+          echo "[tools] WARNING: ORDER names a missing file: $f" >&2
+        fi
+      done
+      # Only replace a good document with another good one. A truncated
+      # assembly is worse than yesterday's copy.
+      if [ -s "$_out.tmp" ]; then
+        mv -f "$_out.tmp" "$_out"
+        echo "[tools] assembled TOOLS.md from $TOOLS_SRC ($(wc -c < "$_out") bytes)"
+      else
+        rm -f "$_out.tmp"
+        echo "[tools] WARNING: assembly produced nothing — leaving the existing TOOLS.md" >&2
+      fi
+    else
+      echo "[tools] WARNING: no tools parts found in /opt/claw-tools or the image" >&2
+    fi
+
     # Treat the placeholder strings (from sealed-secret stubs) the same
     # as "unset" so we don't silently activate a provider with garbage.
     is_set() {

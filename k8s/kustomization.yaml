@@ -16,6 +16,10 @@ resources:
   - 053-projects.yaml
   - 054-planning.yaml
   - 060-runner-rbac.yaml
+  # The scripts, generated as ConfigMaps from builder/ itself.
+  # A generator cannot read files above its own root, so the
+  # generator lives beside the files and is referenced here.
+  - ../builder
   # openclaw-secrets is no longer in git. The Deploy workflow's
   # publish-secrets job `kubectl apply`s it directly each run via
   # the RBAC in 060-runner-rbac.yaml. Argo CD doesn't manage that

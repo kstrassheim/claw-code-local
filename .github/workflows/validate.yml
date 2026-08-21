@@ -255,7 +255,37 @@ jobs:
           test -n "${REGISTRY_PASSWORD:-}" || { echo "::error::REGISTRY_PASSWORD missing in runner env (registry-creds Secret)"; exit 1; }
           echo "${REGISTRY_PASSWORD}" | docker login "${{ vars.OPENCLAW_REGISTRY_URL }}" --username "${REGISTRY_USERNAME}" --password-stdin
 
+      - name: Skip If This Version Was Already Built
+        id: skip
+        # Same cache key as the deploy: the tag IS the answer to "has this
+        # image been built". A pull request that changes only scripts, docs or
+        # manifests leaves OPENCLAW_VERSION alone, so the tag already exists
+        # and rebuilding it proves nothing that the existing tag has not
+        # already proven — for twenty minutes on the one self-hosted runner.
+        #
+        # The build is verified when the thing it builds actually changes:
+        # bump the version and this runs.
+        #
+        # Errors are reported rather than swallowed. "Cannot reach the
+        # registry" and "not built yet" both mean build it, but only one of
+        # them is a problem, and hiding it is how a permanently-broken skip
+        # went unnoticed for months on the deploy side.
+        run: |
+          if err="$(docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" 2>&1 >/dev/null)"; then
+            echo ">> ${IMAGE_NAME}:${IMAGE_TAG} already exists — no version bump, skipping the build"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            case "$err" in
+              *"manifest unknown"*|*"not found"*|*"no such manifest"*)
+                echo ">> ${IMAGE_TAG} is new — verifying the build" ;;
+              *)
+                echo "::warning::could not ask the registry about ${IMAGE_TAG} — building it. ${err}" ;;
+            esac
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Require OPENCLAW_REGISTRY_URL
+        if: steps.skip.outputs.skip != 'true'
         run: |
           if [[ -z "${{ vars.OPENCLAW_REGISTRY_URL }}" ]]; then
             echo "::error::OPENCLAW_REGISTRY_URL is not set. Cannot proceed."
@@ -268,6 +298,7 @@ jobs:
       # one was never used by anything. What this job verifies is that our own
       # Dockerfile builds on top of the base, and that is unaffected.
       - name: Ensure openclaw-base is mirrored from GHCR into local registry
+        if: steps.skip.outputs.skip != 'true'
         run: |
           SRC_TAG="${UPSTREAM_REF#v}"
           SRC="ghcr.io/openclaw/openclaw:${SRC_TAG}"
@@ -279,6 +310,7 @@ jobs:
           fi
 
       - name: Extend Image with Python Packages
+        if: steps.skip.outputs.skip != 'true'
         run: |
           docker build \
             --build-arg "BASE_IMAGE=${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/openclaw-base:${UPSTREAM_REF}" \
@@ -320,6 +352,9 @@ jobs:
             builder/
 
       - name: Only allowlisted bundled skills may ship
+        # Inspects the image this job builds — nothing to inspect when the
+        # build was skipped, and the existing tag already passed these.
+        if: steps.skip.outputs.skip != 'true'
         # An upstream skill that survives the strip is a capability the agent
         # can load at runtime, outside the static MCP allowlist. The strip
         # cannot be trusted to have worked — `rm -rf` on a path that moved in
@@ -345,6 +380,9 @@ jobs:
           echo "OK - no unlisted bundled skills in the image."
 
       - name: The lockdown must actually hold
+        # Inspects the image this job builds — nothing to inspect when the
+        # build was skipped, and the existing tag already passed these.
+        if: steps.skip.outputs.skip != 'true'
         # The static check says the manifests are right; this one tries to
         # defeat the real lockdown as uid 1000 inside the real image. It also
         # checks the lockdown did not go too far — the agent must still be

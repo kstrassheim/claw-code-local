@@ -315,34 +315,6 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && chromium --version
 
-# mermaid-cli, for `mermaid-render`.
-#
-# WHY IT WAS MISSING AND WHY THAT WAS INVISIBLE
-# `mermaid-render` and its theme file have shipped in this image for months
-# (see the COPYs further down), and the planning skill documents piping charts
-# through it. But `mmdc` was never installed, so every call ended at the
-# wrapper's own guard — "mmdc is not installed in this image" — and diagram
-# output silently degraded to ASCII. The tooling was complete apart from the
-# one package it drives.
-#
-# NO SECOND BROWSER. mermaid renders in a headless browser, and puppeteer
-# downloads its own Chromium by default — a second ~150MB browser in an image
-# that already installs one directly above. PUPPETEER_SKIP_DOWNLOAD stops
-# that, and PUPPETEER_EXECUTABLE_PATH points it at the system binary. Both are
-# set as ENV rather than only at install time: mmdc reads them at RUN time
-# too, and an install-only value would work in the build and fail in the pod.
-ENV PUPPETEER_SKIP_DOWNLOAD=1 \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ARG MERMAID_CLI_VERSION
-RUN npm install -g --no-audit --no-fund --loglevel=error \
-      "@mermaid-js/mermaid-cli@${MERMAID_CLI_VERSION}" \
- && command -v mmdc \
- && printf 'graph TD\n  A[build] --> B[check]\n' > /tmp/smoke.mmd \
- && mmdc --input /tmp/smoke.mmd --output /tmp/smoke.svg >/tmp/mmdc.log 2>&1 \
- && test -s /tmp/smoke.svg \
- && head -c 60 /tmp/smoke.svg \
- && rm -f /tmp/smoke.mmd /tmp/smoke.svg /tmp/mmdc.log
-
 # kubectl + kubelogin + podman
 #
 # kubelogin is the credential plugin kubectl EXECS when a kubeconfig comes from
@@ -712,6 +684,99 @@ ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
 #                          in May; the script changed and this comment did
 #                          not, which reads as though the CronJobs need the
 #                          agent image. They do not — see builder/cron/.)
+# ---------------------------------------------------------------------------
+# LAST OF THE INSTALLS, ON PURPOSE.
+#
+# Docker invalidates every layer after the first one that changes, so anything
+# whose version moves often belongs BELOW the things that are slow to rebuild.
+# This block first went in around the chromium layer, which put it above the
+# security venvs (semgrep, bandit, pip-audit), the .NET SDK and nuclei — so
+# bumping a mermaid version rebuilt all of them. It only needs to be after
+# chromium, and here it is.
+# ---------------------------------------------------------------------------
+# mermaid-cli, for `mermaid-render`.
+#
+# WHY IT WAS MISSING AND WHY THAT WAS INVISIBLE
+# `mermaid-render` and its theme file have shipped in this image for months
+# (see the COPYs further down), and the planning skill documents piping charts
+# through it. But `mmdc` was never installed, so every call ended at the
+# wrapper's own guard — "mmdc is not installed in this image" — and diagram
+# output silently degraded to ASCII. The tooling was complete apart from the
+# one package it drives.
+#
+# NO SECOND BROWSER. mermaid renders in a headless browser, and puppeteer
+# downloads its own Chromium by default — a second ~150MB browser in an image
+# that already installs one directly above. PUPPETEER_SKIP_DOWNLOAD stops
+# that, and PUPPETEER_EXECUTABLE_PATH points it at the system binary. Both are
+# set as ENV rather than only at install time: mmdc reads them at RUN time
+# too, and an install-only value would work in the build and fail in the pod.
+ENV PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# The puppeteer config mermaid-render has always passed and this image has
+# never had. Chromium refuses to run as root with its sandbox on, and in a
+# container there is no user namespace to sandbox into — so the renderer named
+# this file, and `mmdc` failed on the missing path. Two absences, one symptom:
+# charts silently fell back to ASCII.
+#
+# --disable-dev-shm-usage as well: the default /dev/shm in a container is 64MB
+# and chromium crashes rendering anything large, which looks like a broken
+# diagram rather than a full tmpfs.
+RUN printf '%s\n' \
+      '{"args":["--no-sandbox","--disable-setuid-sandbox","--disable-dev-shm-usage"]}' \
+      > /etc/puppeteer-no-sandbox.json \
+ && chmod 0644 /etc/puppeteer-no-sandbox.json
+
+ARG MERMAID_CLI_VERSION
+RUN npm install -g --no-audit --no-fund --loglevel=error \
+      "@mermaid-js/mermaid-cli@${MERMAID_CLI_VERSION}" \
+ && command -v mmdc \
+ # Render for real, with the SAME arguments mermaid-render uses. Checking that
+ # the binary unpacked proves nothing: this failed at render time, on the
+ # sandbox, with the package installed perfectly.
+ #
+ # A writable HOME is not optional — chromium spawns chrome_crashpad_handler
+ # before anything else and it derives its database from the home directory.
+ # See the long note in mermaid-render, which learned this the expensive way.
+ && mkdir -p /tmp/smoke-home \
+ && printf 'graph TD\n  A[build] --> B[check]\n' > /tmp/smoke.mmd \
+ && { HOME=/tmp/smoke-home XDG_CONFIG_HOME=/tmp/smoke-home/.config \
+      XDG_CACHE_HOME=/tmp/smoke-home/.cache \
+      mmdc --input /tmp/smoke.mmd --output /tmp/smoke.svg \
+        --puppeteerConfigFile /etc/puppeteer-no-sandbox.json \
+      || { echo "=== mmdc smoke render failed ==="; exit 1; }; } \
+ && test -s /tmp/smoke.svg \
+ && head -c 60 /tmp/smoke.svg && echo \
+ && rm -rf /tmp/smoke.mmd /tmp/smoke.svg /tmp/smoke-home
+
+# ---------------------------------------------------------------------------
+# The tools documentation, BAKED IN.
+#
+# These describe every capability wired into the bot, and the agent is told to
+# treat anything absent from them as not wired. They used to exist only as a
+# ConfigMap assembled by an ArgoCD pre-sync hook — so if that ConfigMap failed
+# to apply, the docs were not stale, they were GONE, and the agent would
+# conclude it had no tools at all.
+#
+# Now they ship both ways: the parts and an assembled TOOLS.md are in the
+# image, and the ConfigMap overlays the parts at runtime. A missing mount
+# degrades to an older document rather than to nothing.
+#
+# Assembled here from ORDER rather than from a glob: the sequence is part of
+# the document (the header file first, capabilities after) and a shell glob
+# would silently reorder it the day someone adds TOOLS-a-something.md.
+COPY --chmod=0644 tools-md/ /usr/local/share/claw-tools/
+RUN set -eu; \
+    cd /usr/local/share/claw-tools; \
+    grep -v '^#' ORDER | grep -v '^[[:space:]]*$' > /tmp/order.txt; \
+    while IFS= read -r f; do \
+      [ -f "$f" ] || { echo "ORDER names a file that does not exist: $f"; exit 1; }; \
+    done < /tmp/order.txt; \
+    # shellcheck disable=SC2046
+    cat $(tr '\n' ' ' < /tmp/order.txt) > /usr/local/share/claw-tools/TOOLS.assembled.md; \
+    rm -f /tmp/order.txt; \
+    echo "assembled TOOLS.md: $(wc -c < /usr/local/share/claw-tools/TOOLS.assembled.md) bytes"
+
 USER root
 COPY --chmod=0755 heartbeat-issue-tick.py /usr/local/bin/heartbeat-issue-tick
 COPY --chmod=0755 cron-issue-spawn.sh    /usr/local/bin/cron-issue-spawn

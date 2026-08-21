@@ -1,17 +1,17 @@
 ---
-# Namespace only. The `openclaw-tools-md` ConfigMap that mounts at
-# ~/.openclaw/workspace/TOOLS.md is **not** declared here — it's
-# generated at deploy time by the "Build and apply openclaw-tools-md
-# ConfigMap from k8s/tools/" step in the ArgoCD sync, which concatenates
-# the per-tool TOOLS-*.md files under k8s/tools/ into a single TOOLS.md
-# key via `kubectl create configmap --from-file ... --dry-run=client -o yaml | kubectl apply -f -`.
+# Namespace only.
 #
-# Why generate it instead of inlining: the assembled TOOLS.md is
-# ~2k lines of markdown describing every capability wired into the
-# bot. Pasting it into a YAML literal would make this manifest
-# unreadable and any per-section edit would scroll through the whole
-# blob. Splitting into k8s/tools/ keeps each capability description
-# in its own file (mirroring the upstream openclaw chart's layout).
+# TOOLS.md is no longer built here. The documents live in builder/tools-md/,
+# ship in the image AND as the claw-tools-parts ConfigMap, and render-config
+# assembles them into workspace/TOOLS.md at pod start using the ORDER file
+# that travels with them.
+#
+# The previous arrangement assembled them in an ArgoCD pre-sync hook, which
+# was the only copy of the order and the only way the file was ever produced:
+# when the hook stopped running the pod kept serving a document 20KB behind
+# the repository, with whole capabilities missing, and nothing reported it.
+# Splitting per capability is still the right editorial choice — the assembled
+# document is ~2k lines and a per-section edit should not scroll through it.
 apiVersion: v1
 kind: Namespace
 metadata:

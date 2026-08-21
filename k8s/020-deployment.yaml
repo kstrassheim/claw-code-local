@@ -102,11 +102,10 @@ spec:
       labels:
         app: openclaw
       annotations:
-        # Single-file ConfigMap subPath mounts are NOT live-updated when the
-        # ConfigMap changes. Hash the assembled TOOLS.md so any edit to
-        # k8s/tools/ changes the pod template and triggers a rollout via
-        # ArgoCD's normal sync + the post-sync rollout step in deploy.sh.
-        checksum/tools-md: ""
+        # (Was checksum/tools-md, forcing a rollout so a subPath mount of the
+        # assembled TOOLS.md would refresh. render-config now assembles it from
+        # the mounted parts at start, so there is no stale single-file mount to
+        # work around.)
     spec:
       serviceAccountName: openclaw
       imagePullSecrets:
@@ -303,6 +302,12 @@ spec:
               mountPath: /template
             - name: render-scripts
               mountPath: /scripts
+            # The parts render-config assembles TOOLS.md from. It falls back to
+            # the image's copy under /usr/local/share/claw-tools when this is
+            # absent, so a ConfigMap that fails to apply costs freshness, not
+            # the whole document.
+            - name: claw-tools-parts
+              mountPath: /opt/claw-tools
             - name: workspace
               mountPath: /home/node/.openclaw
           resources:
@@ -322,8 +327,6 @@ spec:
             - containerPort: 18790
               name: bridge
           envFrom:
-            - configMapRef:
-                name: openclaw-tools-md
             - configMapRef:
                 name: openclaw-config
             - secretRef:
@@ -375,6 +378,16 @@ spec:
             # with two solvers in flight. The limit is raised alongside so four
             # runs FIT, which is a different question from whether the provider
             # will serve them.
+            # The mounted scripts must WIN over the copies baked into the
+            # image, or an edit appears to do nothing: everything still runs,
+            # just the older version, which is the worst way for this to fail.
+            # The image copies stay as a fallback so it works standalone.
+            - name: PATH
+              value: "/opt/claw-scripts:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            # The ticks import by bare name (`import forge`), so the same
+            # ordering has to hold for modules, not just executables.
+            - name: PYTHONPATH
+              value: "/opt/claw-scripts:/usr/local/bin"
             - name: MAX_AGENT_SLOTS
               value: "4"
           volumeMounts:
@@ -391,9 +404,6 @@ spec:
             # container (internal CA) so the tester trusts internal HTTPS.
             - name: pki
               mountPath: /home/node/.pki
-            - name: tools-md
-              mountPath: /home/node/.openclaw/workspace/TOOLS.md
-              subPath: TOOLS.md
             # `developer` chat skill — drives the kubectl toggle
             # commands for the issue-fixer subsystem. ConfigMap source
             # is in 050-issue-watcher.yaml (the CronJob name stays
@@ -419,6 +429,18 @@ spec:
             - name: skill-planning
               mountPath: /home/node/.openclaw/workspace/skills/planning/SKILL.md
               subPath: SKILL.md
+            # NO subPath — a subPath mount is a one-time copy and never sees a
+            # ConfigMap update, which is exactly what the skills above accept
+            # (they need a restart to change). These must refresh in place, so
+            # they mount as a directory and kubelet syncs them within ~a minute.
+            - name: claw-scripts
+              mountPath: /opt/claw-scripts
+            # The parts render-config assembles TOOLS.md from, and which the
+            # document cross-references by name ~40 times. Mounted under
+            # workspace/tools rather than the root, which would shadow
+            # AGENTS.md, IDENTITY.md and SOUL.md.
+            - name: claw-tools-parts
+              mountPath: /home/node/.openclaw/workspace/tools
           resources:
             requests:
               cpu: 600m
@@ -445,6 +467,24 @@ spec:
               exec:
                 command: ["/bin/sh", "-c", "sleep 5"]
       volumes:
+        # ONE directory from TWO ConfigMaps. The split exists because the
+        # cron pods need only the planner half and mount that alone; the
+        # gateway needs both, and a projected volume merges them so there is a
+        # single entry on PATH and PYTHONPATH rather than an ordering question
+        # between two directories.
+        #
+        # 0755 because these are executed — a ConfigMap defaults to 0644.
+        - name: claw-tools-parts
+          configMap:
+            name: claw-tools-parts
+        - name: claw-scripts
+          projected:
+            defaultMode: 0755
+            sources:
+              - configMap:
+                  name: claw-scripts-planner
+              - configMap:
+                  name: claw-scripts-runner
         - name: workspace
           persistentVolumeClaim:
             claimName: openclaw-workspace
@@ -452,9 +492,6 @@ spec:
         # init container (which imports the internal CA) and the main container.
         - name: pki
           emptyDir: {}
-        - name: tools-md
-          configMap:
-            name: openclaw-tools-md
         - name: skill-developer
           configMap:
             name: openclaw-skill-developer

@@ -55,9 +55,17 @@ def render(args="", setting=None, source="graph TD\n  A-->B\n"):
         src = os.path.join(home, "chart.mmd")
         with open(src, "w") as fh:
             fh.write(source)
+        # INVOKED THROUGH `bash`, NOT EXECUTED.
+        #
+        # Every script in this repository is committed 100644 — the executable
+        # bit is applied by the Dockerfile's `--chmod=0755`, not carried in
+        # git. Running it directly works in the sandbox this is developed in,
+        # because that mount forces 0755 on every file, and fails in CI with
+        # "Permission denied" (exit 126). Same trap test_source_lib.py already
+        # documents for the mode-based guard it deliberately does not use.
         r = subprocess.run(
             ["bash", "-c", f'export HOME="{home}" PATH="{bindir}:$PATH"; '
-                           f'"{RENDER}" {args} "{src}"'],
+                           f'bash "{RENDER}" {args} "{src}"'],
             capture_output=True, text=True, timeout=120)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
 

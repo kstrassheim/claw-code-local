@@ -1,10 +1,10 @@
 <!--
   Managed by the claw-code k8s manifests. Source of truth:
-  k8s/tools/*.md in the claw-code repo. Concatenated by the deploy
+  builder/tools-md/*.md. Concatenated in ORDER by the image build
   workflow into the openclaw-tools-md ConfigMap and mounted read-only
   at ~/.openclaw/workspace/TOOLS.md (subPath file mount in
   k8s/020-deployment.yaml). Edits to this file inside the pod will
-  fail with EROFS — change k8s/tools/ in the repo instead.
+  fail with EROFS — change builder/tools-md/ in the repo instead.
 -->
 
 # claw-code — coding agent capabilities
