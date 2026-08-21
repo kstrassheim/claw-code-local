@@ -58,7 +58,6 @@
     "fixer-runner.sh:fetch_all_comments",
     "fixer-runner.sh:fetch_issue_body",
     "fixer-runner.sh:fetch_issue_state",
-    "fixer-runner.sh:fetch_new_mentions",
     "fixer-runner.sh:fetch_open_prs_for_issue",
     "fixer-runner.sh:fetch_pr_reviewers",
     "fixer-runner.sh:merge_forbidden_by_issue",

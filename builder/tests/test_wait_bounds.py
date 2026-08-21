@@ -571,3 +571,109 @@ class WaitRanking(PlannerTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+
+
+class HumanReviewRetry(WaitBlock):
+    """A PERSON asking for changes is work — and nothing else could see it.
+
+    Six wake triggers existed and a human rejection matched none of them. A
+    review is not an issue comment, so `fetch_new_mentions` never returns it.
+    The verdict is not the autonomous reviewer's, so `review_needs_agent`
+    ignores it. The head sha does not move on its own, so the CI fingerprint
+    never changes. So the preflight concluded there was nothing to do and
+    exited without a single model call, while the reviewer's words sat on the
+    pull request read by nobody.
+
+    Observed on #86: the gate logged "addressing the review, not merging" and
+    then nothing addressed it.
+    """
+
+    def reject(self, who="a-human", sha=HEAD):
+        self.fixture("review-verdicts_7",
+                     [{"author": who, "verdict": "changes_requested",
+                       "sha": sha}])
+
+    def check(self, cap=4):
+        return self.sh(self.preamble()
+                       + f"REVIEW_RETRY_CAP={cap}\n"
+                       # `approval` too: the trigger asks the same question
+                       # the sign-off gate does, through the same helper.
+                       + self.sources("api", "status", "facts", "review",
+                                      "approval", "escalate", "review_retry")
+                       + "if human_review_needs_agent 7; then echo WAKE; "
+                         "else echo SLEEP; fi\n")
+
+    def setUp(self):
+        super().setUp()
+        self.fixture("review-verdicts_7", [])
+
+    def test_nothing_from_a_human_wakes_nobody(self):
+        rc, out, err = self.check()
+        self.assertIn("SLEEP", out, out + err)
+        self.assertEqual(self.state("human-review-fp"), "none:abc1234")
+
+    def test_an_approval_is_not_work(self):
+        self.fixture("review-verdicts_7",
+                     [{"author": "a-human", "verdict": "approved", "sha": HEAD}])
+        rc, out, err = self.check()
+        self.assertIn("SLEEP", out, out + err)
+
+    def test_a_rejection_of_the_current_head_wakes_the_agent(self):
+        self.reject()
+        rc, out, err = self.check()
+        self.assertIn("WAKE", out, out + err)
+        self.assertIn("attempt 1/4", out)
+        self.assertEqual(self.state("human-review-retries"), "1")
+
+    def test_a_rejection_of_a_commit_since_replaced_is_already_answered(self):
+        # The push IS the answer. Waking on it again would rework code the
+        # reviewer has not seen.
+        self.reject(sha="ffffffffffffffffffffffffffffffffffffffff")
+        rc, out, err = self.check()
+        self.assertIn("SLEEP", out, out + err)
+
+    def test_the_rejection_ends_any_wait_on_that_person(self):
+        # They answered. The park and the "already asked" record are stale the
+        # moment they speak, and leaving either behind means the next ask is
+        # suppressed or the issue stays parked while the agent works.
+        for name in ("awaiting-human", "approval-asked"):
+            with open(os.path.join(self.home, name), "w", encoding="utf-8") as f:
+                f.write(HEAD)
+        self.reject()
+        self.check()
+        self.assertFalse(os.path.exists(os.path.join(self.home, "awaiting-human")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "approval-asked")))
+
+    def test_the_budget_is_finite_and_then_a_person_is_told(self):
+        self.reject()
+        for _ in range(4):
+            rc, out, err = self.check()
+            self.assertIn("WAKE", out, out + err)
+        rc, out, err = self.check()
+        self.assertIn("SLEEP", out, out + err)
+        self.assertIn("a human should look", out)
+        self.assertTrue(self.comments_posted(), self.requests())
+
+    def test_a_push_resets_the_budget(self):
+        # A new commit is a new attempt at the findings, not a continuation of
+        # the ones that failed on the old one.
+        self.reject()
+        for _ in range(4):
+            self.check()
+        moved = "1234567890abcdef1234567890abcdef12345678"
+        self.head(moved)
+        self.reject(sha=moved)
+        rc, out, err = self.check()
+        self.assertIn("WAKE", out, out + err)
+        self.assertIn("attempt 1/4", out)
+
+    def test_the_autonomous_reviewers_budget_is_not_spent_by_a_human(self):
+        # Two verdicts arrive independently; a shared budget would let one
+        # silently consume the other's attempts.
+        self.reject()
+        self.check()
+        self.assertEqual(self.state("human-review-retries"), "1")
+        self.assertIsNone(self.state("review-retries"))

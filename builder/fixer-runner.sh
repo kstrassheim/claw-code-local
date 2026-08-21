@@ -321,6 +321,12 @@ REVIEW_RETRY_CAP="${FIXER_REVIEW_RETRY_CAP:-4}"
 # the same reason: a comment every five minutes is how a pull request becomes
 # unreadable.
 REVIEW_ESCALATED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.review-escalated"
+# The same three, for a verdict left by a PERSON. Kept apart from the
+# autonomous reviewer's on purpose: the two verdicts arrive independently and
+# a shared budget would let one silently spend the other's attempts.
+HUMAN_REVIEW_FP_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.human-review-fp"
+HUMAN_REVIEW_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.human-review-retries"
+HUMAN_REVIEW_ESCALATED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.human-review-escalated"
 # How many agent turns have been spent on the CURRENT red CI fingerprint.
 # Reset by the fingerprint changing (a push, a re-run) and by a human saying
 # something new — an instruction is a fresh start, not a continuation.
@@ -328,6 +334,7 @@ CI_RETRY_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-red-retries"
 CI_RED_RETRY_CAP="${FIXER_CI_RED_RETRY_CAP:-4}"
 CI_RED_ESCALATED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.ci-red-escalated"
 REVIEW_RETRY_NEW=0
+HUMAN_REVIEW_RETRY_NEW=0
 CI_RED_RETRY_NEW=0
 
 mkdir -p "$LOG_DIR" "$LOCK_ROOT" "$ISSUE_STATE_DIR" \
@@ -1658,6 +1665,65 @@ yield_if_awaiting_human() {
 # a new fingerprint — so a verdict that WAS addressed costs nothing extra.
 #
 # 0 = the agent should be woken. 1 = nothing to do.
+# A PERSON asked for changes on the pull request and the agent has not acted
+# on it. The sixth wake trigger, and the one that made the whole approval
+# story pointless: `approval_gate` correctly refused to merge and correctly
+# refused to park — and then the preflight decided there was nothing to do and
+# exited without spending a single model call. The reviewer's words sat on the
+# pull request, read by nobody, forever.
+#
+# NOTHING ELSE CAN SEE IT. A review is not an issue comment, so
+# `fetch_new_mentions` never returns it; the verdict is not the autonomous
+# reviewer's, so `review_needs_agent` ignores it; and the head sha does not
+# move on its own, so the CI fingerprint never changes. Six triggers and a
+# human rejection matched none of them.
+#
+# Bounded exactly like the autonomous one: the head is part of the
+# fingerprint, so a push answers the verdict, stops the retries and resets the
+# budget. What is left when the budget is gone is a person's problem, and
+# `escalate_once` parks it where they can see it.
+human_review_needs_agent() { # $1 = pr number
+  local pr="$1" who head fp last tries
+  head="$(pr_head_sha "$pr")"
+  [ -n "$head" ] || { echo "[human-review] could not resolve the head sha of PR #$pr — not waking"; return 1; }
+  who="$(pr_changes_requested "$pr" "$head")"
+  fp="none:${head:0:7}"
+  [ -n "$who" ] && fp="changes:${who}:${head:0:7}"
+  last=""
+  [ -f "$HUMAN_REVIEW_FP_FILE" ] && last="$(cat "$HUMAN_REVIEW_FP_FILE" 2>/dev/null)"
+  if [ "$last" != "$fp" ]; then
+    printf '%s' "$fp" > "$HUMAN_REVIEW_FP_FILE"
+    rm -f "$HUMAN_REVIEW_RETRY_FILE" "$HUMAN_REVIEW_ESCALATED_FILE" 2>/dev/null
+    if [ -n "$who" ]; then
+      # They answered, so no wait on them is outstanding — and the park that
+      # went with it, if any, is stale.
+      rm -f "$AWAITING_HUMAN_MARKER" "$APPROVAL_ASKED_FILE" 2>/dev/null
+      echo 1 > "$HUMAN_REVIEW_RETRY_FILE"
+      echo "[human-review] @$who requested changes ($fp) — waking the agent (attempt 1/$REVIEW_RETRY_CAP)"
+      return 0
+    fi
+    echo "[human-review] fingerprint is now '$fp' — tracking, not waking"
+    return 1
+  fi
+  [ -n "$who" ] || return 1
+  tries=0
+  [ -f "$HUMAN_REVIEW_RETRY_FILE" ] && tries="$(cat "$HUMAN_REVIEW_RETRY_FILE" 2>/dev/null || echo 0)"
+  case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+  if [ "$tries" -lt "$REVIEW_RETRY_CAP" ]; then
+    tries=$(( tries + 1 ))
+    echo "$tries" > "$HUMAN_REVIEW_RETRY_FILE"
+    echo "[human-review] @$who's changes on $fp still unaddressed — waking the agent (attempt $tries/$REVIEW_RETRY_CAP)"
+    return 0
+  fi
+  escalate_once "$HUMAN_REVIEW_ESCALATED_FILE" "$fp" \
+    "⚠️ @$who asked for changes on \`${head:0:8}\` in PR #$pr, and $REVIEW_RETRY_CAP attempts later they are still not addressed. I am not going to keep trying on my own.
+
+@$who — the findings are in your review on the pull request. Reply here and @-mention \`@$BOT_LOGIN\` with what you want done and I will pick it back up." \
+    "human-review"
+  echo "[human-review] $fp unaddressed after $REVIEW_RETRY_CAP attempts — not retrying (a human should look)"
+  return 1
+}
+
 review_needs_agent() { # $1 = pr number
   local pr="$1" verdict vsha head fp last tries
   if ! reviewer_enabled; then
@@ -2307,8 +2373,16 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
     REVIEW_RETRY_NEW=1
   fi
 
+  # And the same question about a verdict a PERSON left. Separate call, because
+  # the two verdicts are independent: the autonomous reviewer can approve a
+  # commit a human has just rejected, which is exactly what happened on #86.
+  if human_review_needs_agent "$EXISTING_PR_NUMBER"; then
+    HUMAN_REVIEW_RETRY_NEW=1
+  fi
+
   if [ "$PREFLIGHT_NEW_COUNT" = "0" ] && [ "$CI_CHANGED" = "0" ] && [ "$MERGE_CONFLICT_NEW" = "0" ] \
-     && [ "$CI_RED_RETRY_NEW" = "0" ] && [ "$REVIEW_RETRY_NEW" = "0" ]; then
+     && [ "$CI_RED_RETRY_NEW" = "0" ] && [ "$REVIEW_RETRY_NEW" = "0" ] \
+     && [ "$HUMAN_REVIEW_RETRY_NEW" = "0" ]; then
     echo "[preflight] PR #$EXISTING_PR_NUMBER open, no new @-mentions since cursor=$LAST_SEEN_ID, CI fingerprint='$CURRENT_CI_FP' unchanged or not settled, no unresolved conflict, no unaddressed verdict — exiting without agent invocation"
     exit 0
   fi
@@ -2332,6 +2406,10 @@ if [ -n "$EXISTING_PR_NUMBER" ]; then
 
   if [ "$REVIEW_RETRY_NEW" = "1" ]; then
     WAKE_REASON="${WAKE_REASON:+$WAKE_REASON+}review-changes"
+  fi
+
+  if [ "$HUMAN_REVIEW_RETRY_NEW" = "1" ]; then
+    WAKE_REASON="${WAKE_REASON:+$WAKE_REASON+}human-review-changes"
   fi
 
   if [ "$PREFLIGHT_NEW_COUNT" != "0" ]; then
@@ -2416,6 +2494,11 @@ else
     *ci-change*)
       WAKE_REASON_TEXT="$WAKE_REASON_TEXT
   - **CI state changed** on the PR head. Inspect the CI summary below and act per rule 8 (red → fix on the same branch) or rule 9 (green + work done → stop and let the wrapper take it from there)." ;;
+  esac
+  case "$WAKE_REASON" in
+    *human-review-changes*)
+      WAKE_REASON_TEXT="$WAKE_REASON_TEXT
+  - **a PERSON requested changes on the pull request.** Their review is on the PULL REQUEST, not on this issue, so read it there — it will not appear in the conversation history below. Do what they asked, push to the same branch, and do not merge. Their word outranks the autonomous reviewer's approval: if the two disagree, theirs is the one to satisfy. If you believe they are mistaken, say so on the issue and @-mention them rather than pushing back silently." ;;
   esac
   case "$WAKE_REASON" in
     *user-mention*)
