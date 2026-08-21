@@ -40,6 +40,7 @@ configMapGenerator:
       - heartbeat-issue-tick=heartbeat-issue-tick.py
       - tester-tick=tester-tick.py
       - reviewer-tick=reviewer-tick.py
+      - approval_release.py=approval_release.py
       - forge-cli=forge-cli
       - forge.py=forge.py
       - issue_priority.py=issue_priority.py

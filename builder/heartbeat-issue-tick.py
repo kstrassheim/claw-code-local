@@ -80,6 +80,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forge  # noqa: E402
 import issue_priority  # noqa: E402
 import issue_status  # noqa: E402
+import approval_release
 import lexical_guard  # noqa: E402
 import project_allowlist  # noqa: E402
 import queue_state  # noqa: E402
@@ -340,6 +341,61 @@ def on_hold_label_name(issue: dict) -> str:
     return ""
 
 
+def _release_pr_park(f: forge.Forge, repo: str, number: int, name: str,
+                     kind: str, ask: dict, notes, bot: str):
+    """Lift a pull-request park, or None to fall through to the reply rule.
+
+    None rather than False is the point: an unreadable pull request is not a
+    verdict, and the @-mention path below still has to get its turn. Only a
+    definite answer — signed off, rejected, or landed — returns here.
+    """
+    pr = ask.get("pr")
+    if not pr:
+        return None
+
+    def drop(why: str):
+        if f.remove_label(repo, number, name):
+            sys.stderr.write(f"  released {repo}#{number}: '{name}' removed "
+                             f"— {why}\n")
+            return True
+        sys.stderr.write(f"  {repo}#{number}: {why}, but could not remove "
+                         f"'{name}' — staying parked\n")
+        return False
+
+    if kind == "blocked":
+        # Waiting for a person to press merge. What ends it is the pull
+        # request no longer being open — usually because they did.
+        try:
+            state = str((f.change_request(repo, pr) or {}).get("state") or "")
+        except Exception:  # noqa: BLE001
+            return None
+        if state and state.lower() != "open":
+            return drop(f"PR #{pr} is {state.lower()}")
+        return None
+
+    try:
+        verdicts = f.review_verdicts(repo, pr)
+    except Exception:  # noqa: BLE001
+        return None
+
+    sha = ask.get("sha") or ""
+    got = approval_release.signed_off(verdicts=verdicts, comments=notes,
+                                      bot=bot, sha=sha, anchor_id=ask["id"])
+    if got:
+        return drop(f"@{got['who']} {got['how']} (#{pr})")
+
+    # A rejection releases the park too, and this is not a special case: the
+    # reviewer who asks for changes has handed the issue BACK. Leaving it
+    # parked would leave what they typed unread — the failure the park was
+    # meant to prevent, pointed the other way.
+    rejected = approval_release.changes_requested(verdicts=verdicts, bot=bot,
+                                                  sha=sha)
+    if rejected:
+        return drop(f"@{rejected['who']} {rejected['how']} on #{pr} "
+                    "— back to the solver")
+    return None
+
+
 def release_hold(f: forge.Forge, repo: str, issue: dict, bot: str) -> bool:
     """Take `On Hold` off when the person has answered. True if released.
 
@@ -400,6 +456,25 @@ def release_hold(f: forge.Forge, repo: str, issue: dict, bot: str) -> bool:
         anchor = max(mine) if mine else None
     if anchor is None:
         return False
+
+    # WHICH ACT ENDS THIS WAIT DEPENDS ON WHY IT STARTED.
+    #
+    # `On Hold` reads the same to a person either way — "waiting on you" — but
+    # the bot is not waiting for the same thing. It asked a QUESTION (the
+    # lexical guard, a CI-red escalation), and only an answer addressed to it
+    # ends that; or it asked for a SIGN-OFF, and what ends that is approving
+    # the pull request. Demanding an @-mention for the second would mean the
+    # reviewer approves, nothing happens, and the only symptom is silence.
+    #
+    # Both branches are decided by `approval_release`, which the solver's
+    # approval gate imports too: if these two ever disagreed, the issue would
+    # be released into a gate that re-asks and re-parks it every tick.
+    kind, ask = approval_release.newest_park_ask(notes, bot)
+    if kind and ask["id"] >= anchor:
+        released = _release_pr_park(f, repo, number, name, kind, ask,
+                                    notes, bot)
+        if released is not None:
+            return released
 
     mention = f"@{bot}"
     for nid, author, body in rows:

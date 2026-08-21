@@ -277,6 +277,10 @@ AWAITING_HUMAN_MARKER="$STATE_ROOT/issue-markers/${REPO//\//__}-${ISSUE_NUM}.awa
 # for. Two files, because "I asked" and "they answered" are different facts
 # and collapsing them re-asks a question already answered.
 APPROVAL_ASKED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.approval-asked"
+# "<sha> <count>" — consecutive refusals of the same commit, so a merge that is
+# refused because the bot may not press the button can be told apart from one
+# refused because the host was briefly unhappy.
+MERGE_REFUSED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.merge-refused"
 APPROVAL_GRANTED_FILE="$ISSUE_STATE_DIR/${REPO//\//__}-${ISSUE_NUM}.approval-granted"
 # "<default-branch-sha>:<head-sha>" of the last rebase conflict handed to the
 # agent, plus how many times THAT pair has been handed over.
@@ -1145,27 +1149,68 @@ print('1' if story_estimate.requires_approval(json.loads(os.environ['LABELS'] or
 # code somebody actually read, so a later push must not inherit it. The bot's
 # own review never counts — it is the same account that opened the pull
 # request, and an account approving itself is not a sign-off.
+# Has a human signed this sha off? The rule lives in `approval_release` and
+# NOT here, because the planner has to reach the same verdict about the same
+# sign-off: it takes the `On Hold` label off, this decides whether the merge
+# may proceed, and if they disagree the issue is released into a gate that
+# re-asks and re-parks it every tick. One module, two callers.
+#
+# Both hosts answer through `review-verdicts`, which normalises a GitHub
+# review and a GitLab approval to the same `verdict: approved` row — the
+# sign-off works the same way on either, which is the point of the forge.
 pr_human_approval() { # $1 = pr number, $2 = head sha
+  local vfile cfile who
+  vfile="$(mktemp)" || return 0
+  cfile="$(mktemp)" || { rm -f "$vfile"; return 0; }
+  "${FORGE[@]}" review-verdicts --number "$1" >"$vfile" 2>/dev/null \
+    || printf '[]' >"$vfile"
+  "${FORGE[@]}" comments --number "$ISSUE_NUM" >"$cfile" 2>/dev/null \
+    || printf '[]' >"$cfile"
+  who="$(BOT="$BOT_LOGIN" SHA="$2" V="$vfile" C="$cfile" python3 -c "
+import sys, json, os
+sys.path.insert(0, os.environ.get('PYTHONPATH','').split(os.pathsep)[0])
+import approval_release
+
+def load(path):
+    try:
+        with open(path) as fh:
+            rows = json.load(fh)
+    except Exception:
+        return []
+    return rows if isinstance(rows, list) else []
+
+comments = load(os.environ['C'])
+bot = os.environ['BOT']
+ask = approval_release.approval_ask(comments, bot)
+got = approval_release.signed_off(verdicts=load(os.environ['V']),
+                                  comments=comments,
+                                  bot=bot,
+                                  sha=os.environ.get('SHA', ''),
+                                  anchor_id=(ask or {}).get('id'))
+print((got or {}).get('who') or '')
+")"
+  rm -f "$vfile" "$cfile"
+  printf '%s' "$who"
+}
+
+# Has a human REFUSED this sha? Same module, same reason as above: the planner
+# lifts the park on a rejection so the solver can act on it, and if this
+# disagreed the solver would be handed an issue only to park it again.
+pr_changes_requested() { # $1 = pr number, $2 = head sha
   "${FORGE[@]}" review-verdicts --number "$1" 2>/dev/null \
   | BOT="$BOT_LOGIN" SHA="$2" python3 -c "
 import sys, json, os
-bot = os.environ['BOT'].lower()
-sha = os.environ['SHA']
+sys.path.insert(0, os.environ.get('PYTHONPATH','').split(os.pathsep)[0])
+import approval_release
 try:
-    rs = json.load(sys.stdin)
+    rows = json.load(sys.stdin)
 except Exception:
-    rs = []
-for r in reversed(rs if isinstance(rs, list) else []):
-    who = r.get('author') or ''
-    if who.lower() == bot:
-        continue
-    if (r.get('verdict') or '') != 'approved':
-        continue
-    if sha and (r.get('sha') or '') != sha:
-        continue     # approved an older commit; a push invalidates a sign-off
-    print(who)
-    break
-" 2>/dev/null
+    rows = []
+got = approval_release.changes_requested(
+    verdicts=rows if isinstance(rows, list) else [],
+    bot=os.environ['BOT'], sha=os.environ.get('SHA', ''))
+print((got or {}).get('who') or '')
+"
 }
 
 # WHO is asked to sign off, in order:
@@ -1201,6 +1246,12 @@ request_merge_approval() { # $1 = pr number, $2 = head sha
   owner="$(resolve_review_target)"
   [ -f "$APPROVAL_ASKED_FILE" ] && asked="$(cat "$APPROVAL_ASKED_FILE" 2>/dev/null)"
   if [ "$asked" = "$sha" ]; then
+    # Already asked, still waiting. Re-park anyway: `park_on_hold` is a no-op
+    # when the label is already there, and this path is how the park comes
+    # back if somebody took the label off without signing off — otherwise the
+    # issue is workable forever, spawning a runner every tick to reach this
+    # same line and do nothing.
+    park_on_hold
     echo "[approval-gate] sign-off for ${sha:0:8} already requested — waiting"
     return 0
   fi
@@ -1232,15 +1283,20 @@ request_merge_approval() { # $1 = pr number, $2 = head sha
 
 @$owner — this issue is labelled \`approval\`, so I will not merge it without you. Everything else is done: the checks are green, there are no conflicts, PR #$pr is not a draft, and the autonomous review approved \`${sha:0:8}\`. I have requested you as a reviewer on it.
 
-To let it land, **approve PR #$pr** on GitHub. If you want changes first, say so here and @-mention \`@$BOT_LOGIN\`. If I push another commit I will ask again — an approval covers the code it was given for." \
+To let it land, **approve PR #$pr** — the review button, or just say \`LGTM\` here. Either one lifts the \`On Hold\` label by itself; you do not have to @-mention me for this one. If you want changes first, say so here and @-mention \`@$BOT_LOGIN\`. If I push another commit I will ask again — an approval covers the code it was given for." \
     && echo "[approval-gate] asked @$owner to sign off on ${sha:0:8}" \
     || echo "[approval-gate] WARNING: could not post the approval request"
   printf '%s' "$sha" > "$APPROVAL_ASKED_FILE"
-  # The wait is now on a person and can last days. The marker tells the
-  # planner to rank this issue LAST and work the bot's other issues meanwhile,
-  # instead of holding the repo's single slot on a question only somebody else
-  # can answer.
-  touch "$AWAITING_HUMAN_MARKER" 2>/dev/null || true
+  # The wait is now on a person and can last days, so SAY so on the issue.
+  #
+  # This used to touch the marker alone. The marker lives on a volume only
+  # this pod can read: it ranks the issue LAST so the repo's single slot goes
+  # to work the bot can actually move, which is right — but ranked last in a
+  # repo with a dozen open issues is ranked never, and from the outside the
+  # issue still read `status::in-progress`. Nobody could see whose turn it
+  # was. `park_on_hold` writes the same wait where the person can see it, and
+  # the planner lifts it again the moment they approve.
+  park_on_hold
 }
 
 approval_gate() { # $1 = pr number, $2 = head sha
@@ -1263,6 +1319,17 @@ approval_gate() { # $1 = pr number, $2 = head sha
     echo "[approval-gate] @$who approved ${sha:0:8} — merge may proceed"
     return 0
   fi
+  # A REJECTION IS NOT A WAIT. Somebody read the change and asked for
+  # something different: that is the solver's work again, so do not ask them
+  # to sign off on what they just refused, and above all do not park. Parking
+  # here would hold the issue until they replied a second time to say what
+  # they had already said.
+  who="$(pr_changes_requested "$pr" "$sha")"
+  if [ -n "$who" ]; then
+    rm -f "$APPROVAL_ASKED_FILE" "$AWAITING_HUMAN_MARKER" 2>/dev/null
+    echo "[approval-gate] @$who requested changes on ${sha:0:8} — addressing the review, not merging"
+    return 1
+  fi
   request_merge_approval "$pr" "$sha"
   echo "[approval-gate] waiting for a human sign-off on ${sha:0:8}"
   return 1
@@ -1274,8 +1341,53 @@ approval_gate() { # $1 = pr number, $2 = head sha
 # rationalise its way past — which is the entire reason the review and
 # sign-off gates exist. Deciding it here also means the decision is testable
 # without a model call.
+# Whatever the host said when it refused, for the classifier below.
+MERGE_REFUSAL=""
 merge_pr() { # $1 = pr number
-  "${FORGE[@]}" merge --number "$1" >/dev/null 2>&1
+  local out rc
+  out="$("${FORGE[@]}" merge --number "$1" 2>&1)"; rc=$?
+  MERGE_REFUSAL="$out"
+  return $rc
+}
+
+# Is this refusal one that will never succeed on a retry?
+#
+# A protected branch, a missing permission or a required review the bot cannot
+# satisfy are all "a person has to press this button" — retrying every five
+# minutes forever is the wrong answer and, worse, a silent one. Anything else
+# (a race with mergeability, a blip) is worth another tick.
+merge_refusal_is_permanent() {
+  printf '%s' "$MERGE_REFUSAL" | tr 'A-Z' 'a-z' | grep -qE \
+    "403|405|protected branch|not authorized|not allowed|review required|required status|resource not accessible|permission|forbidden|method not allowed"
+}
+
+# Refusals of THIS commit, counted. Resets whenever the head moves, because a
+# new commit is a new question.
+merge_refusal_count() { # $1 = sha -> prints the new count
+  local sha="$1" prev_sha="" prev_n=0 n file="${MERGE_REFUSED_FILE:-}"
+  if [ -n "$file" ] && [ -f "$file" ]; then
+    read -r prev_sha prev_n < "$file" 2>/dev/null || true
+  fi
+  case "$prev_n" in (*[!0-9]*|"") prev_n=0 ;; esac
+  if [ "$prev_sha" = "$sha" ]; then n=$((prev_n + 1)); else n=1; fi
+  [ -n "$file" ] && { printf '%s %s' "$sha" "$n" > "$file" 2>/dev/null || true; }
+  printf '%s' "$n"
+}
+
+# The bot has everything it needs and still cannot land the change. Say so
+# where the person can see it, and park — the same visible wait as every other
+# "waiting on a person", rather than a warning in a pod log nobody reads.
+park_merge_blocked() { # $1 = pr number, $2 = sha, $3 = why
+  local pr="$1" sha="$2" why="$3" owner
+  owner="$(resolve_review_target)"
+  post_issue_comment "🚧 MERGE BLOCKED (sha \`${sha:0:8}\`)
+
+${owner:+@$owner — }everything this bot controls is green: the checks pass, the autonomous review approved \`${sha:0:8}\`, and the sign-off is on record. The host refused the merge itself ($why), which is a permission only a person has.
+
+Please **merge PR #$pr** yourself. Merging it closes this issue; if you would rather I changed something first, say so here and @-mention \`@$BOT_LOGIN\` and I will pick it back up." \
+    && echo "[merge] asked a human to press the button on PR #$pr" \
+    || echo "[merge] WARNING: could not post the merge-blocked notice"
+  park_on_hold
 }
 
 # Does the issue body forbid the bot from merging? A pre-existing opt-out,
@@ -1324,9 +1436,20 @@ maybe_merge_green_pr() { # $1 = pr number
   # else has already said yes.
   approval_gate "$pr" "$head_sha" || return 1
   if ! merge_pr "$pr"; then
-    echo "[merge] WARNING: the merge of PR #$pr was refused — leaving it open"
+    local refusals
+    refusals="$(merge_refusal_count "$head_sha")"
+    if merge_refusal_is_permanent; then
+      echo "[merge] PR #$pr was refused by the host and will stay refused — parking"
+      park_merge_blocked "$pr" "$head_sha" "the host would not let me merge"
+    elif [ "${refusals:-1}" -ge 3 ]; then
+      echo "[merge] PR #$pr refused $refusals times on the same commit — parking"
+      park_merge_blocked "$pr" "$head_sha" "refused $refusals times running"
+    else
+      echo "[merge] WARNING: the merge of PR #$pr was refused (attempt $refusals) — retrying next tick"
+    fi
     return 1
   fi
+  rm -f "${MERGE_REFUSED_FILE:-}" 2>/dev/null || true
   echo "[merge] merged PR #$pr (${head_sha:0:8})"
   RUN_OUTCOME="merged"
   # The delivery is what closes the issue, and `completed` is what says it was

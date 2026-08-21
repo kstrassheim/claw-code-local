@@ -61,7 +61,8 @@ BLOCKS = {
 # The Python modules the runner's inline snippets import. Copied into the
 # sandbox rather than pointed at through the checkout, so PYTHONPATH is a path
 # the sandbox shell can spell.
-MODULES = ("issue_status.py", "story_estimate.py", "story_points.py")
+MODULES = ("approval_release.py", "issue_status.py", "story_estimate.py",
+           "story_points.py")
 
 
 class RunnerBlock(ShellTestCase):

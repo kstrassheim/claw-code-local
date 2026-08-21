@@ -819,6 +819,7 @@ COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
 COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
 COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py
 COPY --chmod=0644 story_estimate.py     /usr/local/bin/story_estimate.py
+COPY --chmod=0644 approval_release.py   /usr/local/bin/approval_release.py
 COPY --chmod=0644 lexical_guard.py      /usr/local/bin/lexical_guard.py
 COPY --chmod=0644 review_subject.py     /usr/local/bin/review_subject.py
 COPY --chmod=0644 security_reports.py   /usr/local/bin/security_reports.py

@@ -51,6 +51,7 @@ COPY --chmod=0755 reviewer-tick.py        /usr/local/bin/reviewer-tick
 COPY --chmod=0644 forge.py               /usr/local/bin/forge.py
 COPY --chmod=0644 issue_priority.py      /usr/local/bin/issue_priority.py
 COPY --chmod=0644 issue_status.py        /usr/local/bin/issue_status.py
+COPY --chmod=0644 approval_release.py    /usr/local/bin/approval_release.py
 COPY --chmod=0644 lexical_guard.py       /usr/local/bin/lexical_guard.py
 COPY --chmod=0644 project_allowlist.py   /usr/local/bin/project_allowlist.py
 COPY --chmod=0644 queue_state.py         /usr/local/bin/queue_state.py
