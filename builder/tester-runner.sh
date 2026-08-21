@@ -139,6 +139,7 @@ _source_lib agent-limits || true
 _source_lib agent-models || true
 _source_lib agent-thinking || true
 _source_lib agent-slot || true
+_source_lib project-instructions || true
 
 # Resolve bot identity. Pinned identity (env var) wins; otherwise look it
 # up. Hardcoding would couple the code to one deployment's identity —
@@ -905,6 +906,23 @@ timeout, wasting most of an hour.
 Begin.
 PROMPT_TAIL_EOF
 
+# OPTIONAL per-project instructions from the target repo. Absent => an empty
+# string => the prompt is unchanged, so a repository that ships no such file
+# behaves exactly as it did before. Read at the COMMIT UNDER TEST, not at
+# whatever is newest: the rest of this run is about that commit, and the
+# instructions it runs under must not change mid-flight.
+PROJECT_INSTRUCTIONS=""
+if command -v load_project_instructions >/dev/null 2>&1; then
+  PROJECT_INSTRUCTIONS="$(load_project_instructions \
+    "CLAWCODE-tester-instructions.md" "$HEAD_SHA" "$PROJECT_DIR" \
+    2>/dev/null || true)"
+fi
+if [ -n "$PROJECT_INSTRUCTIONS" ]; then
+  echo "[instructions] CLAWCODE-tester-instructions.md found — honouring it this run"
+else
+  echo "[instructions] no CLAWCODE-tester-instructions.md in $REPO — standard tester protocol"
+fi
+
 # Assemble: the fixed halves plus the four composed phases. Substitution is
 # done with sed -i on the assembled file rather than by bash interpolation, so
 # the prompt body can contain any characters (no escape hazard).
@@ -916,6 +934,9 @@ PROMPT_FILE="$(mktemp -t tester-prompt.XXXXXX)"
   printf '%s\n\n' "$CODEREVIEW_STEP"
   printf '%s\n' "$CONSOLIDATE_STEP"
   printf '%s\n' "$PROMPT_TAIL"
+  if [ -n "$PROJECT_INSTRUCTIONS" ]; then
+    printf '\n%s\n' "$PROJECT_INSTRUCTIONS"
+  fi
 } > "$PROMPT_FILE"
 sed -i \
   -e "s|__REPO__|$REPO|g" \

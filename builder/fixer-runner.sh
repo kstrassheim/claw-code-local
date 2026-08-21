@@ -2242,6 +2242,27 @@ else
   esac
 fi
 
+# OPTIONAL per-project instructions and docs, both read from the TARGET
+# repository's checkout. Absent => empty strings => the prompt is unchanged,
+# which is the whole contract: a project that ships neither behaves exactly as
+# it did before.
+#
+# The library was already sourced at the top of this file and the loader was
+# never called, so CLAWCODE-issuesolver-instructions.md has been sitting in
+# these repositories being read by nobody. The reviewer has always called it;
+# the solver only looked like it did.
+PROJECT_INSTRUCTIONS=""
+if command -v load_project_instructions >/dev/null 2>&1; then
+  PROJECT_INSTRUCTIONS="$(load_project_instructions \
+    "CLAWCODE-issuesolver-instructions.md" "${DEFAULT_BRANCH:-}" "$PROJECT_DIR" \
+    2>/dev/null || true)"
+fi
+if [ -n "$PROJECT_INSTRUCTIONS" ]; then
+  echo "[instructions] CLAWCODE-issuesolver-instructions.md found — honouring it on this issue"
+else
+  echo "[instructions] no CLAWCODE-issuesolver-instructions.md in $REPO — standard solver protocol"
+fi
+
 # Read the bot's persona (IDENTITY.md) and voice (SOUL.md) from the
 # workspace so they're in this turn's prompt instead of relying on
 # the --local runtime's auto-bootstrap (only TOOLS.md is reliably
@@ -2347,10 +2368,43 @@ $EXISTING_PRS_TEXT
 ## Current CI state on the PR head
 
 $CI_STATUS_TEXT
+$PROJECT_INSTRUCTIONS
 
 ## Branch policy — STRICT
 
 $BRANCH_INSTRUCTION
+
+## Tests — what \"done\" means
+
+A fix is NOT done when only one test layer is touched. Before you push:
+
+1. **Work out which test layers the change actually touches.** A change may
+   need frontend/unit, backend/unit, integration, and end-to-end (e2e)
+   tests — not just frontend. Map each file you changed to the test types
+   that exercise it (e.g. a backend endpoint → backend unit + e2e; a React
+   component → frontend unit + e2e; a shared contract/API → BOTH sides).
+2. **Look for a documented testing scheme, and follow it if there is one.**
+   Repositories differ: some describe how tests and mocks/fixtures are meant
+   to be written and run, some do not, and where they put it varies. Look
+   where it plausibly lives — \`README.md\`, other \`*.md\` at the root
+   (CONTRIBUTING, TESTING), a \`docs/\` directory, per-package or
+   per-folder READMEs. Any of those may be absent; that is normal and not
+   a problem to report. Where you DO find a scheme, follow it strictly:
+   same runners, directory layout, file naming, mock/fixture patterns and
+   commands.
+3. **Where nothing is documented, infer from the existing tests.** Open the
+   nearest existing tests of that SAME type and copy their structure,
+   helpers, and mocking approach (how they stub HTTP, auth, the DB, time,
+   etc.). Match the established pattern rather than inventing a new one.
+4. Add/extend tests for every layer the change affects, run them locally
+   when a runner is available, and make the issue's acceptance criteria
+   verifiable. Do NOT ship frontend-only tests for a change that also
+   alters backend or e2e behaviour.
+5. **A coverage threshold is a requirement, not an obstacle.** Where CI
+   enforces one and reports coverage below it, the answer is more tests at
+   the layers the change touched — never lowering the threshold, excluding
+   files from the report, or weakening the gate. Read the failing job log
+   for the exact numbers before deciding where the missing coverage is.
 
 ## Protocol — follow this exactly
 
