@@ -46,6 +46,20 @@ def closure():
             queue.append(name)
         for name in re.findall(r'/usr/local/bin/([A-Za-z0-9_-]+)', text):
             queue.append(name)
+        # The spawners name their runners WITHOUT a directory so PATH decides,
+        # which is what lets a ConfigMap edit reach the cluster without an
+        # image rebuild. Reachability has to follow them there, or every
+        # entrypoint looks like dead weight the moment the path comes off.
+        #
+        # Matched in COMMAND POSITION only — `$(name)`, `nohup name`, and the
+        # `runner = 'name'` the embedded Python builds the exec line from.
+        # A looser scan would count a runner named in a comment as a
+        # dependency and demand the cron image carry it.
+        for pattern in (r'\$\(([a-z][a-z0-9-]*)\)',
+                        r'nohup\s+(?:env\s+\S+\s+)?([a-z][a-z0-9-]*)',
+                        r"runner\s*=\s*'([a-z][a-z0-9-]*)'"):
+            for name in re.findall(pattern, text):
+                queue.append(name)
 
     for entry in ENTRYPOINTS:
         with open(os.path.join(BUILDER, entry), encoding="utf-8") as fh:

@@ -443,7 +443,15 @@ spec:
               # and does the real work inside it with `kubectl exec`; what
               # runs here is one stdlib-only planner. See builder/cron/.
               imagePullPolicy: IfNotPresent
-              command: ["/usr/local/bin/cron-tester-spawn"]
+              # Named WITHOUT a directory so PATH decides, and PATH puts the
+              # ConfigMap mount (/opt/claw-scripts) ahead of the image copy in
+              # /usr/local/bin. Spelling the image path here made the mount
+              # decorative for the whole spawn chain: the CronJob ran the
+              # image's spawner, which spawned the image's runner, so a script
+              # shipped by ConfigMap was never executed and an edit only landed
+              # at the next version bump. A mount that fails still resolves —
+              # to the image copy, stale but present.
+              command: ["cron-tester-spawn"]
               env:
                 # The mounted scripts win over the image's copies — see the
                 # gateway deployment for why the image keeps a fallback set.

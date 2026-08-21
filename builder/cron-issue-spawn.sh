@@ -3,7 +3,8 @@
 #
 # Calls the (read-only) tick planner to produce a JSON spawn plan, then
 # for each entry kubectl-exec's into the openclaw pod and backgrounds
-# /usr/local/bin/fixer-runner.sh there. The fixer runs as a subprocess
+# `fixer-runner` there — by NAME, so PATH picks the ConfigMap copy over the
+# image's; see the note above the plan below. The fixer runs as a subprocess
 # inside the openclaw container — it shares the pod's network, secrets,
 # config, and persistent workspace volume (so it can keep a long-lived
 # git checkout under ~/.openclaw/projects/<repo>/).
@@ -74,7 +75,30 @@ kubectl -n "$NAMESPACE" exec "$OPENCLAW_POD" -c openclaw -- \
 kubectl -n "$NAMESPACE" exec "$OPENCLAW_POD" -c openclaw -- \
     record-deliveries 2>&1 | grep -v '^$' || true
 
-PLAN=$(/usr/local/bin/heartbeat-issue-tick)
+# WHY THESE ARE NOT ABSOLUTE PATHS.
+#
+# Everything under builder/ ships twice — baked into the image at
+# /usr/local/bin, and generated into ConfigMaps that mount at
+# /opt/claw-scripts, which comes FIRST on PATH so an edit reaches the cluster
+# without an image rebuild. That is the whole point of the ConfigMap.
+#
+# Naming the image path here defeated it silently. The mount was present, the
+# file in it was current, and nothing ever executed it: every runner and tick
+# was spawned as /usr/local/bin/<name>, so a script edit shipped by ConfigMap
+# sat there being correct and unread until the next version bump. Two fixes
+# landed that way, and the only symptom was that the bot kept doing the old
+# thing.
+#
+# Everything here is named WITHOUT a directory, so PATH decides — and PATH puts
+# the mount first in both the cron pods and the gateway (see 020-deployment and
+# 050-issue-watcher). A ConfigMap that fails to mount therefore degrades to the
+# image copy, which is stale but present, rather than to "command not found".
+#
+# A bare name is also the only form that survives this file: the spawn command
+# is built inside a double-quoted `python3 -c "..."`, where a `$VAR` would be
+# expanded by the shell before Python ever saw it and a `"` would end the
+# string outright.
+PLAN=$(heartbeat-issue-tick)
 echo "$PLAN" | python3 -c "
 import json, os, subprocess, sys, shlex
 plan = json.load(sys.stdin)
@@ -106,12 +130,12 @@ for r in plan['repos']:
         # window in which a human can overrule the number before any code is
         # written.
         if issue.get('needsEstimate'):
-            runner = '/usr/local/bin/estimate-runner'
+            runner = 'estimate-runner'
             runner_args = ' '.join(shlex.quote(a) for a in [repo, str(n)])
             env_prefix = ''
             what = 'estimate'
         else:
-            runner = '/usr/local/bin/fixer-runner'
+            runner = 'fixer-runner'
             runner_args = ' '.join(shlex.quote(a) for a in [repo, str(n), url, title])
             # The size travels to the runner, which picks solver vs
             # solver.small from it. Absent means the solver defaults to 8 —
