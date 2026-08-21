@@ -327,14 +327,20 @@ def release_hold(f: forge.Forge, repo: str, issue: dict, bot: str) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
-    def _id(note) -> int | None:
+    # (id, author, body) for every note that has a usable id. Built once so
+    # the anchor and the answer are read from the same rows, in one pass.
+    rows = []
+    for note in notes:
+        if not isinstance(note, dict) or note.get("system"):
+            continue
         try:
-            return int(note.get("id"))
-        except (TypeError, ValueError, AttributeError):
-            return None
-
-    def _author(note) -> str:
-        return str(((note.get("author") or {}).get("username") or "")).lower()
+            nid = int(note.get("id"))
+        except (TypeError, ValueError):
+            continue
+        rows.append((nid,
+                     str(((note.get("author") or {}).get("username")
+                          or "")).lower(),
+                     str(note.get("body") or "")))
 
     # Where the wait started. The ASK note when the guard asked; otherwise the
     # bot's newest note, which is where a solver-side park (fixer-runner's
@@ -342,20 +348,16 @@ def release_hold(f: forge.Forge, repo: str, issue: dict, bot: str) -> bool:
     # this is not its park to lift.
     anchor = lexical_guard.ask_note_id(notes, bot)
     if anchor is None:
-        mine = [n for n in notes if isinstance(n, dict) and _author(n) == bot]
-        ids = [i for i in (_id(n) for n in mine) if i is not None]
-        anchor = max(ids) if ids else None
+        mine = [nid for nid, author, _ in rows if author == bot]
+        anchor = max(mine) if mine else None
     if anchor is None:
         return False
 
     mention = f"@{bot}"
-    for note in notes:
-        if not isinstance(note, dict) or note.get("system"):
+    for nid, author, body in rows:
+        if nid <= anchor or author == bot:
             continue
-        nid = _id(note)
-        if nid is None or nid <= anchor or _author(note) == bot:
-            continue
-        if mention not in str(note.get("body") or "").lower():
+        if mention not in body.lower():
             continue
         if f.remove_label(repo, number, name):
             sys.stderr.write(f"  released {repo}#{number}: "

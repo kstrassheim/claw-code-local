@@ -116,5 +116,76 @@ class HoldReleasesWhenAnswered(unittest.TestCase):
         ]))
 
 
+class TheParkLabelIsFoundByItsSpelling(unittest.TestCase):
+    """`on_hold_label_name` — which label to delete, given the issue.
+
+    Separate from the release decision because the two fail differently: not
+    recognising the park leaves the issue stuck, and recognising it under a
+    name the host does not have 404s the delete.
+    """
+
+    def setUp(self):
+        self.h = load("heartbeat-issue-tick")
+
+    def name_of(self, *labels):
+        return self.h.on_hold_label_name({"number": 5, "labels": list(labels)})
+
+    def test_the_plain_spelling(self):
+        self.assertEqual(self.name_of("bug", "On Hold"), "On Hold")
+
+    def test_a_scope_prefix_is_tolerated_and_returned_intact(self):
+        self.assertEqual(self.name_of("Status::On Hold"), "Status::On Hold")
+
+    def test_punctuation_and_case_are_tolerated(self):
+        self.assertEqual(self.name_of("on-hold"), "on-hold")
+        self.assertEqual(self.name_of("ON_HOLD"), "ON_HOLD")
+
+    def test_an_issue_with_no_park_has_no_name(self):
+        self.assertEqual(self.name_of("bug", "Priority::High"), "")
+
+    def test_no_labels_at_all(self):
+        self.assertEqual(self.h.on_hold_label_name({"number": 5}), "")
+
+
+class TheAskNoteIsFound(unittest.TestCase):
+    """`lexical_guard.ask_note_id` — the anchor both halves of the fix use.
+
+    The planner reads it to know when the wait started; the solver anchors its
+    first-run cursor on it so the reply that arrived before the run existed is
+    still unread. It shipped with no caller at all until now, so this is its
+    first exercise.
+    """
+
+    def setUp(self):
+        self.g = load("lexical_guard")
+
+    def test_the_bots_ask_is_found(self):
+        self.assertEqual(self.g.ask_note_id([
+            note("chatter", "human", 1),
+            note(ASK, "bot", 2),
+        ], "bot"), 2)
+
+    def test_the_newest_ask_wins_when_it_was_asked_twice(self):
+        # A reworded issue can be asked about again; the live wait is the
+        # latest one, and anchoring on the older would read the first reply
+        # as an answer to the second question.
+        self.assertEqual(self.g.ask_note_id([
+            note(ASK, "bot", 2),
+            note("@bot ok", "human", 3),
+            note(ASK, "bot", 7),
+        ], "bot"), 7)
+
+    def test_an_ask_worded_by_somebody_else_is_not_the_bots(self):
+        self.assertIsNone(self.g.ask_note_id([note(ASK, "human", 1)], "bot"))
+
+    def test_an_ordinary_bot_comment_is_not_an_ask(self):
+        self.assertIsNone(self.g.ask_note_id([
+            note("opened a pull request", "bot", 1),
+        ], "bot"))
+
+    def test_no_notes_at_all(self):
+        self.assertIsNone(self.g.ask_note_id([], "bot"))
+
+
 if __name__ == "__main__":
     unittest.main()
