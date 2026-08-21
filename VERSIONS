@@ -25,7 +25,7 @@ OPENCLAW_UPSTREAM=v2026.7.1-2
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.7.1-2.20
+OPENCLAW_VERSION=v2026.7.1-2.21
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
@@ -46,6 +46,12 @@ TERRAFORM_MCP_VERSION=0.5.2
 OPENTOFU_VERSION=1.12.6
 OPENTOFU_MCP_VERSION=0.1.5
 CODE_SERVER_VERSION=4.118.0
+# mermaid-cli, the renderer behind `mermaid-render`. It drives a headless
+# browser, and puppeteer would fetch its OWN Chromium — the Dockerfile points
+# it at the system one instead (PUPPETEER_EXECUTABLE_PATH), so this pin must
+# stay compatible with the chromium Debian ships. A mermaid-cli that requires
+# a newer Chrome than the base image has fails at render time, not at build.
+MERMAID_CLI_VERSION=11.12.0
 AWS_CLI_VERSION=2.34.45
 GCLOUD_VERSION=567.0.0
 ALIYUN_CLI_VERSION=3.3.14

@@ -78,6 +78,54 @@ data:
     does not draw mermaid: a mermaid block arrives as a code fence, which
     reads as a failed answer rather than as a chart.
 
+    ### chart-format status / png / svg / mermaid
+
+    Three output modes, one default. The mode is a setting on the bot, not a
+    per-call flag, so it is answered once rather than argued about every time
+    somebody asks for a chart:
+
+    | mode | what goes out | when it is right |
+    | --- | --- | --- |
+    | `png` | a rendered image | **the default.** Every chat channel displays it inline |
+    | `svg` | a rendered vector image | the destination scales it, or text in the chart must stay sharp |
+    | `mermaid` | the mermaid source itself | the destination draws mermaid — GitHub does, in issues and pull requests |
+
+    The switch is a flag file whose CONTENTS are the mode; absent means png.
+
+    **status**
+
+    ```
+    cat $HOME/.openclaw/.chart-format 2>/dev/null || echo "chart format: png (default)"
+    ```
+
+    **set** — `png`, `svg` or `mermaid`:
+
+    ```
+    echo svg > $HOME/.openclaw/.chart-format
+    ```
+
+    **back to the default**
+
+    ```
+    rm -f $HOME/.openclaw/.chart-format
+    ```
+
+    **Honour it when a chart is asked for:**
+
+    ```
+    FMT=$(cat $HOME/.openclaw/.chart-format 2>/dev/null || echo png)
+    if [ "$FMT" = mermaid ]; then
+      planning burnup --format mermaid          # post the block itself
+    else
+      IMG=$(planning burnup --format mermaid | mermaid-render --format "$FMT")
+    fi
+    ```
+
+    **`mermaid` means post the source, not a failed picture.** In that mode do
+    not call the renderer at all — send the fenced block and let the
+    destination draw it. Anywhere that cannot draw it, say the numbers in
+    words as well.
+
     ```
     planning burndown --format mermaid | mermaid-render
     ```

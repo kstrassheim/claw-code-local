@@ -19,6 +19,13 @@
 #   mermaid-render /tmp/burndown.mmd
 #   mermaid-render --out /tmp/sprint.png < chart.mmd
 #   mermaid-render --theme dark --width 1400 chart.mmd
+#   mermaid-render --format svg chart.mmd
+#
+# FORMAT: png by default, svg on request. The bot-wide setting lives in
+# ~/.openclaw/.chart-format and --format overrides it for one call. The
+# planning skill also accepts `mermaid` there, meaning "post the source and do
+# not render" — that never reaches this script, and if it does it falls back
+# to png rather than writing a file nothing can open.
 #
 # Prints the PNG path on stdout and nothing else, so it composes:
 #   openclaw message send --channel telegram --target "$T" \
@@ -31,6 +38,12 @@ OUT=""
 THEME_FILE="${MERMAID_THEME_FILE:-/usr/local/share/mermaid-theme.json}"
 THEME="${MERMAID_THEME:-}"
 WIDTH="${MERMAID_WIDTH:-1200}"
+# The output format, lowest precedence first: the built-in default, the bot's
+# chart-format setting, then --format on this call. `mermaid` is a valid
+# setting for the SKILL — it means "post the source, do not render" — so it
+# never reaches here; if it somehow does, treat it as the default rather than
+# writing a file called chart.mermaid that nothing can display.
+FORMAT="${MERMAID_FORMAT:-$(cat "${HOME:-/home/node}/.openclaw/.chart-format" 2>/dev/null || echo png)}"
 BG="${MERMAID_BACKGROUND:-#fcfcfb}"
 
 IN_FILE=""
@@ -38,6 +51,10 @@ IN_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)        OUT="${2:-}"; shift 2 ;;
+    # png (default) or svg. mmdc picks the renderer from the OUTPUT FILE
+    # EXTENSION, so this only has to decide the extension — passing an
+    # explicit format flag as well would be a second place to keep in step.
+    --format)     FORMAT="${2:-png}"; shift 2 ;;
     --theme)      THEME="${2:-default}"; shift 2 ;;
     --width)      WIDTH="${2:-1200}"; shift 2 ;;
     --background) BG="${2:-white}"; shift 2 ;;
@@ -110,7 +127,11 @@ if grep -q '^[[:space:]]*```' "$SRC"; then
   fi
 fi
 
-[ -n "$OUT" ] || OUT="${TMPDIR:-/tmp}/mermaid-$(date +%s)-$$.png"
+case "$FORMAT" in
+  svg|png) ;;
+  *)       FORMAT=png ;;
+esac
+[ -n "$OUT" ] || OUT="${TMPDIR:-/tmp}/mermaid-$(date +%s)-$$.${FORMAT}"
 
 # A WRITABLE HOME FOR THE BROWSER, and it is not optional.
 #

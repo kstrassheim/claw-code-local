@@ -40,7 +40,14 @@ import re
 # not change casually — an edit here re-asks on every issue mid-flight.
 ASK_MARKER = "DESTRUCTIVE CHANGE — PLEASE CONFIRM"
 
-_DESTRUCTIVE = r"\b(?:remove|delete|disable|drop|strip|kill|turn\s*off|get\s*rid\s*of)\b"
+_DESTRUCTIVE = (
+    r"\b(?:remove|delete|disable|drop|strip|kill|turn\s*off|get\s*rid\s*of"
+    # Verbs that only ever appear against infrastructure and data, added with
+    # the nouns below. `destroy` in particular is the word terraform itself
+    # uses, so an issue asking for exactly the irreversible thing was phrased
+    # in the tool's own vocabulary and matched nothing.
+    r"|destroy|tear\s*down|wipe|purge|truncate|deprovision|decommission"
+    r"|scale\s*(?:down\s*)?to\s*zero)\b")
 
 # A destructive verb that is NEGATED is a prohibition, not a request. Anchored
 # at the end so it only looks at the text immediately BEFORE the verb.
@@ -49,12 +56,49 @@ _NEGATION = re.compile(
     r"|does\s+not|don'?t|cannot|can'?t|refuse[sd]?)\b|\bNO\b)[\s\S]{0,40}$",
     re.IGNORECASE)
 
+# WHAT COUNTS AS LOAD-BEARING, and why the list grew.
+#
+# Every original entry protects a QUALITY GATE or an OBSERVABILITY signal:
+# undoing one costs confidence, and the fix is to put it back. The second
+# group is different in kind — infrastructure and data — and undoing one of
+# those is not recoverable by re-running anything. A dropped table is gone; a
+# destroyed volume is gone; a deleted namespace takes everything in it.
+#
+# The gap was found on a real issue that the guard let straight through:
+#
+#     "Drop the staging namespace and delete its volumes"
+#
+# Three destructive verbs, and not one protected noun, so it was planned as
+# ordinary work. The verbs were never the problem.
 _PROTECTED = (
     r"\b(?:tests?|test\s+suite|test\s+files?|snapshots?|jest|lint|eslint"
     r"|prettier|type[-\s]?check|tsconfig\b[^.]*?strict|mypy[^.]*?strict"
     r"|ci\s+jobs?|pipelines?|workflows?|coverage|monitor(?:ing)?|logging"
     r"|tracking|security|auth(?:entication)?|authorization|backups?"
-    r"|rollbacks?)\b")
+    r"|rollbacks?"
+    # Infrastructure — but only what a re-apply does NOT bring back.
+    #
+    # THE LINE IS RECOVERABILITY, not "is it infrastructure". A Deployment,
+    # StatefulSet, Ingress or Certificate is declarative: delete one and Argo
+    # recreates it from git on the next sync. Those are deliberately absent —
+    # and they are the words that appear in nearly every issue title in a
+    # Kubernetes repository, so protecting them parks routine work. A
+    # namespace takes its contents with it, a volume takes its data, a cluster
+    # takes both, and nothing in git brings any of it back.
+    r"|namespaces?|clusters?|nodes?|node\s*pools?|volumes?|pvcs?"
+    r"|persistent\s*volumes?|disks?|storage\s*accounts?|resource\s*groups?"
+    r"|key\s*vaults?"
+    # State a tool owns and rebuilds from: losing it orphans real resources.
+    r"|terraform\s*state|tfstate|state\s*files?|lock\s*files?"
+    # Data: the entries no re-run brings back.
+    r"|databases?|schemas?|tables?|collections?|indexes|indices"
+    r"|buckets?|blobs?|queues?|topics?|migrations?)\b"
+    # DELIBERATELY ABSENT, both learned from real issues:
+    #   `container` — "capabilities: drop: [ALL]" is the RECOMMENDED pod
+    #     hardening, so this parked every securityContext issue that quoted it.
+    #   `secret`    — "remove the hardcoded secret" is the fix, not the damage.
+    # A guard that fires on the remediation teaches people to ignore it.
+    )
 
 _FLAG = r"(?:feature[\s-]+flag|toggle)"
 

@@ -315,6 +315,34 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && chromium --version
 
+# mermaid-cli, for `mermaid-render`.
+#
+# WHY IT WAS MISSING AND WHY THAT WAS INVISIBLE
+# `mermaid-render` and its theme file have shipped in this image for months
+# (see the COPYs further down), and the planning skill documents piping charts
+# through it. But `mmdc` was never installed, so every call ended at the
+# wrapper's own guard — "mmdc is not installed in this image" — and diagram
+# output silently degraded to ASCII. The tooling was complete apart from the
+# one package it drives.
+#
+# NO SECOND BROWSER. mermaid renders in a headless browser, and puppeteer
+# downloads its own Chromium by default — a second ~150MB browser in an image
+# that already installs one directly above. PUPPETEER_SKIP_DOWNLOAD stops
+# that, and PUPPETEER_EXECUTABLE_PATH points it at the system binary. Both are
+# set as ENV rather than only at install time: mmdc reads them at RUN time
+# too, and an install-only value would work in the build and fail in the pod.
+ENV PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ARG MERMAID_CLI_VERSION
+RUN npm install -g --no-audit --no-fund --loglevel=error \
+      "@mermaid-js/mermaid-cli@${MERMAID_CLI_VERSION}" \
+ && command -v mmdc \
+ && printf 'graph TD\n  A[build] --> B[check]\n' > /tmp/smoke.mmd \
+ && mmdc --input /tmp/smoke.mmd --output /tmp/smoke.svg >/tmp/mmdc.log 2>&1 \
+ && test -s /tmp/smoke.svg \
+ && head -c 60 /tmp/smoke.svg \
+ && rm -f /tmp/smoke.mmd /tmp/smoke.svg /tmp/mmdc.log
+
 # kubectl + kubelogin + podman
 #
 # kubelogin is the credential plugin kubectl EXECS when a kubeconfig comes from

@@ -190,6 +190,7 @@ jobs:
           echo "OPENTOFU_VERSION=${OPENTOFU_VERSION}" >> "$GITHUB_ENV"
           echo "OPENTOFU_MCP_VERSION=${OPENTOFU_MCP_VERSION}" >> "$GITHUB_ENV"
           echo "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" >> "$GITHUB_ENV"
+          echo "MERMAID_CLI_VERSION=${MERMAID_CLI_VERSION}" >> "$GITHUB_ENV"
           echo "AWS_CLI_VERSION=${AWS_CLI_VERSION}" >> "$GITHUB_ENV"
           echo "GCLOUD_VERSION=${GCLOUD_VERSION}" >> "$GITHUB_ENV"
           echo "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" >> "$GITHUB_ENV"
@@ -291,6 +292,7 @@ jobs:
             --build-arg "OPENTOFU_VERSION=${OPENTOFU_VERSION}" \
             --build-arg "OPENTOFU_MCP_VERSION=${OPENTOFU_MCP_VERSION}" \
             --build-arg "CODE_SERVER_VERSION=${CODE_SERVER_VERSION}" \
+            --build-arg "MERMAID_CLI_VERSION=${MERMAID_CLI_VERSION}" \
             --build-arg "AWS_CLI_VERSION=${AWS_CLI_VERSION}" \
             --build-arg "GCLOUD_VERSION=${GCLOUD_VERSION}" \
             --build-arg "ALIYUN_CLI_VERSION=${ALIYUN_CLI_VERSION}" \

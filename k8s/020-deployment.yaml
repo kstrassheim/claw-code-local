@@ -353,8 +353,30 @@ spec:
             # solver, tester and reviewer. The chat bot is deliberately NOT
             # gated by this — a user asking a question must never queue behind
             # an hour-long autonomous run.
+            # 4, twice the library's default of 2.
+            #
+            # WHAT THE OLD CEILING ACTUALLY MEASURED, because the library
+            # does not say and it reads like a law of nature.
+            #
+            # agent-slot.sh calls 3 "the measured ceiling" and defaults to 2
+            # for headroom, on the grounds that going one over costs every run
+            # in flight. That was measured against KIMI, whose rate limits are
+            # what produced the 429s — it is a property of one provider, not of
+            # the bot. The fallback (minimax) has room for 4, so the number
+            # that was right under kimi is simply the wrong number now.
+            #
+            # Raised here rather than in the library so that reasoning stays
+            # intact, and so this is one `kubectl set env` to undo. The signal
+            # is `secondsOn429` on the work documents in the planning store:
+            # it is per-provider, so if kimi ever becomes primary again this
+            # needs revisiting rather than assuming 4 still holds.
+            #
+            # Memory was never what gated this — the pod used ~1.6Gi of 5.5Gi
+            # with two solvers in flight. The limit is raised alongside so four
+            # runs FIT, which is a different question from whether the provider
+            # will serve them.
             - name: MAX_AGENT_SLOTS
-              value: "2"
+              value: "4"
           volumeMounts:
             # Mount the PVC at the WHOLE openclaw state directory, not just
             # the `workspace/` subdir. Previously openclaw.json, identity/,
@@ -403,7 +425,21 @@ spec:
               memory: 1500Mi
             limits:
               cpu: 1700m
-              memory: 5632Mi
+              # 8Gi, raised with MAX_AGENT_SLOTS 2 -> 4. Each concurrent agent
+              # run carries its own node process and tool subprocesses, so the
+              # ceiling has to move with the slot count or the fourth run OOMs
+              # the pod and takes the other three with it.
+              #
+              # Headroom, not a forecast: measured use with two solvers in
+              # flight was ~1.6Gi of the previous 5.5Gi, so this is not close
+              # to binding. It is a limit rather than a request, and datapi has
+              # ~32Gi, so nothing is reserved by raising it.
+              #
+              # Memory was never the constraint on slot count — see
+              # MAX_AGENT_SLOTS above, where the real ceiling is in-flight
+              # model requests. This makes four runs FIT; it does not make
+              # four runs SAFE.
+              memory: 8Gi
           lifecycle:
             preStop:
               exec:
