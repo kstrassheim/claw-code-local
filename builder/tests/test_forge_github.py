@@ -47,10 +47,12 @@ class FakeTransport:
     def __init__(self, routes=None):
         self.routes = dict(routes or {})
         self.calls = []          # (method, url, params, json_body, form_body)
+        self.raw_flags = []      # whether each call asked for text, not JSON
 
     def __call__(self, method, url, *, headers, params=None, json_body=None,
-                 form_body=None, timeout=None):
+                 form_body=None, timeout=None, raw=False):
         self.calls.append((method, url, params or {}, json_body, form_body))
+        self.raw_flags.append(raw)
         for key in sorted(self.routes, key=len, reverse=True):
             if key in url:
                 answer = self.routes[key]

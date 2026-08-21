@@ -122,9 +122,45 @@ class RateLimited(ForgeError):
     """
 
 
+class _StripAuthAcrossHosts(urllib.request.HTTPRedirectHandler):
+    """Drop the credential when a redirect leaves the host it was minted for.
+
+    GitHub answers `/actions/jobs/<id>/logs` with a 302 to blob storage, and
+    that storage rejects a request carrying a GitHub token — the reply is
+    `403 AuthenticationFailed` from Azure, which reads like a permissions
+    problem with the PAT and is not one. urllib replays every header across a
+    redirect; curl drops this one, which is why the same fetch works by hand
+    and returned nothing here.
+
+    Same-host redirects keep the header, or every ordinary API redirect would
+    turn into a 401.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        here = urllib.parse.urlsplit(req.full_url).netloc.lower()
+        there = urllib.parse.urlsplit(newurl).netloc.lower()
+        if here != there:
+            # Match on the lowercased name rather than passing a literal:
+            # urllib stores header keys `.capitalize()`d, so it holds
+            # `Private-token`, and `remove_header("Private-Token")` pops a key
+            # that is not there and reports nothing. `Authorization` survives
+            # that round trip unchanged, which is exactly why a literal here
+            # looks like it works while the GitLab half quietly does not.
+            for name in list(new.headers):
+                if name.lower() in ("authorization", "private-token"):
+                    new.remove_header(name)
+        return new
+
+
+_OPENER = urllib.request.build_opener(_StripAuthAcrossHosts)
+
+
 def _http(method: str, url: str, *, headers: dict, params: dict | None = None,
           json_body=None, form_body: dict | None = None,
-          timeout: int = HTTP_TIMEOUT):
+          timeout: int = HTTP_TIMEOUT, raw: bool = False):
     """The one place in this module where a request leaves the process.
 
     Injected as `transport=` by the tests, which is what keeps every test in
@@ -132,6 +168,9 @@ def _http(method: str, url: str, *, headers: dict, params: dict | None = None,
     building — the part most likely to be wrong.
 
     Returns the parsed JSON body, or None when the response had no body.
+    With `raw=True` the body is returned as text instead — CI job logs are
+    plain text, and JSON-parsing them threw the log away and answered None,
+    which the caller could only read as "no log".
     Raises ForgeError for anything that is not a 2xx.
     """
     if params:
@@ -146,8 +185,8 @@ def _http(method: str, url: str, *, headers: dict, params: dict | None = None,
         headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read()
+        with _OPENER.open(req, timeout=timeout) as r:
+            body_bytes = r.read()
     except urllib.error.HTTPError as e:
         body = ""
         try:
@@ -164,10 +203,12 @@ def _http(method: str, url: str, *, headers: dict, params: dict | None = None,
         raise ForgeError(f"{e.code} on {url}: {body[:200]}",
                          code=e.code, reason=str(e.reason or ""),
                          url=url, body=body) from None
-    if not raw:
+    if raw:
+        return body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+    if not body_bytes:
         return None
     try:
-        return json.loads(raw)
+        return json.loads(body_bytes)
     except ValueError:
         return None
 
@@ -1089,7 +1130,7 @@ class GitHubForge(Forge):
             # shared reader would return None on it.
             text = self._transport(
                 "GET", f"{self.api}/repos/{repo}/actions/jobs/{job_id}/logs",
-                headers=self._headers())
+                headers=self._headers(), raw=True)
         except Exception:  # noqa: BLE001
             return ""
         text = text if isinstance(text, str) else ""
@@ -1800,7 +1841,7 @@ class GitLabForge(Forge):
             text = self._transport(
                 "GET",
                 f"{self.api}/projects/{self._project(repo)}/jobs/{job_id}/trace",
-                headers=self._headers())
+                headers=self._headers(), raw=True)
         except Exception:  # noqa: BLE001
             return ""
         text = text if isinstance(text, str) else ""

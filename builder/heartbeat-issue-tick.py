@@ -220,6 +220,41 @@ def status_of_issue(issue: dict) -> str:
     )
 
 
+def answer_after(notes, bot: str, anchor):
+    """The id of the first note that ANSWERS the bot after `anchor`, or None.
+
+    An answer is a note from somebody other than the bot that @-mentions it —
+    the act the ask asks for: "Reply mentioning `@bot` ... and I'll proceed".
+    Deliberately stricter than `human_has_answered`, which only asks whether a
+    person spoke last: that ranks a marker park, and being wrong there costs
+    one spawn that exits in seconds. Both gates that use this one hold back
+    destructive-sounding work, so bystander chatter is not a go-ahead.
+
+    One definition, two callers, because they must not be able to disagree:
+    release_hold takes the label off when this returns an id, and
+    ask_before_spawning has to reach the same verdict about the same reply or
+    the issue is released into a gate that still refuses it.
+    """
+    bot = str(bot or "").lower()
+    if not bot or anchor is None:
+        return None
+    mention = f"@{bot}"
+    for note in notes or []:
+        if not isinstance(note, dict) or note.get("system"):
+            continue
+        try:
+            nid = int(note.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if nid <= anchor:
+            continue
+        if str(((note.get("author") or {}).get("username") or "")).lower() == bot:
+            continue
+        if mention in str(note.get("body") or "").lower():
+            return nid
+    return None
+
+
 def ask_before_spawning(f: forge.Forge, repo: str, issue: dict,
                         bot: str) -> bool:
     """True ⟺ this issue must NOT be spawned: it asks for something
@@ -256,9 +291,22 @@ def ask_before_spawning(f: forge.Forge, repo: str, issue: dict,
         return True
 
     if lexical_guard.already_asked(comments, bot):
-        # The question is on the record. It is released by a human taking the
-        # On Hold label off, which is checked before this — so reaching here
-        # means the question is still open.
+        # The question is on the record. What ends it is the reply the ask
+        # asked for, and nothing else.
+        #
+        # This used to read "released by a human taking the On Hold label
+        # off, which is checked before this" — and that was never true. The
+        # label gate excludes an issue that still HAS the label; an issue
+        # reaching here has already lost it, and this returned True anyway.
+        # So a guard-questioned issue could not be spawned by any means: not
+        # by answering, not by taking the label off by hand. Observed on an
+        # issue answered "its ok continue" that then sat for four days.
+        answer = answer_after(comments, bot,
+                              lexical_guard.ask_note_id(comments, bot))
+        if answer is not None:
+            sys.stderr.write(f"  {repo}#{number}: question answered in note "
+                             f"{answer} — spawning\n")
+            return False
         return True
 
     # The repo OWNER, not the issue author: the bot may open issues itself

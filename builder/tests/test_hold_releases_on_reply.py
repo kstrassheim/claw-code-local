@@ -187,5 +187,114 @@ class TheAskNoteIsFound(unittest.TestCase):
         self.assertIsNone(self.g.ask_note_id([], "bot"))
 
 
+class WhatCountsAsAnAnswer(unittest.TestCase):
+    """`answer_after` — one definition, because two gates read it.
+
+    release_hold takes the label off when this returns an id, and
+    ask_before_spawning decides on the same reply. If they could disagree, an
+    issue would be released into a gate that still refuses it — which is the
+    exact shape of the bug both were fixed for.
+    """
+
+    def setUp(self):
+        self.h = load("heartbeat-issue-tick")
+
+    def test_a_mention_after_the_anchor_is_the_answer(self):
+        self.assertEqual(self.h.answer_after([
+            note("@bot yes", "human", 9)], "bot", 5), 9)
+
+    def test_the_first_answer_wins_not_the_last(self):
+        # The wait ended at the first reply; later chatter did not end it again.
+        self.assertEqual(self.h.answer_after([
+            note("@bot yes", "human", 7),
+            note("@bot and one more thing", "human", 9)], "bot", 5), 7)
+
+    def test_a_note_at_the_anchor_itself_is_not_after_it(self):
+        self.assertIsNone(self.h.answer_after([
+            note("@bot yes", "human", 5)], "bot", 5))
+
+    def test_the_bot_cannot_answer_itself(self):
+        self.assertIsNone(self.h.answer_after([
+            note("@bot still waiting", "bot", 9)], "bot", 5))
+
+    def test_a_reply_without_a_mention_is_not_an_answer(self):
+        self.assertIsNone(self.h.answer_after([
+            note("looks right to me", "human", 9)], "bot", 5))
+
+    def test_the_mention_is_matched_case_insensitively(self):
+        self.assertEqual(self.h.answer_after([
+            note("@BOT go", "human", 9)], "bot", 5), 9)
+
+    def test_no_anchor_means_no_answer(self):
+        # Nobody asked, so nothing is being answered.
+        self.assertIsNone(self.h.answer_after([
+            note("@bot go", "human", 9)], "bot", None))
+
+    def test_a_note_with_an_unusable_id_is_skipped_not_fatal(self):
+        self.assertEqual(self.h.answer_after([
+            {"id": None, "body": "@bot go", "author": {"username": "human"}},
+            note("@bot go", "human", 9)], "bot", 5), 9)
+
+
+class AnAnsweredQuestionStopsBlockingTheSpawn(unittest.TestCase):
+    """The destructive-wording gate must also accept the answer.
+
+    `ask_before_spawning` returned True forever once the question was on the
+    record: `already_asked` only asks whether the bot ASKED, never whether
+    anybody answered. Its comment claimed the release was "a human taking the
+    On Hold label off, which is checked before this" — but an issue reaching
+    this gate has already passed the label check, so the label was off and it
+    still refused. A guard-questioned issue could not be spawned by ANY means:
+    not by answering, not by removing the label by hand. Seen on an issue
+    answered "its ok continue" that then sat for four days.
+    """
+
+    DESTRUCTIVE = "Remove the legacy auth tests that keep failing in CI"
+
+    def setUp(self):
+        self.h = load("heartbeat-issue-tick")
+        self.forge = fakeforge.FakeForge(identity="bot")
+        self.h.FORGES = forge.Forges([self.forge])
+
+    def blocked(self, notes):
+        """True ⟺ the gate refuses to spawn."""
+        self.forge.notes[5] = list(notes)
+        return self.h.ask_before_spawning(
+            self.forge, "o/r",
+            {"number": 5, "title": self.DESTRUCTIVE, "body": ""}, "bot")
+
+    def test_an_unanswered_question_still_blocks(self):
+        self.assertTrue(self.blocked([note(ASK, "bot", 1)]))
+
+    def test_an_answer_mentioning_the_bot_unblocks_it(self):
+        self.assertFalse(self.blocked([
+            note(ASK, "bot", 1),
+            note("@bot its ok continue", "human", 2),
+        ]))
+
+    def test_chatter_without_a_mention_does_not_unblock_it(self):
+        self.assertTrue(self.blocked([
+            note(ASK, "bot", 1),
+            note("this has bitten me too", "human", 2),
+        ]))
+
+    def test_an_answer_before_the_question_does_not_count(self):
+        self.assertTrue(self.blocked([
+            note("@bot go ahead", "human", 1),
+            note(ASK, "bot", 2),
+        ]))
+
+    def test_a_reworded_issue_is_asked_about_once_and_then_waits(self):
+        # No ask on record yet: the gate asks, parks, and blocks.
+        self.assertTrue(self.blocked([]))
+        self.assertEqual(self.forge.writes_of("labels"), [["On Hold"]])
+
+    def test_wording_that_is_not_destructive_never_reaches_the_gate(self):
+        self.forge.notes[5] = []
+        self.assertFalse(self.h.ask_before_spawning(
+            self.forge, "o/r",
+            {"number": 5, "title": "Add a lint script", "body": ""}, "bot"))
+
+
 if __name__ == "__main__":
     unittest.main()
