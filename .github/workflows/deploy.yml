@@ -379,6 +379,86 @@ jobs:
           docker push "${IMAGE_NAME}:latest"
           docker push "${IMAGE_NAME}:buildcache-final" || true
 
+
+  build-cron-image:
+    name: Build Cron Image
+    runs-on: arc-runner-scale-claw-code-local
+    # PARALLEL WITH THE AGENT IMAGE, on purpose: it shares no layers with it
+    # and nothing in it depends on that build. Same `needs` as the big job, so
+    # the two start together and the deploy is gated on the slower of the two
+    # rather than their sum.
+    needs: [publish-secrets]
+    env:
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local-cron
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve Version
+        run: |
+          . ./VERSIONS
+          if [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            IMAGE_TAG="${{ github.event.inputs.git_ref }}"
+          else
+            IMAGE_TAG="$OPENCLAW_VERSION"
+          fi
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Skip If Already Built
+        id: skip
+        # Same cache-key reasoning as the agent image: the tag IS the key, and
+        # re-pushing the same one ships nothing. Both images carry the same
+        # OPENCLAW_VERSION so a bump rebuilds the pair and they cannot drift.
+        run: |
+          if docker manifest inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "${IMAGE_NAME}:${IMAGE_TAG} already exists — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        if: steps.skip.outputs.skip != 'true'
+        # Context is builder/, so the COPYs in cron/Dockerfile name the scripts
+        # directly — the same paths the agent image uses.
+        run: |
+          docker build \
+            -f builder/cron/Dockerfile \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+            -t "${IMAGE_NAME}:latest" \
+            builder
+
+      - name: Push
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+          docker push "${IMAGE_NAME}:latest"
+
+  pin-image-tags:
+    name: Pin Image Tags
+    runs-on: arc-runner-scale-claw-code-local
+    # ONE JOB, ONE COMMIT. Two jobs that each git-push race and one of them
+    # loses — which is why the pin waits for BOTH images rather than each
+    # build pinning its own entry.
+    #
+    # It also must not run before both images exist: a manifest naming a tag
+    # that has not been pushed leaves Argo CD pulling a missing image for the
+    # length of the other build.
+    needs: [build-and-push-image, build-cron-image]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve Version
+        run: |
+          . ./VERSIONS
+          if [ -n "${{ github.event.inputs.git_ref }}" ]; then
+            IMAGE_TAG="${{ github.event.inputs.git_ref }}"
+          else
+            IMAGE_TAG="$OPENCLAW_VERSION"
+          fi
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+
       - name: Install yq
         run: |
           ARCH=$(dpkg --print-architecture)
@@ -438,8 +518,14 @@ jobs:
               ;;
           esac
 
+          # BOTH images, one commit. They carry the same OPENCLAW_VERSION and
+          # share their scripts, so pinning one without the other would run a
+          # CronJob's planner from a different build than the agent it execs
+          # into — the kind of skew that shows up as a puzzling ImportError at
+          # 00:05 rather than as a failed deploy.
           yq -i \
-            "(.images[] | select(.name == \"claw-code-local\") | .newTag) = \"${IMAGE_TAG}\"" \
+            "(.images[] | select(.name == \"claw-code-local\") | .newTag) = \"${IMAGE_TAG}\" |
+             (.images[] | select(.name == \"claw-code-local-cron\") | .newTag) = \"${IMAGE_TAG}\"" \
             k8s/kustomization.yaml
 
           git add k8s/kustomization.yaml
@@ -447,7 +533,7 @@ jobs:
             echo "no kustomization tag change"
             exit 0
           fi
-          git commit -m "chore: pin claw-code-local image to ${IMAGE_TAG}"
+          git commit -m "chore: pin claw-code-local images to ${IMAGE_TAG}"
           # Another run may still have pushed between the rebase and here.
           if ! git push; then
             echo "::warning::push raced with another run — the next deploy reapplies the pin"

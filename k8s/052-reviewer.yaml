@@ -282,7 +282,10 @@ spec:
             - name: registry-pull-secret
           containers:
             - name: pr-reviewer
-              image: claw-code-local  # transformed by kustomize images: pin
+              image: claw-code-local-cron  # transformed by kustomize images: pin
+              # NOT the agent image. This container finds the openclaw pod
+              # and does the real work inside it with `kubectl exec`; what
+              # runs here is one stdlib-only planner. See builder/cron/.
               imagePullPolicy: IfNotPresent
               command: ["/usr/local/bin/cron-reviewer-spawn"]
               envFrom:
@@ -295,7 +298,13 @@ spec:
               resources:
                 requests:
                   cpu: 50m
-                  memory: 128Mi
+                  memory: 64Mi
                 limits:
                   cpu: 500m
-                  memory: 512Mi
+                  # Measured peak in this container: 18 MiB for python3 with
+                  # every module the tick imports, plus 39 MiB for kubectl —
+                  # ~57 MiB with both live. 192Mi is >3x that, which covers a
+                  # larger `get pods` response as the namespace grows. The
+                  # agent work this schedules runs in the openclaw pod, which
+                  # has its own 5.5Gi limit; none of it happens here.
+                  memory: 192Mi

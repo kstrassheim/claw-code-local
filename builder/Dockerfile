@@ -673,10 +673,17 @@ ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates
 # Issue-watcher scripts invoked by the issue-watcher CronJob.
 #   heartbeat-issue-tick — read-only planner: emits JSON of repos +
 #                          assigned issues + active Jobs per repo.
-#   cron-issue-spawn     — runs the planner and `kubectl apply`s a
-#                          Job per toSpawn entry (one Job = one
-#                          `openclaw agent --local` invocation that
-#                          fixes the issue end-to-end).
+#   cron-issue-spawn     — runs the planner and, for each toSpawn entry,
+#                          `kubectl exec`s into THIS pod and backgrounds a
+#                          fixer-runner subprocess there. It does not create
+#                          Jobs and does not start a second agent pod: every
+#                          run happens inside the openclaw container, which
+#                          is why the two concurrency slots are contended
+#                          within one pod rather than across pods.
+#                          (It did apply a Job per entry when it was written
+#                          in May; the script changed and this comment did
+#                          not, which reads as though the CronJobs need the
+#                          agent image. They do not — see builder/cron/.)
 USER root
 COPY --chmod=0755 heartbeat-issue-tick.py /usr/local/bin/heartbeat-issue-tick
 COPY --chmod=0755 cron-issue-spawn.sh    /usr/local/bin/cron-issue-spawn
