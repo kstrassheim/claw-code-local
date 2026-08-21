@@ -478,6 +478,7 @@ on_exit() {
   if [ "$WIPE_FULL_STATE" = "1" ]; then
     wipe_issue_state
   fi
+  rm -f "${AGENT_TURN_OUT:-}" 2>/dev/null
   rm -rf "$LOCK_DIR"
 }
 trap on_exit EXIT
@@ -3088,12 +3089,58 @@ if command -v acquire_agent_slot >/dev/null 2>&1; then
   fi
 fi
 
+# Did the agent fail in a way that another attempt cannot fix?
+#
+# WHY THIS EXISTS. A quota or credential failure is not a bad turn, it is a
+# closed door: the provider will answer 403 to the next call and the one after
+# that. The runner used to treat every non-zero turn the same way — log it and
+# fall into the poll loop — so a dead provider left a run sleeping 300 seconds
+# at a time WHILE HOLDING THE REPOSITORY'S LOCK. One issue pinned to an
+# exhausted model silently starved every other issue in that repository, and
+# the only symptom was that the bot appeared to stop working. Observed on
+# k8s-ultimate-web-stack#88: kimi out of quota, `next=none` because a
+# `model::` label overrides the fallback, 19 minutes of holding the lock and
+# counting.
+#
+# Deliberately NARROW. The cost of being wrong here is asymmetric: a run
+# abandoned on a transient error costs one tick, while a fatal error mistaken
+# for a transient one costs the whole repository until somebody notices. So
+# this matches only what the model layer itself says is unusable — an auth
+# decision with no fallback left, or a provider stating the quota is gone —
+# and never a 403 from some tool the agent happened to call.
+agent_error_is_fatal() { # $1 = file holding the turn's output
+  local f="${1:-}"
+  [ -n "$f" ] && [ -s "$f" ] || return 1
+  grep -qiE "reason=auth[^\n]*next=none|next=none[^\n]*reason=auth|decision=surface_error[^\n]*reason=auth|usage limit for this billing cycle|quota (has been )?(exceeded|exhausted)|insufficient_quota" "$f"
+}
+
+# One agent turn, with its output kept so the caller can ask why it failed.
+# Returns the AGENT's exit status, not tee's.
+run_agent_turn() { # $1 = out file, $2 = prompt
+  local out="$1" prompt="$2" rc
+  set +e
+  openclaw agent --local \
+    "${AGENT_MODEL_ARGS[@]}" \
+    --timeout "$AGENT_TURN_TIMEOUT" \
+    --session-id "$SESSION_ID" \
+    --message "$prompt" 2>&1 | tee -a "$out"
+  rc=${PIPESTATUS[0]}
+  set -e
+  return "$rc"
+}
+
+AGENT_TURN_OUT="$(mktemp 2>/dev/null || echo /tmp/agent-turn.$$)"
+
 echo "[turn 1] initial agent invocation"
-openclaw agent --local \
-  "${AGENT_MODEL_ARGS[@]}" \
-  --timeout "$AGENT_TURN_TIMEOUT" \
-  --session-id "$SESSION_ID" \
-  --message "$INITIAL_PROMPT" || echo "[agent] turn 1 exited non-zero ($?) — continuing into poll loop"
+if ! run_agent_turn "$AGENT_TURN_OUT" "$INITIAL_PROMPT"; then
+  AGENT_TURN_RC=$?
+  if agent_error_is_fatal "$AGENT_TURN_OUT"; then
+    echo "[agent] turn 1 failed on something a retry cannot fix (no usable model) — releasing the lock and exiting so the next tick can work something else"
+    RUN_OUTCOME="${RUN_OUTCOME:-blocked-no-model}"
+    exit 0
+  fi
+  echo "[agent] turn 1 exited non-zero ($AGENT_TURN_RC) — continuing into poll loop"
+fi
 
 # If the turn ended by ASKING the human, do not sit on the lock. The poll
 # loop below would otherwise hold this repository's only spawn slot for the
@@ -3188,11 +3235,16 @@ ${PROJECT_ANNOTATIONS_REMINDER:+
 $PROJECT_ANNOTATIONS_REMINDER}"
 
   echo "[turn $turn] re-invoking agent"
-  openclaw agent --local \
-    "${AGENT_MODEL_ARGS[@]}" \
-    --timeout "$AGENT_TURN_TIMEOUT" \
-    --session-id "$SESSION_ID" \
-    --message "$FOLLOWUP_PROMPT" || echo "[agent] turn $turn exited non-zero ($?) — continuing"
+  : > "$AGENT_TURN_OUT"
+  if ! run_agent_turn "$AGENT_TURN_OUT" "$FOLLOWUP_PROMPT"; then
+    AGENT_TURN_RC=$?
+    if agent_error_is_fatal "$AGENT_TURN_OUT"; then
+      echo "[agent] turn $turn failed on something a retry cannot fix (no usable model) — releasing the lock and exiting"
+      RUN_OUTCOME="${RUN_OUTCOME:-blocked-no-model}"
+      exit 0
+    fi
+    echo "[agent] turn $turn exited non-zero ($AGENT_TURN_RC) — continuing"
+  fi
 
   # Re-run the CI-gate enforcement after the agent turn — catches the
   # case where this turn called request_reviewers despite CI still red.
