@@ -78,7 +78,7 @@ class BothHostsProduceTheSameIssue(unittest.TestCase):
         a = github()._issue(GITHUB_ISSUE, "acme/web")
         b = gitlab()._issue(GITLAB_ISSUE, "acme/web")
         for field in ("repo", "number", "title", "body", "labels", "state",
-                      "closedAs"):
+                      "closedAs", "author"):
             with self.subTest(field=field):
                 self.assertEqual(a[field], b[field])
 

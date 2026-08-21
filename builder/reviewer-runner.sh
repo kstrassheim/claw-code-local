@@ -525,6 +525,17 @@ SESSION_ID="review-${REPO//\//-}-${PR_NUMBER}-$(date +%s)"
 # empty string => the prompt is unchanged. Read from the pull request's own
 # checkout, so a project can introduce or change its instructions in the very
 # pull request under review and have that apply to this review.
+# Narrow facts about the repository — see the annotations section of
+# project-kind.sh. Kept out of PROJECT_KINDS on purpose: nearly every
+# repository here has .tf files, and a kind would fire the multi-part
+# re-framing on all of them.
+PROJECT_ANNOTATIONS_BLOCK=""
+if command -v detect_project_annotations_from_dir >/dev/null 2>&1; then
+  detect_project_annotations_from_dir "$PROJECT_DIR"
+  PROJECT_ANNOTATIONS_BLOCK="$(project_annotations_block 2>/dev/null || true)"
+  echo "[annotations] $REPO: ${PROJECT_ANNOTATIONS:-none}"
+fi
+
 PROJECT_INSTRUCTIONS=""
 if _source_lib project-instructions; then
   PROJECT_INSTRUCTIONS="$(load_project_instructions \
@@ -710,6 +721,8 @@ $ISSUE_SECTION
 ${PR_BODY:-(empty)}
 
 $PROJECT_KIND_HINT
+
+$PROJECT_ANNOTATIONS_BLOCK
 
 $PROJECT_INSTRUCTIONS
 ## Review protocol — do ALL applicable steps

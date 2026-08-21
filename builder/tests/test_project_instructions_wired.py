@@ -139,3 +139,86 @@ class AskingAPersonIsVisibleOnTheIssue(unittest.TestCase):
                        if self.src.startswith("      park_on_hold\n", m)]:
             self.assertGreater(caller, definition,
                                "park_on_hold called before it is defined")
+
+
+class AskingForSignOffPutsThemInTheReviewersBox(unittest.TestCase):
+    """An @-mention notifies; a review request is state that waits.
+
+    The GitLab runner has always set reviewer_ids[] alongside the note
+    (fixer-runner-gitlab.sh, request_merge_approval). The GitHub one only
+    posted the comment, so the pull request never appeared in the owner's
+    review queue and the ask lived entirely in a notification that scrolls
+    away.
+
+    Safe against rule 9 by construction: this path runs only when CI is
+    all-green and the autonomous review approved the head, which is the case
+    enforce_no_reviewer_when_ci_red explicitly allows.
+    """
+
+    def setUp(self):
+        with open(os.path.join(BUILDER, "fixer-runner.sh"), encoding="utf-8") as fh:
+            self.src = fh.read()
+        i = self.src.index("request_merge_approval() {")
+        self.fn = "\n".join(self.src[i:].splitlines()[:45])
+
+    def test_the_owner_is_requested_as_reviewer(self):
+        self.assertIn("request-review", self.fn,
+                      "approval gate never puts the owner in the Reviewers box")
+        self.assertIn('--reviewers "$owner"', self.fn)
+
+    def test_it_still_posts_the_ask(self):
+        # The review request is additional to the comment, not instead of it:
+        # the comment is where the sha and the instructions live.
+        self.assertIn("MERGE APPROVAL REQUESTED", self.fn)
+
+    def test_an_unresolvable_owner_refuses_to_merge(self):
+        # "No human found" is not that human saying yes.
+        self.assertIn('if [ -z "$owner" ]', self.fn)
+        self.assertIn("return 1", self.fn)
+
+    def test_a_failed_review_request_does_not_block_the_ask(self):
+        # A host that refuses the request must not swallow the question.
+        self.assertIn("asking by comment only", self.fn)
+
+
+class TheSignOffGoesToWhoeverAskedForIt(unittest.TestCase):
+    """Issue filer first, repo owner when the filer was the bot.
+
+    Mirrors resolve_review_target in the GitLab runner. The GitHub side asked
+    the repo owner unconditionally, which is right for the @-mention target
+    (ISSUE_AUTHOR is pinned to the owner on purpose, so bot-filed issues do
+    not mention the bot) and wrong for a review request: a human who files an
+    issue in someone else's repository never got handed their own work back.
+
+    The bot-filed case matters here — the tester files its own findings, and
+    the bot approving the bot is not a sign-off.
+    """
+
+    def setUp(self):
+        with open(os.path.join(BUILDER, "fixer-runner.sh"), encoding="utf-8") as fh:
+            self.src = fh.read()
+
+    def test_the_resolver_exists_and_reads_the_filer(self):
+        i = self.src.index("resolve_review_target() {")
+        fn = "\n".join(self.src[i:].splitlines()[:26])
+        self.assertIn("issue --number", fn, "never asks the host who filed it")
+        self.assertIn("author", fn)
+        self.assertIn("repo_owner_login", fn, "no fallback when the bot filed it")
+
+    def test_the_bot_never_resolves_to_itself(self):
+        i = self.src.index("resolve_review_target() {")
+        fn = "\n".join(self.src[i:].splitlines()[:26])
+        self.assertIn("BOT_LOGIN", fn,
+                      "must compare the filer against the bot before using it")
+
+    def test_the_approval_gate_uses_the_resolver(self):
+        i = self.src.index("request_merge_approval() {")
+        fn = "\n".join(self.src[i:].splitlines()[:8])
+        self.assertIn("resolve_review_target", fn)
+        self.assertNotIn('owner="$(repo_owner_login)"', fn,
+                         "still pinned to the owner regardless of who filed it")
+
+    def test_the_mention_target_is_left_alone(self):
+        # Separate decision, separate rationale — pinned to the owner so it is
+        # stable across bot-filed issues. Changing it is not in scope here.
+        self.assertIn('ISSUE_AUTHOR="$(repo_owner_login)"', self.src)

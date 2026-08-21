@@ -341,6 +341,9 @@ class AssignedIssues(unittest.TestCase):
             "url": "https://github.com/o/r/issues/4",
             "labels": ["On Hold", "Priority::High"],
             "state": "open", "closedAs": None,
+            # Who filed it — the account the finished work goes back to, and
+            # not always the repo owner: the bot files issues itself.
+            "author": "",
             # This host serves change requests from the issues collection too,
             # and they arrive looking like issues apart from one key. The
             # distinction is answered here rather than left to a caller.

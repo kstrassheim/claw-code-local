@@ -68,6 +68,8 @@ class Discovery(unittest.TestCase):
             "title": "a task", "body": "the body",
             "url": f"{BASE}/group/sub/app/-/issues/4",
             "labels": ["On Hold"], "state": "open", "closedAs": None,
+            # Same field, this host's spelling of it. See the GitHub half.
+            "author": "",
             # Always false here: merge requests live in their own collection,
             # so an issue read is only ever an issue. Present regardless, so
             # a caller asks both hosts the same question.

@@ -579,6 +579,11 @@ class GitHubForge(Forge):
             "labels": self._labels(raw.get("labels")),
             "state": state,
             "closedAs": closed_as,
+            # WHO ASKED. The account to hand the finished work back to — and
+            # it is not always the repo owner: the bot files issues itself
+            # (the tester does), and asking the bot to review the bot is not
+            # a sign-off. Callers fall back when this is the bot's own login.
+            "author": ((raw.get("user") or {}).get("login") or ""),
             # This host serves change requests from the ISSUES collection as
             # well, and they arrive looking exactly like issues apart from one
             # extra key. A caller that sizes one, or plans work on one, is
@@ -1324,6 +1329,8 @@ class GitLabForge(Forge):
             "body": raw.get("description") or "",
             "url": raw.get("web_url") or "",
             "labels": [str(l) for l in (raw.get("labels") or []) if str(l).strip()],
+            # Same field, this host's spelling of it. See the GitHub half.
+            "author": ((raw.get("author") or {}).get("username") or ""),
             "state": neutral_state,
             "closedAs": closed_as,
             # Never true here: this host keeps merge requests in their own

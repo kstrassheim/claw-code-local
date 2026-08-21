@@ -228,3 +228,201 @@ refine_aks_kind() {
   PROJECT_KINDS="$_pk_new"
   return 0
 }
+
+
+# ===========================================================================
+# ANNOTATIONS — narrower facts than a kind
+# ===========================================================================
+# A KIND answers "what IS this project", and saying it re-frames everything:
+# more than one kind switches the reviewer out of its single-part protocol and
+# into "this project is MORE THAN ONE THING", with a section per part.
+#
+# An ANNOTATION answers a narrower question and must NOT re-frame anything.
+# It is deliberately weaker: it adds a fact, it never changes the shape of the
+# prompt around it.
+#
+# The distinction is not academic. 14 of the 15 repositories this bot works on
+# contain `.tf` files. Making that a kind would fire the multi-part preamble on
+# nearly all of them — and a framing that always fires stops being read, which
+# costs the signal on the three repositories that genuinely ARE two things.
+#
+# A SET, not a scalar: more annotations will follow. Within a family the values
+# are mutually exclusive (a checkout is managed by one binary, not two), which
+# is enforced by the detector returning at its first match rather than by
+# anything here.
+PROJECT_ANNOTATIONS=""
+
+_pa_add() {
+  case " $PROJECT_ANNOTATIONS " in
+    *" $1 "*) ;;
+    *) PROJECT_ANNOTATIONS="${PROJECT_ANNOTATIONS:+$PROJECT_ANNOTATIONS }$1" ;;
+  esac
+}
+
+# has_annotation <name> — true when the project carries that fact.
+has_annotation() {
+  case " $PROJECT_ANNOTATIONS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# annotation_count — how many matched. Deliberately NOT consulted by any
+# framing decision; it exists for logging and for tests.
+annotation_count() {
+  # shellcheck disable=SC2086
+  set -- $PROJECT_ANNOTATIONS
+  echo "$#"
+}
+
+# annotation_title <name> — short heading for one annotation.
+annotation_title() {
+  case "$1" in
+    iac-terraform) echo "Infrastructure tool: Terraform" ;;
+    iac-tofu)      echo "Infrastructure tool: OpenTofu" ;;
+    iac-unknown)   echo "Infrastructure tool: UNDETERMINED" ;;
+    *)             echo "$1" ;;
+  esac
+}
+
+# annotation_body <name> — what the agent must actually do about it.
+annotation_body() {
+  case "$1" in
+    iac-terraform)
+      cat <<'PA_EOF'
+This checkout is managed by **Terraform**. Use `terraform`. Do NOT run `tofu`.
+
+Both binaries are installed and both read the same `.tf` files, so the wrong
+one runs happily and does damage quietly: it rewrites the provider addresses
+in `.terraform.lock.hcl` (and can rewrite them in state), which is a migration
+nobody asked for, in a commit about something else.
+
+If you believe the project should move to OpenTofu, say so on the issue and
+stop. Switching tools is its own decision and its own change.
+PA_EOF
+      ;;
+    iac-tofu)
+      cat <<'PA_EOF'
+This checkout is managed by **OpenTofu**. Use `tofu`. Do NOT run `terraform`.
+
+Both binaries are installed and both read the same `.tf` files, so the wrong
+one runs happily and does damage quietly: it rewrites the provider addresses
+in `.terraform.lock.hcl` (and can rewrite them in state), which is a migration
+nobody asked for, in a commit about something else.
+
+If you believe the project should move to Terraform, say so on the issue and
+stop. Switching tools is its own decision and its own change.
+PA_EOF
+      ;;
+    iac-unknown)
+      cat <<'PA_EOF'
+This checkout contains `.tf` files, and NOTHING here says which binary owns
+them: there is no `.terraform.lock.hcl` to read a registry host out of, and no
+pipeline that names `terraform` or `tofu`.
+
+**Run neither.** Guessing has a wrong answer that silently rewrites the
+lockfile and possibly state. If the work needs an init/plan/apply, say on the
+issue that the tool could not be determined and ask which one to use.
+
+Editing `.tf` source without running either binary is fine.
+PA_EOF
+      ;;
+  esac
+}
+
+# project_annotations_block — the full prompt section, or "" when there is
+# nothing to say. Flat headings, no preamble: this annotates, it does not
+# re-frame.
+project_annotations_block() {
+  [ -n "$PROJECT_ANNOTATIONS" ] || return 0
+  echo "## What is known about this repository"
+  echo
+  for _pa_a in $PROJECT_ANNOTATIONS; do
+    echo "### $(annotation_title "$_pa_a")"
+    echo
+    annotation_body "$_pa_a"
+    echo
+  done
+}
+
+# project_annotations_reminder — ONE line, for a prompt that is re-sent on
+# later turns. The solver states its full prompt on turn 1 only and then polls;
+# by turn six the block above is the oldest thing in the session and is the
+# first to be summarised away. A rule whose wrong answer rewrites state cannot
+# rely on being remembered.
+project_annotations_reminder() {
+  [ -n "$PROJECT_ANNOTATIONS" ] || return 0
+  for _pa_a in $PROJECT_ANNOTATIONS; do
+    case "$_pa_a" in
+      iac-terraform) echo "Reminder: this repository is Terraform-managed — use \`terraform\`, never \`tofu\`." ;;
+      iac-tofu)      echo "Reminder: this repository is OpenTofu-managed — use \`tofu\`, never \`terraform\`." ;;
+      iac-unknown)   echo "Reminder: the infrastructure tool for this repository is UNDETERMINED — run neither \`terraform\` nor \`tofu\`; ask." ;;
+    esac
+  done
+}
+
+
+# detect_project_annotations_from_dir <dir> — fill PROJECT_ANNOTATIONS.
+#
+# EVIDENCE BEFORE INTENT. The order below is deliberate:
+#
+#   1. `.terraform.lock.hcl` — written BY whichever binary ran, and the two
+#      write different registry hosts into it. Verified on this image:
+#        tofu init      -> provider "registry.opentofu.org/hashicorp/null"
+#        terraform init -> provider "registry.terraform.io/hashicorp/null"
+#      Same filename, so the file's PRESENCE says nothing; its contents say
+#      everything.
+#   2. The pipeline — what CI installs and invokes. Needed because a lockfile
+#      is not always committed: k8s-ultimate-web-stack has terraform/*.tf, no
+#      lockfile at all, and `hashicorp/setup-terraform` in its workflow.
+#   3. Neither -> `iac-unknown`, which tells the agent to run nothing. A repo
+#      with .tf files and no signal is the dangerous case, so it gets an
+#      annotation rather than silence.
+#
+# A repository with no `.tf` at all gets no annotation: there is no question.
+detect_project_annotations_from_dir() {
+  _pa_dir="$1"
+  PROJECT_ANNOTATIONS=""
+  [ -d "$_pa_dir" ] || return 0
+
+  # Any IaC source at all? .terraform/ is a build artifact, not source.
+  if ! find "$_pa_dir" -maxdepth 3 -name '*.tf' -not -path '*/.terraform/*' \
+       2>/dev/null | head -1 | grep -q .; then
+    return 0
+  fi
+
+  # 1. the lockfile's registry host
+  _pa_locks="$(find "$_pa_dir" -maxdepth 3 -name '.terraform.lock.hcl' \
+                 2>/dev/null | head -5)"
+  if [ -n "$_pa_locks" ]; then
+    # shellcheck disable=SC2086
+    if grep -qF 'registry.opentofu.org' $_pa_locks 2>/dev/null; then
+      _pa_add iac-tofu; return 0
+    fi
+    # shellcheck disable=SC2086
+    if grep -qF 'registry.terraform.io' $_pa_locks 2>/dev/null; then
+      _pa_add iac-terraform; return 0
+    fi
+  fi
+
+  # 2. what the pipeline installs or runs
+  _pa_ci=""
+  [ -d "$_pa_dir/.github/workflows" ] && _pa_ci="$_pa_dir/.github/workflows"
+  [ -f "$_pa_dir/.gitlab-ci.yml" ] && _pa_ci="$_pa_ci $_pa_dir/.gitlab-ci.yml"
+  if [ -n "$_pa_ci" ]; then
+    # shellcheck disable=SC2086
+    if grep -rqE 'opentofu/setup-opentofu|(^|[^-[:alnum:]])tofu[[:space:]]+(init|plan|apply|validate|fmt)' \
+         $_pa_ci 2>/dev/null; then
+      _pa_add iac-tofu; return 0
+    fi
+    # shellcheck disable=SC2086
+    if grep -rqE 'hashicorp/setup-terraform|(^|[^-[:alnum:]])terraform[[:space:]]+(init|plan|apply|validate|fmt)' \
+         $_pa_ci 2>/dev/null; then
+      _pa_add iac-terraform; return 0
+    fi
+  fi
+
+  # 3. .tf files, nothing that says which tool owns them
+  _pa_add iac-unknown
+  return 0
+}

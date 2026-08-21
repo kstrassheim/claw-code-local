@@ -25,7 +25,7 @@ OPENCLAW_UPSTREAM=v2026.7.1-2
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.7.1-2.18
+OPENCLAW_VERSION=v2026.7.1-2.19
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working

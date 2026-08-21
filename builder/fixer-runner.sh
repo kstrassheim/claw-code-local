@@ -1168,17 +1168,69 @@ for r in reversed(rs if isinstance(rs, list) else []):
 " 2>/dev/null
 }
 
+# WHO is asked to sign off, in order:
+#   1. the person who FILED the issue — they asked for this, they judge it;
+#   2. the repo owner, when the filer was the bot itself. The tester files its
+#      own findings, and the bot approving the bot is not a sign-off.
+# Prints a login, or nothing when neither can be read.
+#
+# Deliberately NOT the same choice as ISSUE_AUTHOR above, which is pinned to
+# the repo owner so the @-mention target stays stable across bot-filed issues.
+# A mention is "look at this"; a review request is "this is yours to decide",
+# and those are not always the same person.
+resolve_review_target() {
+  local filed_by
+  filed_by="$("${FORGE[@]}" issue --number "$ISSUE_NUM" 2>/dev/null \
+    | python3 -c "
+import sys, json
+try:
+    print((json.load(sys.stdin) or {}).get('author') or '')
+except Exception:
+    print('')
+" 2>/dev/null)"
+  if [ -n "$filed_by" ] && [ "$(printf '%s' "$filed_by" | tr 'A-Z' 'a-z')" \
+       != "$(printf '%s' "$BOT_LOGIN" | tr 'A-Z' 'a-z')" ]; then
+    printf '%s' "$filed_by"
+    return 0
+  fi
+  repo_owner_login 2>/dev/null
+}
+
 request_merge_approval() { # $1 = pr number, $2 = head sha
   local pr="$1" sha="$2" asked="" owner
-  owner="$(repo_owner_login)"
+  owner="$(resolve_review_target)"
   [ -f "$APPROVAL_ASKED_FILE" ] && asked="$(cat "$APPROVAL_ASKED_FILE" 2>/dev/null)"
   if [ "$asked" = "$sha" ]; then
     echo "[approval-gate] sign-off for ${sha:0:8} already requested — waiting"
     return 0
   fi
+  if [ -z "$owner" ]; then
+    # Nobody to ask. NOT merging is the only safe reading of the label: it
+    # says a human decides, and "no human found" is not that human saying yes.
+    echo "[approval-gate] the approval label is set but no owner could be resolved — not merging PR #$pr"
+    return 1
+  fi
+
+  # Put them in the Reviewers box as well as @-mentioning them, matching the
+  # GitLab runner (fixer-runner-gitlab.sh sets reviewer_ids[] here). The
+  # mention is a notification that scrolls away; the review request is state
+  # that sits on the pull request until it is answered, and it is what the
+  # user's own review queue is built from.
+  #
+  # Safe against rule 9: this runs only once CI is all-green and the
+  # autonomous review has approved this sha, which is exactly the condition
+  # enforce_no_reviewer_when_ci_red permits. Best-effort — a host that
+  # refuses the request must not stop the ask from being posted.
+  if "${FORGE[@]}" request-review --number "$pr" --reviewers "$owner" \
+       >/dev/null 2>&1; then
+    echo "[approval-gate] requested @$owner as reviewer on PR #$pr"
+  else
+    echo "[approval-gate] WARNING: could not set @$owner as reviewer on PR #$pr — asking by comment only"
+  fi
+
   post_issue_comment "🛂 MERGE APPROVAL REQUESTED (sha \`${sha:0:8}\`)
 
-@$owner — this issue is labelled \`approval\`, so I will not merge it without you. Everything else is done: the checks are green, there are no conflicts, PR #$pr is not a draft, and the autonomous review approved \`${sha:0:8}\`.
+@$owner — this issue is labelled \`approval\`, so I will not merge it without you. Everything else is done: the checks are green, there are no conflicts, PR #$pr is not a draft, and the autonomous review approved \`${sha:0:8}\`. I have requested you as a reviewer on it.
 
 To let it land, **approve PR #$pr** on GitHub. If you want changes first, say so here and @-mention \`@$BOT_LOGIN\`. If I push another commit I will ask again — an approval covers the code it was given for." \
     && echo "[approval-gate] asked @$owner to sign off on ${sha:0:8}" \
@@ -2258,6 +2310,23 @@ fi
 # never called, so CLAWCODE-issuesolver-instructions.md has been sitting in
 # these repositories being read by nobody. The reviewer has always called it;
 # the solver only looked like it did.
+# What is known about this repository, as narrow FACTS rather than a re-framing
+# — see the annotations section of project-kind.sh for why this is not a kind.
+# The one that matters today: which of two installed, interchangeable-looking
+# binaries owns this checkout's state.
+PROJECT_ANNOTATIONS_BLOCK=""
+PROJECT_ANNOTATIONS_REMINDER=""
+if command -v detect_project_annotations_from_dir >/dev/null 2>&1; then
+  detect_project_annotations_from_dir "$PROJECT_DIR"
+  PROJECT_ANNOTATIONS_BLOCK="$(project_annotations_block 2>/dev/null || true)"
+  PROJECT_ANNOTATIONS_REMINDER="$(project_annotations_reminder 2>/dev/null || true)"
+  if [ -n "$PROJECT_ANNOTATIONS" ]; then
+    echo "[annotations] $REPO: $PROJECT_ANNOTATIONS"
+  else
+    echo "[annotations] $REPO: none"
+  fi
+fi
+
 PROJECT_INSTRUCTIONS=""
 if command -v load_project_instructions >/dev/null 2>&1; then
   PROJECT_INSTRUCTIONS="$(load_project_instructions \
@@ -2375,6 +2444,7 @@ $EXISTING_PRS_TEXT
 ## Current CI state on the PR head
 
 $CI_STATUS_TEXT
+$PROJECT_ANNOTATIONS_BLOCK
 $PROJECT_INSTRUCTIONS
 
 ## Branch policy — STRICT
@@ -2907,7 +2977,9 @@ for c in json.load(sys.stdin):
     print()
 ")
 
-Apply this guidance and continue from where you left off. Push commits to the branch you have checked out (\`$BRANCH\`); do not open a new PR — if a PR is already open, push to its branch."
+Apply this guidance and continue from where you left off. Push commits to the branch you have checked out (\`$BRANCH\`); do not open a new PR — if a PR is already open, push to its branch.
+${PROJECT_ANNOTATIONS_REMINDER:+
+$PROJECT_ANNOTATIONS_REMINDER}"
 
   echo "[turn $turn] re-invoking agent"
   openclaw agent --local \

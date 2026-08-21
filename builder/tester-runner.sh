@@ -140,6 +140,7 @@ _source_lib agent-models || true
 _source_lib agent-thinking || true
 _source_lib agent-slot || true
 _source_lib project-instructions || true
+_source_lib project-kind || true
 
 # Resolve bot identity. Pinned identity (env var) wins; otherwise look it
 # up. Hardcoding would couple the code to one deployment's identity —
@@ -911,6 +912,13 @@ PROMPT_TAIL_EOF
 # behaves exactly as it did before. Read at the COMMIT UNDER TEST, not at
 # whatever is newest: the rest of this run is about that commit, and the
 # instructions it runs under must not change mid-flight.
+PROJECT_ANNOTATIONS_BLOCK=""
+if command -v detect_project_annotations_from_dir >/dev/null 2>&1; then
+  detect_project_annotations_from_dir "$PROJECT_DIR"
+  PROJECT_ANNOTATIONS_BLOCK="$(project_annotations_block 2>/dev/null || true)"
+  echo "[annotations] $REPO: ${PROJECT_ANNOTATIONS:-none}"
+fi
+
 PROJECT_INSTRUCTIONS=""
 if command -v load_project_instructions >/dev/null 2>&1; then
   PROJECT_INSTRUCTIONS="$(load_project_instructions \
@@ -934,6 +942,9 @@ PROMPT_FILE="$(mktemp -t tester-prompt.XXXXXX)"
   printf '%s\n\n' "$CODEREVIEW_STEP"
   printf '%s\n' "$CONSOLIDATE_STEP"
   printf '%s\n' "$PROMPT_TAIL"
+  if [ -n "$PROJECT_ANNOTATIONS_BLOCK" ]; then
+    printf '\n%s\n' "$PROJECT_ANNOTATIONS_BLOCK"
+  fi
   if [ -n "$PROJECT_INSTRUCTIONS" ]; then
     printf '\n%s\n' "$PROJECT_INSTRUCTIONS"
   fi
