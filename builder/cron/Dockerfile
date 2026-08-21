@@ -63,5 +63,10 @@ ENV PYTHONPATH=/usr/local/bin
 
 # Nothing here needs root, and this image holds a token: the CronJobs mount
 # openclaw-secrets for GITHUB_TOKEN.
-RUN adduser -D -u 1000 cron
+#
+# NOT named `cron`: alpine already ships a `cron` system user (uid 16), and
+# `adduser -D -u 1000 cron` fails with "user 'cron' in use". The name is
+# arbitrary; the uid is what the cluster cares about, and 1000 matches the
+# agent image so a shared volume keeps the same ownership either side.
+RUN adduser -D -u 1000 claw
 USER 1000

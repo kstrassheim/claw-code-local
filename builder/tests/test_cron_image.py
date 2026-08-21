@@ -124,6 +124,26 @@ class TheImageHasWhatTheRuntimeNeeds(unittest.TestCase):
         # This container mounts openclaw-secrets for GITHUB_TOKEN.
         self.assertRegex(self.instructions, r"(?m)^USER 1000$")
 
+    def test_the_service_account_does_not_collide_with_a_base_image_user(self):
+        """`adduser` fails the BUILD if the name is already taken.
+
+        alpine ships a set of system users, and `cron` is one of them (uid 16)
+        — which is the obvious name for this image and the one that broke the
+        first build with "user 'cron' in use". Nothing in the Dockerfile hints
+        at the collision, so it is checked here instead of being rediscovered.
+        """
+        alpine_users = {
+            "root", "bin", "daemon", "adm", "lp", "sync", "shutdown", "halt",
+            "mail", "news", "uucp", "operator", "man", "postmaster", "cron",
+            "ftp", "sshd", "at", "squid", "xfs", "games", "cyrus", "vpopmail",
+            "ntp", "smmsp", "guest", "nobody",
+        }
+        for name in re.findall(r"adduser[^\n]*?\s(\S+)\s*$",
+                               self.instructions, re.M):
+            with self.subTest(user=name):
+                self.assertNotIn(name, alpine_users,
+                                 f"'{name}' already exists in the base image")
+
     def test_the_agent_toolchain_is_absent(self):
         # If any of these ever appear here, the image has quietly grown back
         # into the thing it was split out of.
