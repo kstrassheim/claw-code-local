@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-config-template
+  name: claw-code-config-template
   namespace: claw-code-local
 data:
   openclaw.json: |
@@ -187,17 +187,17 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-config
+  name: claw-code-config
   namespace: claw-code-local
 data:
   openclaw.json: "{}"
 ---
 # Script the init container runs. Lives in its own ConfigMap so changes
-# don't force the openclaw-config ConfigMap to be recreated.
+# don't force the claw-code-config ConfigMap to be recreated.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-render-scripts
+  name: claw-code-render-scripts
   namespace: claw-code-local
 data:
   render-config.sh: |
@@ -327,7 +327,7 @@ data:
     # Inject the browser SSRF allowlist from the secret-provided host list so
     # the tester can drive the browser plugin against private-network (RFC1918)
     # deploy URLs. The hostnames are kept OUT of this public config template —
-    # the value arrives via the openclaw-secrets Secret (TESTER_ALLOWED_HOSTNAMES,
+    # the value arrives via the claw-code-secrets Secret (TESTER_ALLOWED_HOSTNAMES,
     # comma-separated). `allowedHostnames` (exact match) is the only knob that
     # exempts a host from the private-network block — `hostnameAllowlist` is a
     # restrictive name filter and does NOT grant private-IP access. Link-local
@@ -399,7 +399,7 @@ data:
         || echo "WARN: kimi plugin install failed — kimi/k3 falls back to core thinking levels"
     fi
 
-    kubectl create configmap openclaw-config \
+    kubectl create configmap claw-code-config \
       -n claw-code-local \
       --from-file=openclaw.json=/tmp/openclaw.json \
       --dry-run=client -o yaml \

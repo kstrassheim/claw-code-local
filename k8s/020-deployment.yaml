@@ -1,22 +1,22 @@
 ---
 # ServiceAccount + Role + RoleBinding so the render-config init container
-# can patch the openclaw-config ConfigMap at pod start. Scoped tightly:
-# only the openclaw-config ConfigMap in this namespace, get/patch/update.
+# can patch the claw-code-config ConfigMap at pod start. Scoped tightly:
+# only the claw-code-config ConfigMap in this namespace, get/patch/update.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: openclaw
+  name: claw-code
   namespace: claw-code-local
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: openclaw-config-writer
+  name: claw-code-config-writer
   namespace: claw-code-local
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["openclaw-config"]
+    resourceNames: ["claw-code-config"]
     verbs: ["get", "patch", "update", "create"]
 ---
 # Read-only visibility of its OWN CronJobs.
@@ -40,7 +40,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: openclaw-cronjob-reader
+  name: claw-code-cronjob-reader
   namespace: claw-code-local
 rules:
   - apiGroups: ["batch"]
@@ -50,35 +50,35 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: openclaw-cronjob-reader
+  name: claw-code-cronjob-reader
   namespace: claw-code-local
 subjects:
   - kind: ServiceAccount
-    name: openclaw
+    name: claw-code
     namespace: claw-code-local
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: openclaw-cronjob-reader
+  name: claw-code-cronjob-reader
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: openclaw-config-writer
+  name: claw-code-config-writer
   namespace: claw-code-local
 subjects:
   - kind: ServiceAccount
-    name: openclaw
+    name: claw-code
     namespace: claw-code-local
 roleRef:
   kind: Role
-  name: openclaw-config-writer
+  name: claw-code-config-writer
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openclaw
+  name: claw-code
   namespace: claw-code-local
   labels:
     app: claw-code
@@ -87,7 +87,7 @@ metadata:
 spec:
   replicas: 1
   # `Recreate` (not the default RollingUpdate): terminate the old pod first,
-  # then start the new one. With replicas=1 and a RWO openclaw-workspace
+  # then start the new one. With replicas=1 and a RWO claw-code-workspace
   # PVC, RollingUpdate deadlocks — the new pod can't mount the volume
   # while the old pod still holds it, and maxUnavailable=0 keeps the old
   # one alive until the new one is Ready. Brief downtime on each deploy
@@ -107,10 +107,10 @@ spec:
         # the mounted parts at start, so there is no stale single-file mount to
         # work around.)
     spec:
-      serviceAccountName: openclaw
+      serviceAccountName: claw-code
       imagePullSecrets:
         - name: registry-pull-secret
-      # Pin to datapi. The openclaw-workspace PVC uses the cluster-default
+      # Pin to datapi. The claw-code-workspace PVC uses the cluster-default
       # `local-path` StorageClass, which provisions a hostPath PV on the
       # node where this pod first schedules. Without an explicit pin, the
       # pod could land on mainpi (the only untainted node) and create the
@@ -156,7 +156,7 @@ spec:
             - name: INTERNAL_CA_CERT
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: INTERNAL_CA_CERT
                   optional: true
           command:
@@ -238,7 +238,7 @@ spec:
             - name: PROJECTS_ALLOWED_BOOTSTRAP
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: PROJECTS_ALLOWED_BOOTSTRAP
                   optional: true
           command:
@@ -262,7 +262,7 @@ spec:
         # Reads the canonical template from /template, decides whether
         # MiniMax is reachable based on $MINIMAX_API_KEY, strips it with
         # node if not, and writes the rendered result back into the live
-        # openclaw-config ConfigMap.
+        # claw-code-config ConfigMap.
         - name: render-config
           image: claw-code-local
           imagePullPolicy: Always
@@ -271,19 +271,19 @@ spec:
             - name: MISTRAL_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: MISTRAL_API_KEY
                   optional: true
             - name: MINIMAX_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: MINIMAX_API_KEY
                   optional: true
             - name: MOONSHOT_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: MOONSHOT_API_KEY
                   optional: true
             # Comma-separated hostnames the tester's browser plugin is
@@ -294,7 +294,7 @@ spec:
             - name: TESTER_ALLOWED_HOSTNAMES
               valueFrom:
                 secretKeyRef:
-                  name: openclaw-secrets
+                  name: claw-code-secrets
                   key: TESTER_ALLOWED_HOSTNAMES
                   optional: true
           volumeMounts:
@@ -318,7 +318,7 @@ spec:
               cpu: 500m
               memory: 256Mi
       containers:
-        - name: openclaw
+        - name: claw-code
           image: claw-code-local
           imagePullPolicy: Always
           ports:
@@ -328,14 +328,14 @@ spec:
               name: bridge
           envFrom:
             - configMapRef:
-                name: openclaw-config
+                name: claw-code-config
             - secretRef:
-                name: openclaw-secrets
+                name: claw-code-secrets
           env:
             - name: OPENCLAW_IMAGE
               valueFrom:
                 configMapKeyRef:
-                  name: openclaw-config-template
+                  name: claw-code-config-template
                   key: OPENCLAW_IMAGE
                   optional: true
             # Planning store. An unset or unreachable store is a SUPPORTED
@@ -487,30 +487,30 @@ spec:
                   name: claw-scripts-runner
         - name: workspace
           persistentVolumeClaim:
-            claimName: openclaw-workspace
+            claimName: claw-code-workspace
         # Chromium NSS trust store ($HOME/.pki), shared between the fix-perms
         # init container (which imports the internal CA) and the main container.
         - name: pki
           emptyDir: {}
         - name: skill-developer
           configMap:
-            name: openclaw-skill-developer
+            name: claw-code-skill-developer
         - name: skill-tester
           configMap:
-            name: openclaw-skill-tester
+            name: claw-code-skill-tester
         - name: skill-reviewer
           configMap:
-            name: openclaw-skill-reviewer
+            name: claw-code-skill-reviewer
         - name: skill-projects
           configMap:
-            name: openclaw-skill-projects
+            name: claw-code-skill-projects
         - name: skill-planning
           configMap:
-            name: openclaw-skill-planning
+            name: claw-code-skill-planning
         - name: config-template
           configMap:
-            name: openclaw-config-template
+            name: claw-code-config-template
         - name: render-scripts
           configMap:
-            name: openclaw-render-scripts
+            name: claw-code-render-scripts
             defaultMode: 0755

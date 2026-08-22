@@ -5,7 +5,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-skill-tester
+  name: claw-code-skill-tester
   namespace: claw-code-local
 data:
   SKILL.md: |
@@ -366,7 +366,7 @@ metadata:
   namespace: claw-code-local
 subjects:
   - kind: ServiceAccount
-    name: openclaw
+    name: claw-code
     namespace: claw-code-local
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -471,7 +471,7 @@ spec:
                 # pod's env and are inherited by the spawned
                 # tester-runner subprocesses.
                 - secretRef:
-                    name: openclaw-secrets
+                    name: claw-code-secrets
               resources:
                 requests:
                   cpu: 50m
