@@ -6,7 +6,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: claw-code-skill-reviewer
-  namespace: claw-code-local
+  namespace: claw-code
 data:
   SKILL.md: |
     ---
@@ -17,7 +17,7 @@ data:
 
     # reviewer — control the autonomous pull-request reviewer
 
-    A CronJob `pr-reviewer` (namespace `claw-code-local`) ticks every 5
+    A CronJob `pr-reviewer` (namespace `claw-code`) ticks every 5
     minutes, at minute 2 of each interval. On each tick it searches
     GitHub for open pull requests where this bot is a requested
     reviewer, checks the head commit's checks, and **spawns a
@@ -63,7 +63,7 @@ data:
     ### status
 
     ```
-    kubectl -n claw-code-local get cronjob pr-reviewer \
+    kubectl -n claw-code get cronjob pr-reviewer \
       -o jsonpath='suspended={.spec.suspend}{"\n"}schedule={.spec.schedule}{"\n"}lastSchedule={.status.lastScheduleTime}{"\n"}lastSuccess={.status.lastSuccessfulTime}{"\n"}'
     ```
 
@@ -72,7 +72,7 @@ data:
     ### start
 
     ```
-    kubectl -n claw-code-local patch cronjob pr-reviewer \
+    kubectl -n claw-code patch cronjob pr-reviewer \
       -p '{"spec":{"suspend":false}}'
     ```
 
@@ -83,7 +83,7 @@ data:
     reviewing right now", not "block new ticks".
 
     ```
-    kubectl -n claw-code-local patch cronjob pr-reviewer \
+    kubectl -n claw-code patch cronjob pr-reviewer \
       -p '{"spec":{"suspend":true}}'
     pkill -f '/usr/local/bin/reviewer-runner' || true
     rm -rf $HOME/.openclaw/.reviewer-locks/* 2>/dev/null
@@ -170,13 +170,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: pr-reviewer
-  namespace: claw-code-local
+  namespace: claw-code
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: pr-reviewer
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -189,11 +189,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: pr-reviewer
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: pr-reviewer
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -206,7 +206,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: pr-reviewer-control
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
@@ -217,11 +217,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: pr-reviewer-control
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: claw-code
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -231,7 +231,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: pr-reviewer
-  namespace: claw-code-local
+  namespace: claw-code
   labels:
     app: pr-reviewer
 spec:

@@ -16,7 +16,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: claw-code-config-template
-  namespace: claw-code-local
+  namespace: claw-code
 data:
   openclaw.json: |
     {
@@ -188,7 +188,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: claw-code-config
-  namespace: claw-code-local
+  namespace: claw-code
 data:
   openclaw.json: "{}"
 ---
@@ -198,7 +198,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: claw-code-render-scripts
-  namespace: claw-code-local
+  namespace: claw-code
 data:
   render-config.sh: |
     #!/bin/sh
@@ -400,7 +400,7 @@ data:
     fi
 
     kubectl create configmap claw-code-config \
-      -n claw-code-local \
+      -n claw-code \
       --from-file=openclaw.json=/tmp/openclaw.json \
       --dry-run=client -o yaml \
     | kubectl apply -f -

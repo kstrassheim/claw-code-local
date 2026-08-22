@@ -6,13 +6,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: claw-code
-  namespace: claw-code-local
+  namespace: claw-code
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: claw-code-config-writer
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -41,7 +41,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: claw-code-cronjob-reader
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
@@ -51,11 +51,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: claw-code-cronjob-reader
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: claw-code
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -65,11 +65,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: claw-code-config-writer
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: claw-code
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   kind: Role
   name: claw-code-config-writer
@@ -79,7 +79,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: claw-code
-  namespace: claw-code-local
+  namespace: claw-code
   labels:
     app: claw-code
     environment: dev

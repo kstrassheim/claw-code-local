@@ -19,7 +19,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-dns
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   podSelector: {}
   egress:
@@ -49,7 +49,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: claw-code-egress-mongodb
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   podSelector:
     matchLabels:
@@ -76,7 +76,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: mongodb-ingress
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   podSelector:
     matchLabels:
@@ -106,7 +106,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-https-egress
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   podSelector: {}
   egress:
@@ -134,7 +134,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-gateway-ingress
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   podSelector:
     matchLabels:
