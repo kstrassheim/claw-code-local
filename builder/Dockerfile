@@ -479,11 +479,6 @@ RUN ARCH=$(dpkg --print-architecture) \
  && ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh \
  && rm /tmp/pwsh.tar.gz \
  && mkdir -p /usr/local/share/powershell/Modules \
- # Bootstrap the NuGet package provider EXPLICITLY. Save-Module otherwise
- # prompts for it on first use, and a prompt in a -NonInteractive shell is an
- # error, not a default-yes. -Scope AllUsers so the provider is in the image
- # for the Az/Pester layer below rather than in some transient HOME.
- && pwsh -NoProfile -NonInteractive -Command \
  # No Install-PackageProvider here. On PowerShell 7 it looks for a
  # PackageManagement provider PACKAGE, a discovery route that is dead on
  # Linux: it printed "No match was found ... for the provider 'NuGet'" on
@@ -492,6 +487,7 @@ RUN ARCH=$(dpkg --print-architecture) \
  # teaches people to ignore errors; silencing it with -ErrorAction would
  # have hidden a real failure later instead. The module assertion at the
  # end of this RUN is what actually proves the save worked.
+ && pwsh -NoProfile -NonInteractive -Command \
       "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Save-Module -Name PSScriptAnalyzer -RequiredVersion ${PSSCRIPTANALYZER_VERSION} -Path /usr/local/share/powershell/Modules" \
  && rm -rf /var/lib/apt/lists/* \
@@ -539,7 +535,6 @@ RUN . /etc/os-release \
       msodbcsql18 mssql-tools18 unixodbc \
  && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
  && ln -sf /opt/mssql-tools18/bin/bcp    /usr/local/bin/bcp \
- && pwsh -NoProfile -NonInteractive -Command \
  # No Install-PackageProvider here. On PowerShell 7 it looks for a
  # PackageManagement provider PACKAGE, a discovery route that is dead on
  # Linux: it printed "No match was found ... for the provider 'NuGet'" on
@@ -548,6 +543,7 @@ RUN . /etc/os-release \
  # teaches people to ignore errors; silencing it with -ErrorAction would
  # have hidden a real failure later instead. The module assertion at the
  # end of this RUN is what actually proves the save worked.
+ && pwsh -NoProfile -NonInteractive -Command \
       "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Save-Module -Name Pester -RequiredVersion ${PESTER_VERSION} -Path /usr/local/share/powershell/Modules; \
        Save-Module -Name Az     -RequiredVersion ${AZ_VERSION}     -Path /usr/local/share/powershell/Modules" \
@@ -555,10 +551,23 @@ RUN . /etc/os-release \
  # Fail the build loudly rather than ship an image whose agent silently cannot
  # reach a database or load the modules its runbook tests import.
  && sqlcmd -? >/dev/null 2>&1 \
+ # Assert the META-MODULE arrived, not a list of names. A hardcoded list
+ # reads like pins somebody has to maintain, and it is the wrong question
+ # anyway: `Save-Module -Name Az` either brings the whole family or it has
+ # failed, and naming eight of ~80 tests eight-eightieths of that.
+ #
+ # So: Az.Accounts as the anchor every other Az module depends on, Pester
+ # because the runbook tests import it, and a COUNT — a save that degrades to
+ # a handful of submodules is the failure this is really watching for, and it
+ # would pass a check that only asked about names it happened to list.
  && pwsh -NoProfile -NonInteractive -Command \
-      "@('Pester','Az.Accounts','Az.Automation','Az.DataFactory','Az.Synapse','Az.Resources','Az.Storage','Az.KeyVault','Az.Sql') | ForEach-Object { \
-         if (-not (Get-Module -ListAvailable \$_)) { throw \"missing module: \$_\" }; \
-         '{0} {1}' -f \$_, (Get-Module -ListAvailable \$_).Version[0] }"
+      "foreach (\$m in 'Pester','Az.Accounts') { \
+         if (-not (Get-Module -ListAvailable \$m)) { throw \"missing module: \$m\" } }; \
+       \$az = @((Get-Module -ListAvailable Az.*).Name | Sort-Object -Unique); \
+       if (\$az.Count -lt 30) { \
+         throw \"Az degraded to \$(\$az.Count) submodules — the meta-module did not install\" }; \
+       'Pester {0}' -f (Get-Module -ListAvailable Pester).Version[0]; \
+       'Az {0} — {1} submodules' -f (Get-Module -ListAvailable Az.Accounts).Version[0], \$az.Count"
 
 # .NET SDK + SqlPackage — SSDT/dacpac database projects.
 #
