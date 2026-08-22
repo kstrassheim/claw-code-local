@@ -1,3 +1,5 @@
+<img src="logo-app/claw-code-192.png" alt="" align="left" width="84" height="84" hspace="14">
+
 # claw-code-local
 
 GitOps deployment of [openclaw](https://github.com/openclaw/openclaw) as a
@@ -11,6 +13,8 @@ Argo CD. Secrets are **not** stored in the repo — the Deploy workflow
 reads GitHub Actions environment secrets and `kubectl apply`s them
 directly to the cluster on every run (the YAML never touches disk or
 git).
+
+<br clear="left">
 
 ## What's in the image
 
