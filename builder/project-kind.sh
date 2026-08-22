@@ -8,10 +8,30 @@
 #   automation PowerShell runbooks        runbooks/ or automation*.tf
 #   dwh        source DBs + Data Factory  synapse*.tf / datafactory*.tf /
 #              + Synapse                  sql_init_*.sql
-#   k8s        a workload in its OWN AKS  aks.tf|kubernetes.tf + k8s/
-#              cluster
-#   aksbot     ...and that workload is    the same, AND the manifests deploy an
-#              an openclaw bot            openclaw instance (see below)
+#   k8s        manifests deployed to a    k8s/  (and NO cluster IaC — the
+#              cluster the project does         cluster belongs to somebody
+#              NOT provision                    else: k3s, a homelab, a
+#                                               managed cluster)
+#   aks        ...and the project DOES    k8s/ AND aks.tf|kubernetes.tf,
+#              provision it, on Azure     at the root or one level down
+#   aksbot     ...and that workload is    the same as aks, AND the manifests
+#              an openclaw bot            deploy an openclaw instance
+#
+# WHY k8s AND aks ARE SEPARATE
+# ----------------------------
+# `k8s` used to MEAN Azure — it required `aks.tf|kubernetes.tf`, so a project
+# that only ships manifests matched nothing and fell through to `web`.
+# k8s-ultimate-web-stack was detected as a web application: no cluster, no
+# namespaces, no deployments, no events, no restarts, while it is nothing but
+# those things.
+#
+# Deploying INTO a cluster and PROVISIONING one are different facts. The
+# workload questions — what is running, why did it restart, what does this
+# CronJob do — are identical on a k3s box and on AKS, and are gated on
+# `has_cluster_kind`. Only the questions that need Azure itself — the cluster
+# IaC, `az aks`, a node pool — are gated on `has_azure_cluster_kind`.
+# Requiring Terraform to notice Kubernetes asked the wrong question: the
+# manifests are what make it Kubernetes.
 #
 # A SET, NOT A SINGLE VALUE
 # -------------------------
@@ -80,12 +100,24 @@ has_kind() {
 # Gates everything that only makes sense against Azure resources: the source
 # checkout, the scope rule, the Entra auth rule.
 has_nonweb_kind() {
-  has_kind automation || has_kind dwh || has_kind k8s || has_kind aksbot
+  has_kind automation || has_kind dwh || has_kind k8s || has_kind aks \
+    || has_kind aksbot
 }
 
-# has_cluster_kind — either flavour of "this project owns an AKS cluster".
+# has_cluster_kind — this project deploys into a Kubernetes cluster, whoever
+# provisioned it. `k8s` is a cluster the project does not own; `aks` and
+# `aksbot` are ones it does. Everything gated on this is about WORKLOADS —
+# namespaces, deployments, cronjobs, events, restarts — which are the same
+# facts on a k3s box as on AKS.
 has_cluster_kind() {
-  has_kind k8s || has_kind aksbot
+  has_kind k8s || has_kind aks || has_kind aksbot
+}
+
+# has_azure_cluster_kind — the project PROVISIONS its cluster on Azure. Gates
+# the parts that are genuinely Azure-only: the cluster IaC, `az aks` commands,
+# a node pool. A local cluster has none of them.
+has_azure_cluster_kind() {
+  has_kind aks || has_kind aksbot
 }
 
 # kind_count — how many kinds matched. 1 means "compose exactly what a
@@ -101,7 +133,8 @@ kind_title() {
   case "$1" in
     automation) echo "AZURE AUTOMATION" ;;
     dwh)        echo "DWH (source DBs + Data Factory + Synapse)" ;;
-    k8s)        echo "AKS WORKLOAD" ;;
+    k8s)        echo "KUBERNETES WORKLOAD" ;;
+    aks)        echo "AKS WORKLOAD" ;;
     aksbot)     echo "AKS WORKLOAD (an openclaw bot)" ;;
     web)        echo "WEB APPLICATION" ;;
     *)          echo "$1" ;;
@@ -113,7 +146,8 @@ kind_label() {
   case "$1" in
     automation) echo "Azure Automation runbooks" ;;
     dwh)        echo "a data warehouse (source databases, Data Factory pipelines, a Synapse SQL pool)" ;;
-    k8s)        echo "a workload running in the project's own AKS cluster" ;;
+    k8s)        echo "a workload deployed to a Kubernetes cluster the project does not provision (manifests only)" ;;
+    aks)        echo "a workload running in the project's own AKS cluster" ;;
     aksbot)     echo "an openclaw bot running in the project's own AKS cluster" ;;
     web)        echo "a web application with a site to browse" ;;
     *)          echo "$1" ;;
@@ -153,7 +187,20 @@ detect_project_kinds_from_tree() {
   PROJECT_KINDS=""
   if _pk_tree_has '^runbooks$|^automation.*\.tf$'; then _pk_add automation; fi
   if _pk_tree_has '^(synapse|datafactory).*\.tf$|^sql_init_.*\.sql$'; then _pk_add dwh; fi
-  if _pk_tree_has '^(aks|kubernetes)\.tf$' && _pk_tree_has '^k8s$'; then _pk_add k8s; fi
+  # KUBERNETES IS NOT AZURE.
+  #
+  # This used to demand `aks.tf|kubernetes.tf` AND `k8s/`, so a repository that
+  # deploys manifests to a cluster somebody else runs — a k3s box, a homelab,
+  # any managed cluster not provisioned from this repo — matched nothing and
+  # fell through to the `web` default. k8s-ultimate-web-stack detected as
+  # `web`: no cluster, no namespaces, no deployments, no events, no restarts,
+  # while it is nothing BUT those things.
+  #
+  # The manifests are what make it a Kubernetes project. Provisioning the
+  # cluster is a SEPARATE fact, and that is what `aks` now says.
+  if _pk_tree_has '^k8s$'; then
+    if _pk_tree_has '^(aks|kubernetes)\.tf$'; then _pk_add aks; else _pk_add k8s; fi
+  fi
   if _pk_tree_has '^frontend$|^backend$'; then _pk_add web; fi
   # Nothing recognised — keep the browser test rather than silently testing
   # nothing. An unrecognised project loses no coverage it used to have.
@@ -187,9 +234,17 @@ detect_project_kinds_from_dir() {
                     "$_pk_dir"/sql_init_*.sql; then
     _pk_add dwh
   fi
-  if { [ -f "$_pk_dir/aks.tf" ] || [ -f "$_pk_dir/kubernetes.tf" ]; } \
-     && [ -d "$_pk_dir/k8s" ]; then
-    _pk_add k8s
+  # See detect_project_kinds_from_tree. Manifests make it Kubernetes; Azure
+  # cluster IaC makes it AKS. The IaC files are searched below the root as
+  # well, because a repository that keeps them in `terraform/` is provisioning
+  # a cluster just as much as one that keeps them at the top.
+  if [ -d "$_pk_dir/k8s" ]; then
+    if _pk_any_exists "$_pk_dir"/aks.tf "$_pk_dir"/kubernetes.tf \
+                      "$_pk_dir"/*/aks.tf "$_pk_dir"/*/kubernetes.tf; then
+      _pk_add aks
+    else
+      _pk_add k8s
+    fi
   fi
   if [ -d "$_pk_dir/frontend" ] || [ -d "$_pk_dir/backend" ]; then
     _pk_add web
@@ -218,11 +273,13 @@ k8s_workload_is_bot() {
 # it and keeps the generic protocol, which is the right degradation: the bot
 # stages need the repo anyway to resolve what they are looking at.
 refine_aks_kind() {
-  has_kind k8s || return 0
+  # `aksbot` is `aks` upgraded, never `k8s` upgraded: a bot in a cluster the
+  # project does not provision is still not an AKS workload.
+  has_kind aks || return 0
   k8s_workload_is_bot "$1" || return 0
   _pk_new=""
   for _pk_k in $PROJECT_KINDS; do
-    [ "$_pk_k" = "k8s" ] && _pk_k=aksbot
+    [ "$_pk_k" = "aks" ] && _pk_k=aksbot
     _pk_new="${_pk_new:+$_pk_new }$_pk_k"
   done
   PROJECT_KINDS="$_pk_new"
