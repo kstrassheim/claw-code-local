@@ -81,7 +81,7 @@ metadata:
   name: openclaw
   namespace: claw-code-local
   labels:
-    app: openclaw
+    app: claw-code
     environment: dev
     project: claw-code-local
 spec:
@@ -96,11 +96,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: openclaw
+      app: claw-code
   template:
     metadata:
       labels:
-        app: openclaw
+        app: claw-code
       annotations:
         # (Was checksum/tools-md, forcing a rollout so a subPath mount of the
         # assembled TOOLS.md would refresh. render-config now assembles it from

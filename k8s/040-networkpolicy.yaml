@@ -53,7 +53,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: openclaw
+      app: claw-code
   egress:
     - to:
         - podSelector:
@@ -138,7 +138,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: openclaw
+      app: claw-code
   ingress:
     - ports:
         - protocol: TCP
