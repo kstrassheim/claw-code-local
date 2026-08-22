@@ -120,10 +120,7 @@ data:
           },
           "azuredevops": {
             "command": "mcp-server-azuredevops",
-            "args": ["${AZDO_ORG}", "--authentication", "azcli"],
-            "env": {
-              "AZURE_DEVOPS_EXT_PAT": "${AZDO_API_TOKEN}"
-            }
+            "args": ["${AZDO_ORG}", "--authentication", "azcli"]
           },
           "k8s": {
             "command": "node",

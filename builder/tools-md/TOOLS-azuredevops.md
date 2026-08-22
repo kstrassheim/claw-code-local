@@ -16,8 +16,21 @@ Azure DevOps host and nothing below applies.
 
 | Surface | Targets | Auth |
 |---|---|---|
-| `mcp.servers.azuredevops` | `$AZDO_ORG` | Azure CLI (`--authentication azcli`) |
+| `mcp.servers.azuredevops` | `$AZDO_ORG` | **Azure CLI** — needs `az login` |
 | `az devops` | same | `AZURE_DEVOPS_EXT_PAT=$AZDO_API_TOKEN` |
+
+**The MCP does NOT use the PAT.** It is Microsoft's `@azure-devops/mcp`, it
+runs with `--authentication azcli`, and it authenticates as whoever the Azure
+CLI is logged in as. If this pod has not run `az login`, the MCP answers
+nothing — and that failure looks like a broken server rather than a missing
+login, so check `az account show` first.
+
+It is also **public preview**. Treat a tool that misbehaves as the preview
+misbehaving, not as the host being unreachable, and fall back to `az devops`
+or to asking the forge.
+
+Neither of them is required for the bot to work an Azure DevOps repository:
+the forge layer speaks HTTP with the PAT and is unaffected by both.
 
 ## This host is NOT GitHub-shaped. Read this before anything else.
 

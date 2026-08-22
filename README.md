@@ -19,7 +19,7 @@ curated set of CLIs and MCP servers for autonomous code / cloud work:
 
 - `git` (with `git-lfs`), `gh` + `github-mcp-server`
 - `tea` + `gitea-mcp` (Gitea; inert unless `GITEA_URL` and `GITEA_API_TOKEN` are both set)
-- `az devops` + `mcp-server-azuredevops` (Azure DevOps; inert unless `AZDO_ORG` and `AZDO_API_TOKEN` are both set)
+- `az devops` + `mcp-server-azuredevops` (Azure DevOps; inert unless `AZDO_ORG` and `AZDO_API_TOKEN` are both set. The MCP is public preview and authenticates via `az login`, **not** the PAT — the CLI and the forge layer both use the PAT and work without it)
 - `kubectl` + `kubelogin` + an in-house Kubernetes MCP (`builder/k8s-mcp`)
 - `terraform` + the official Terraform MCP
 - `aws`, `gcloud`, `aliyun` CLIs each paired with a cloud-specific MCP
