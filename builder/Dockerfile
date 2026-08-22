@@ -484,8 +484,15 @@ RUN ARCH=$(dpkg --print-architecture) \
  # error, not a default-yes. -Scope AllUsers so the provider is in the image
  # for the Az/Pester layer below rather than in some transient HOME.
  && pwsh -NoProfile -NonInteractive -Command \
-      "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force | Out-Null; \
-       Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+ # No Install-PackageProvider here. On PowerShell 7 it looks for a
+ # PackageManagement provider PACKAGE, a discovery route that is dead on
+ # Linux: it printed "No match was found ... for the provider 'NuGet'" on
+ # every build while Save-Module went on to succeed anyway, through the
+ # provider already built into PowerShellGet. An error in a green build
+ # teaches people to ignore errors; silencing it with -ErrorAction would
+ # have hidden a real failure later instead. The module assertion at the
+ # end of this RUN is what actually proves the save worked.
+      "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Save-Module -Name PSScriptAnalyzer -RequiredVersion ${PSSCRIPTANALYZER_VERSION} -Path /usr/local/share/powershell/Modules" \
  && rm -rf /var/lib/apt/lists/* \
  # Verify here, so a broken scanner fails the BUILD instead of the first tool
@@ -533,8 +540,15 @@ RUN . /etc/os-release \
  && ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd \
  && ln -sf /opt/mssql-tools18/bin/bcp    /usr/local/bin/bcp \
  && pwsh -NoProfile -NonInteractive -Command \
-      "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force | Out-Null; \
-       Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
+ # No Install-PackageProvider here. On PowerShell 7 it looks for a
+ # PackageManagement provider PACKAGE, a discovery route that is dead on
+ # Linux: it printed "No match was found ... for the provider 'NuGet'" on
+ # every build while Save-Module went on to succeed anyway, through the
+ # provider already built into PowerShellGet. An error in a green build
+ # teaches people to ignore errors; silencing it with -ErrorAction would
+ # have hidden a real failure later instead. The module assertion at the
+ # end of this RUN is what actually proves the save worked.
+      "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
        Save-Module -Name Pester -RequiredVersion ${PESTER_VERSION} -Path /usr/local/share/powershell/Modules; \
        Save-Module -Name Az     -RequiredVersion ${AZ_VERSION}     -Path /usr/local/share/powershell/Modules" \
  && rm -rf /var/lib/apt/lists/* \
