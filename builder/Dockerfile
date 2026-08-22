@@ -815,6 +815,9 @@ COPY --chmod=0755 forge-cli                /usr/local/bin/forge-cli
 # through this, so a build without it is a build where nothing can talk to
 # anything.
 COPY --chmod=0644 forge.py              /usr/local/bin/forge.py
+COPY --chmod=0644 forge_github.py       /usr/local/bin/forge_github.py
+COPY --chmod=0644 forge_gitlab.py       /usr/local/bin/forge_gitlab.py
+COPY --chmod=0644 forge_gitea.py        /usr/local/bin/forge_gitea.py
 COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
 COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
 COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py
