@@ -125,6 +125,27 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && /usr/local/bin/gh --version
 
+# tea CLI + Gitea MCP server, the Gitea half of the forge layer's tooling.
+# Same shape as the gh block above; arm64 only, same as the image. `tea`
+# publishes a bare binary rather than an archive, the MCP a tar.gz.
+ARG TEA_VERSION
+ARG GITEA_MCP_VERSION
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fsSL -o /usr/local/bin/tea \
+      "https://gitea.com/gitea/tea/releases/download/v${TEA_VERSION}/tea-${TEA_VERSION}-linux-arm64" \
+ && chmod 0755 /usr/local/bin/tea \
+ && curl -fsSL -o /tmp/gitea-mcp.tar.gz \
+      "https://gitea.com/gitea/gitea-mcp/releases/download/v${GITEA_MCP_VERSION}/gitea-mcp_Linux_arm64.tar.gz" \
+ && tar -xzf /tmp/gitea-mcp.tar.gz -C /tmp \
+ && mv /tmp/gitea-mcp /usr/local/bin/gitea-mcp \
+ && chmod 0755 /usr/local/bin/gitea-mcp \
+ && rm -rf /tmp/gitea-mcp.tar.gz \
+ && apt-get purge -y --auto-remove curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && /usr/local/bin/tea --version
+
 # Baked-in .gitconfig: credential helper reads $GITHUB_TOKEN at git-runtime
 RUN install -d -o 1000 -g 1000 /home/node \
  && cat > /home/node/.gitconfig <<'GITCONFIG'
@@ -815,6 +836,9 @@ COPY --chmod=0755 forge-cli                /usr/local/bin/forge-cli
 # through this, so a build without it is a build where nothing can talk to
 # anything.
 COPY --chmod=0644 forge.py              /usr/local/bin/forge.py
+COPY --chmod=0644 forge_github.py       /usr/local/bin/forge_github.py
+COPY --chmod=0644 forge_gitlab.py       /usr/local/bin/forge_gitlab.py
+COPY --chmod=0644 forge_gitea.py        /usr/local/bin/forge_gitea.py
 COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
 COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
 COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py

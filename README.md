@@ -18,6 +18,7 @@ The container image (`builder/Dockerfile`) is `openclaw` upstream plus a
 curated set of CLIs and MCP servers for autonomous code / cloud work:
 
 - `git` (with `git-lfs`), `gh` + `github-mcp-server`
+- `tea` + `gitea-mcp` (Gitea; inert unless `GITEA_URL` and `GITEA_API_TOKEN` are both set)
 - `kubectl` + `kubelogin` + an in-house Kubernetes MCP (`builder/k8s-mcp`)
 - `terraform` + the official Terraform MCP
 - `aws`, `gcloud`, `aliyun` CLIs each paired with a cloud-specific MCP
@@ -512,6 +513,7 @@ need one, and bumping out of habit is the expensive mistake.
 | You changed | Bump `OPENCLAW_VERSION`? | How it reaches the cluster |
 | --- | --- | --- |
 | `builder/*.py`, `builder/*.sh`, `forge-cli`, `mermaid-render` | **No** | ConfigMap → Argo → next CronJob tick |
+| `builder/forge.py` + `builder/forge_{github,gitlab,gitea}.py` | **No** | same — and this is why the forge is FLAT sibling modules rather than a `forge/` package: a ConfigMap key cannot contain a slash, so a package could only reach a pod by rebuilding the image. |
 | `builder/tools-md/*.md` (capability docs) | **No** | ConfigMap → Argo → next **pod restart** |
 | `k8s/*.yaml` (manifests, skills, resources) | **No** | Argo applies them directly |
 | `builder/Dockerfile` | **Yes** | nothing else rebuilds the image |
