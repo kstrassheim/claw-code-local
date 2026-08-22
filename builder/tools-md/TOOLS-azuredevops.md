@@ -19,11 +19,22 @@ Azure DevOps host and nothing below applies.
 | `mcp.servers.azuredevops` | `$AZDO_ORG` | **Azure CLI** — needs `az login` |
 | `az devops` | same | `AZURE_DEVOPS_EXT_PAT=$AZDO_API_TOKEN` |
 
-**The MCP does NOT use the PAT.** It is Microsoft's `@azure-devops/mcp`, it
-runs with `--authentication azcli`, and it authenticates as whoever the Azure
-CLI is logged in as. If this pod has not run `az login`, the MCP answers
-nothing — and that failure looks like a broken server rather than a missing
-login, so check `az account show` first.
+**The MCP does NOT use the PAT, and `az login` is not the PAT.** Two different
+credentials:
+
+- the **PAT** (`$AZDO_API_TOKEN`) is an Azure DevOps credential. The forge
+  layer and `az devops` both use it, and neither needs a login step.
+- **`az login`** signs in an *Entra identity* (`$ENTRA_USERNAME`). The MCP
+  uses that, via `--authentication azcli`, and nothing else does.
+
+**Nothing on this pod runs `az login` for you.** Driving it is your job — see
+TOOLS-entra.md, `az login --use-device-code --tenant "$ENTRA_TENANT_ID"` with
+`entra-totp` for MFA. Until you have, the MCP answers nothing, and that
+failure looks like a broken server rather than a missing login. Check
+`az account show` first.
+
+That Entra identity also has to be a MEMBER of the Azure DevOps organization.
+Being signed in to the tenant grants nothing there on its own.
 
 It is also **public preview**. Treat a tool that misbehaves as the preview
 misbehaving, not as the host being unreachable, and fall back to `az devops`
