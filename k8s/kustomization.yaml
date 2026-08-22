@@ -6,7 +6,7 @@ resources:
   - 000-namespace-and-config.yaml
   - 005-pvc.yaml
   - 006-mongodb.yaml
-  - 010-claw-code-config.yaml
+  - 010-openclaw-config.yaml
   - 020-deployment.yaml
   - 030-service.yaml
   - 040-networkpolicy.yaml
