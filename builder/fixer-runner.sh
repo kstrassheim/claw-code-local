@@ -2225,6 +2225,16 @@ if [ -z "$EXISTING_PR_NUMBER" ] && [ -f "$LEXICAL_ASKED_MARKER" ]; then
   POST_ASK_NEW="$(fetch_new_mentions "$LAST_SEEN_ID" 2>/dev/null || echo '[]')"
   POST_ASK_NEW_COUNT="$(echo "$POST_ASK_NEW" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))')"
   if [ "$POST_ASK_NEW_COUNT" = "0" ]; then
+    # Silently to the LOG, never to the issue. The marker lives on a volume
+    # only this pod can read, so a wait recorded only here is a wait nobody
+    # outside the cluster can see — and this branch runs every five minutes
+    # forever, burning the repository's one slot on an issue it will not
+    # touch. `park_on_hold` is a no-op when the label is already there, so
+    # this costs one read per tick and closes the case the ASK path cannot:
+    # a marker written before that path labelled anything, or a label a
+    # person took off without answering. k8s-ultimate-web-stack#113 sat like
+    # that for 28 hours, reading as ordinary open work.
+    park_on_hold
     echo "[lexical-guard] marker present, no new @-mention since cursor=$LAST_SEEN_ID — exiting silently (waiting for user reply)"
     exit 0
   fi

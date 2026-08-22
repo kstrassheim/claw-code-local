@@ -315,6 +315,35 @@ class NoInvisibleParks(unittest.TestCase):
     write the marker.
     """
 
+    def test_every_wait_on_a_person_is_labelled_before_it_exits(self):
+        """A branch that exits because it is waiting must SAY so on the issue.
+
+        Writing the marker is not enough and never was: it lives on a volume
+        only the pod can read, so a wait recorded only there is invisible from
+        GitHub while the issue still reads as ordinary open work. Worse, the
+        branch runs every five minutes and burns the repository's one slot on
+        an issue it will not touch — so an invisible park does not merely hide,
+        it starves.
+
+        k8s-ultimate-web-stack#113: asked for clarification, marker written,
+        no label, 28 hours of spawning a runner that exited silently.
+        """
+        import pathlib as _pl
+        src = (_pl.Path(__file__).resolve().parents[1] / "fixer-runner.sh")
+        lines = src.read_text().splitlines()
+        for n, line in enumerate(lines):
+            if "exiting silently (waiting for user reply)" not in line:
+                continue
+            # park_on_hold must run BEFORE the exit, in the same branch.
+            before = "\n".join(lines[max(0, n - 14):n])
+            self.assertIn("park_on_hold", before,
+                          f"line {n + 1} waits on a person without labelling "
+                          "the issue — the park is invisible")
+            break
+        else:
+            self.fail("the lexical silent-exit branch has moved or gone; "
+                      "check it still labels before exiting")
+
     def test_only_park_on_hold_creates_the_marker(self):
         import pathlib
         src = pathlib.Path(__file__).resolve().parents[1] / "fixer-runner.sh"
