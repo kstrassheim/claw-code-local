@@ -25,7 +25,7 @@ OPENCLAW_UPSTREAM=v2026.7.1-2
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.7.1-2.22
+OPENCLAW_VERSION=v2026.7.1-2.23
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
@@ -33,8 +33,8 @@ OPENCLAW_VERSION=v2026.7.1-2.22
 # CDNs. Bump deliberately; verify the artifact URL exists for arm64
 # before pushing (the build pulls these from upstream CDNs at image
 # build time, so a wrong value 404s mid-build).
-GH_CLI_VERSION=2.92.0
-GITHUB_MCP_SERVER_VERSION=1.0.3
+GH_CLI_VERSION=2.98.0
+GITHUB_MCP_SERVER_VERSION=1.10.1
 GLAB_VERSION=1.97.0
 GITLAB_MCP_VERSION=0.7.0
 # Gitea: the `tea` CLI and the official MCP server. Unlike the two lines
@@ -47,24 +47,24 @@ GITEA_MCP_VERSION=1.6.0
 # no independent pin — `az extension add` resolves against the installed
 # az, which is why only the MCP is listed here.
 AZDO_MCP_VERSION=2.9.0
-TERRAFORM_VERSION=1.13.0
-TERRAFORM_MCP_VERSION=0.5.2
+TERRAFORM_VERSION=1.15.9
+TERRAFORM_MCP_VERSION=1.2.0
 # OpenTofu: the fork of Terraform under the Linux Foundation, and the registry
 # MCP that goes with it. Both are here rather than one replacing terraform:
 # a project's state and lockfile are written by whichever binary made them,
 # and the bot works on repositories that have chosen either.
 OPENTOFU_VERSION=1.12.6
-OPENTOFU_MCP_VERSION=0.1.5
-CODE_SERVER_VERSION=4.118.0
+OPENTOFU_MCP_VERSION=1.0.0
+CODE_SERVER_VERSION=4.133.0
 # mermaid-cli, the renderer behind `mermaid-render`. It drives a headless
 # browser, and puppeteer would fetch its OWN Chromium — the Dockerfile points
 # it at the system one instead (PUPPETEER_EXECUTABLE_PATH), so this pin must
 # stay compatible with the chromium Debian ships. A mermaid-cli that requires
 # a newer Chrome than the base image has fails at render time, not at build.
-MERMAID_CLI_VERSION=11.12.0
-AWS_CLI_VERSION=2.34.45
+MERMAID_CLI_VERSION=11.16.0
+AWS_CLI_VERSION=2.36.29
 GCLOUD_VERSION=567.0.0
-ALIYUN_CLI_VERSION=3.3.14
+ALIYUN_CLI_VERSION=3.4.11
 
 # git-lfs. Target repositories keep large binary assets under LFS, and without
 # the client a clone hands the agent ~130-byte pointer files instead of the
@@ -93,7 +93,7 @@ KUBELOGIN_VERSION=0.2.19
 # wants mcp==1.12.2), so they can never resolve in one environment. They are
 # installed into two separate virtualenvs for that reason; bumping either one
 # alone is safe, merging the venvs is not.
-SEMGREP_VERSION=1.172.0
+SEMGREP_VERSION=1.174.0
 SEMGREP_MCP_VERSION=0.9.0
 BANDIT_VERSION=1.9.4
 PIP_AUDIT_VERSION=2.10.1
@@ -104,14 +104,14 @@ GITLEAKS_VERSION=8.30.1
 # PowerShell 7 + PSScriptAnalyzer. The pwsh tarball is
 # powershell-<version>-linux-arm64.tar.gz; the x86_64 asset is spelled
 # `linux-x64`, not `linux-amd64`, so an arch-substituted URL is not symmetric.
-PWSH_VERSION=7.6.4
+PWSH_VERSION=7.6.5
 PSSCRIPTANALYZER_VERSION=1.25.0
 
 # Azure data-platform tooling: PowerShell runbooks with Pester tests, and
 # SSDT/dacpac database projects the solver must be able to build and publish
 # BEFORE it pushes. Only the four Az modules actually used are installed, not
 # the Az meta-module (several hundred MB of provider surface never touched).
-PESTER_VERSION=5.7.1
+PESTER_VERSION=6.1.0
 # DOTNET_SDK_VERSION is a dotnet-install.sh CHANNEL, not an exact version — it
 # must match the major.minor a project's global.json pins (`rollForward:
 # latestFeature` on 8.0.x stays inside 8.0 and rejects a 10.0 SDK). Installed
@@ -122,14 +122,11 @@ DOTNET_SDK_VERSION=8.0
 # version of microsoft.sqlpackage and must be supported by the SDK channel
 # above.
 SQLPACKAGE_VERSION=170.4.83
-AZ_ACCOUNTS_VERSION=4.0.2
-AZ_AUTOMATION_VERSION=1.11.1
-AZ_DATAFACTORY_VERSION=1.18.5
-AZ_SYNAPSE_VERSION=3.0.2
+AZ_VERSION=16.2.0
 
 # Live DAST scanners behind mcp.servers.pentest, used by the deployment tester
 # against the project's own authorised dev deployment only.
-NUCLEI_VERSION=3.11.0
+NUCLEI_VERSION=3.11.1
 # nuclei community templates, baked in as a PINNED static release tarball
 # fetched from codeload. They are deliberately NOT fetched with
 # `nuclei -update-templates`: that resolves the version through a GitHub API

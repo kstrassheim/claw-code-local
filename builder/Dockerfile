@@ -502,9 +502,14 @@ RUN ARCH=$(dpkg --print-architecture) \
 # Azure data-platform tooling — see k8s/tools/TOOLS-powershell.md:
 #   - Pester — the PowerShell test framework. The solver is required to make
 #     a runbook's unit tests pass locally before it opens a pull request.
-#   - Az.Accounts / Az.Automation / Az.DataFactory / Az.Synapse — ONLY these
-#     four, never the Az meta-module, which is several hundred MB of provider
-#     surface nothing here touches.
+#   - Az — the WHOLE meta-module, deliberately. This used to be four
+#     submodules (Accounts, Automation, DataFactory, Synapse) with a comment
+#     saying the meta-module was "several hundred MB of provider surface
+#     nothing here touches". That was true of the image and false of the work:
+#     every new Azure area the bot was asked about needed another pin, another
+#     pull request and another rebuild before it could even look. The image
+#     pays about a gigabyte once; the alternative charged a round-trip every
+#     time the answer was in a provider nobody had predicted.
 #   - msodbcsql18 + sqlcmd — so the AGENT can apply .sql files and run ad-hoc
 #     queries in its own shell.
 # Everything authenticates as the bot's Entra identity through the shared
@@ -516,10 +521,7 @@ RUN ARCH=$(dpkg --print-architecture) \
 # turns a missing keyring into an obvious failure on this line instead of an
 # unsigned-repository error twenty lines later.
 ARG PESTER_VERSION
-ARG AZ_ACCOUNTS_VERSION
-ARG AZ_AUTOMATION_VERSION
-ARG AZ_DATAFACTORY_VERSION
-ARG AZ_SYNAPSE_VERSION
+ARG AZ_VERSION
 USER root
 RUN . /etc/os-release \
  && test -s /etc/apt/keyrings/microsoft.gpg \
@@ -533,17 +535,14 @@ RUN . /etc/os-release \
  && pwsh -NoProfile -NonInteractive -Command \
       "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force | Out-Null; \
        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
-       Save-Module -Name Pester         -RequiredVersion ${PESTER_VERSION}         -Path /usr/local/share/powershell/Modules; \
-       Save-Module -Name Az.Accounts    -RequiredVersion ${AZ_ACCOUNTS_VERSION}    -Path /usr/local/share/powershell/Modules; \
-       Save-Module -Name Az.Automation  -RequiredVersion ${AZ_AUTOMATION_VERSION}  -Path /usr/local/share/powershell/Modules; \
-       Save-Module -Name Az.DataFactory -RequiredVersion ${AZ_DATAFACTORY_VERSION} -Path /usr/local/share/powershell/Modules; \
-       Save-Module -Name Az.Synapse     -RequiredVersion ${AZ_SYNAPSE_VERSION}     -Path /usr/local/share/powershell/Modules" \
+       Save-Module -Name Pester -RequiredVersion ${PESTER_VERSION} -Path /usr/local/share/powershell/Modules; \
+       Save-Module -Name Az     -RequiredVersion ${AZ_VERSION}     -Path /usr/local/share/powershell/Modules" \
  && rm -rf /var/lib/apt/lists/* \
  # Fail the build loudly rather than ship an image whose agent silently cannot
  # reach a database or load the modules its runbook tests import.
  && sqlcmd -? >/dev/null 2>&1 \
  && pwsh -NoProfile -NonInteractive -Command \
-      "@('Pester','Az.Accounts','Az.Automation','Az.DataFactory','Az.Synapse') | ForEach-Object { \
+      "@('Pester','Az.Accounts','Az.Automation','Az.DataFactory','Az.Synapse','Az.Resources','Az.Storage','Az.KeyVault','Az.Sql') | ForEach-Object { \
          if (-not (Get-Module -ListAvailable \$_)) { throw \"missing module: \$_\" }; \
          '{0} {1}' -f \$_, (Get-Module -ListAvailable \$_).Version[0] }"
 
