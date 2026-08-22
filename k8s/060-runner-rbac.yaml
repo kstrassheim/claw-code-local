@@ -1,6 +1,6 @@
 ---
 # RBAC for the GitHub Actions runner so the Deploy workflow's
-# publish-secrets job can `kubectl apply` the openclaw-secrets Secret
+# publish-secrets job can `kubectl apply` the claw-code-secrets Secret
 # directly into this namespace. Scoped as narrowly as possible: only
 # the one named Secret, only this namespace, only get/create/update/patch
 # (no list, no delete, no broader read).
@@ -33,7 +33,7 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["openclaw-secrets"]
+    resourceNames: ["claw-code-secrets"]
     verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

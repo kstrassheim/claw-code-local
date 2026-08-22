@@ -12,7 +12,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: openclaw-skill-developer
+  name: claw-code-skill-developer
   namespace: claw-code-local
 data:
   SKILL.md: |
@@ -568,7 +568,7 @@ metadata:
   namespace: claw-code-local
 subjects:
   - kind: ServiceAccount
-    name: openclaw
+    name: claw-code
     namespace: claw-code-local
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -663,7 +663,7 @@ spec:
                 # already in the openclaw pod's env, inherited by the
                 # spawned fixer subprocesses.
                 - secretRef:
-                    name: openclaw-secrets
+                    name: claw-code-secrets
               resources:
                 requests:
                   cpu: 50m

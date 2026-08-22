@@ -649,7 +649,7 @@ jobs:
   publish-secrets:
     name: Apply Secrets
     runs-on: arc-runner-scale-claw-code-local
-    # Renders the openclaw-secrets Secret from GitHub Actions environment
+    # Renders the claw-code-secrets Secret from GitHub Actions environment
     # secrets and `kubectl apply`s it directly to the cluster — no
     # kubeseal, no committed sealed-secret YAML, no push to main. The
     # manifest is piped from `kubectl create -o yaml` straight into
@@ -677,7 +677,7 @@ jobs:
           . ./VERSIONS
           echo "OPENCLAW_UPSTREAM=${OPENCLAW_UPSTREAM}" >> "$GITHUB_ENV"
 
-      - name: Apply openclaw-secrets to cluster
+      - name: Apply claw-code-secrets to cluster
         # secrets.GITHUB_TOKEN is reserved by GitHub Actions (returns
         # the ephemeral, repo-scoped workflow token, NOT a usable bot
         # PAT). Read the real bot PAT from BOT_GITHUB_TOKEN and apply
@@ -723,7 +723,7 @@ jobs:
           # permitted on nothing, which is the correct default.
           PROJECTS_ALLOWED_BOOTSTRAP:      ${{ secrets.PROJECTS_ALLOWED_BOOTSTRAP }}
         run: |
-          kubectl create secret generic openclaw-secrets \
+          kubectl create secret generic claw-code-secrets \
             --namespace claw-code-local \
             --dry-run=client \
             --from-literal=MISTRAL_API_KEY="$MISTRAL_API_KEY" \

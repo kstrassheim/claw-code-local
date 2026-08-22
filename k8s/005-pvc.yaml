@@ -6,7 +6,7 @@
 # (sister provisioner restricted to datapi, base path /data/pv). Volumes
 # land at /data/pv/<pvc-name>/ via a custom setup script that symlinks
 # the auto-generated provisioner dirname to a clean alias. For this
-# PVC the on-disk path is /data/pv/openclaw-workspace/ on datapi.
+# PVC the on-disk path is /data/pv/claw-code-workspace/ on datapi.
 #
 # Reclaim policy on local-path-data is Retain — deleting this PVC
 # leaves the workspace dir intact on datapi so the next deploy can
@@ -14,7 +14,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: openclaw-workspace
+  name: claw-code-workspace
   namespace: claw-code-local
 spec:
   accessModes:

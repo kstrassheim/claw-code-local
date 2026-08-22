@@ -6,7 +6,7 @@ resources:
   - 000-namespace-and-config.yaml
   - 005-pvc.yaml
   - 006-mongodb.yaml
-  - 010-openclaw-config.yaml
+  - 010-claw-code-config.yaml
   - 020-deployment.yaml
   - 030-service.yaml
   - 040-networkpolicy.yaml
@@ -20,7 +20,7 @@ resources:
   # A generator cannot read files above its own root, so the
   # generator lives beside the files and is referenced here.
   - ../builder
-  # openclaw-secrets is no longer in git. The Deploy workflow's
+  # claw-code-secrets is no longer in git. The Deploy workflow's
   # publish-secrets job `kubectl apply`s it directly each run via
   # the RBAC in 060-runner-rbac.yaml. Argo CD doesn't manage that
   # Secret. If you ever need a "clean slate" bootstrap from git,
