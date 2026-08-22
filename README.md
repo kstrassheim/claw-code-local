@@ -18,6 +18,7 @@ The container image (`builder/Dockerfile`) is `openclaw` upstream plus a
 curated set of CLIs and MCP servers for autonomous code / cloud work:
 
 - `git` (with `git-lfs`), `gh` + `github-mcp-server`
+- `tea` + `gitea-mcp` (Gitea; inert unless `GITEA_URL` and `GITEA_API_TOKEN` are both set)
 - `kubectl` + `kubelogin` + an in-house Kubernetes MCP (`builder/k8s-mcp`)
 - `terraform` + the official Terraform MCP
 - `aws`, `gcloud`, `aliyun` CLIs each paired with a cloud-specific MCP

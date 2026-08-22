@@ -37,6 +37,11 @@ GH_CLI_VERSION=2.92.0
 GITHUB_MCP_SERVER_VERSION=1.0.3
 GLAB_VERSION=1.97.0
 GITLAB_MCP_VERSION=0.7.0
+# Gitea: the `tea` CLI and the official MCP server. Unlike the two lines
+# above, these are actually consumed — builder/Dockerfile declares an ARG
+# for each and installs them. Assets are published on gitea.com, arm64.
+TEA_VERSION=0.15.1
+GITEA_MCP_VERSION=1.6.0
 TERRAFORM_VERSION=1.13.0
 TERRAFORM_MCP_VERSION=0.5.2
 # OpenTofu: the fork of Terraform under the Linux Foundation, and the registry

@@ -110,6 +110,14 @@ data:
               "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
             }
           },
+          "gitea": {
+            "command": "gitea-mcp",
+            "args": ["-t", "stdio"],
+            "env": {
+              "GITEA_HOST": "${GITEA_URL}",
+              "GITEA_ACCESS_TOKEN": "${GITEA_API_TOKEN}"
+            }
+          },
           "k8s": {
             "command": "node",
             "args": ["/opt/k8s-mcp/k8s-mcp.mjs"]

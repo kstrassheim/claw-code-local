@@ -104,6 +104,7 @@ configMapGenerator:
       - tools-md/TOOLS-debug.md
       - tools-md/TOOLS-entra.md
       - tools-md/TOOLS-gcp.md
+      - tools-md/TOOLS-gitea.md
       - tools-md/TOOLS-gitflow.md
       - tools-md/TOOLS-github.md
       - tools-md/TOOLS-gitlab.md
