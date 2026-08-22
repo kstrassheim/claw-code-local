@@ -2243,7 +2243,24 @@ PYEOF
 3. **Phase 2 only?** Remove the old code; the new path is unconditional (no flag needed).
 4. Something else?"
     fi
-    ASK_BODY="@$ISSUE_AUTHOR — I need clarification before writing any code.
+    # THE MARKER LINE IS LOAD-BEARING, not decoration. `ask_note_id` finds
+    # the question this park is waiting on by searching for it, and both
+    # `release_hold` and `ask_before_spawning` anchor on what it returns.
+    #
+    # Without it this ask is invisible to them: the anchor falls back to an
+    # OLDER ask — the planner's, which does carry the marker — and any reply
+    # that came after THAT one is read as the answer to THIS one. On
+    # ultimate-web-stack#90 the solver asked at 05:55:49, parked at 05:55:51,
+    # and the planner un-parked it at 06:00:39 on the strength of a reply from
+    # the previous day. The question stayed unanswered and the label flapped.
+    #
+    # The literal is duplicated from `lexical_guard.ASK_MARKER` rather than
+    # read at runtime, because a marker that goes missing when a python call
+    # fails is the same bug wearing a different hat. `test_ask_marker_agrees`
+    # fails the build if the two ever drift.
+    ASK_BODY="🛑 DESTRUCTIVE CHANGE — PLEASE CONFIRM
+
+@$ISSUE_AUTHOR — I need clarification before writing any code.
 
 $ASK_INTRO
 

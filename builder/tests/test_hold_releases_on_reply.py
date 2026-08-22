@@ -298,3 +298,46 @@ class AnAnsweredQuestionStopsBlockingTheSpawn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BothAsksCarryTheSameMarker(unittest.TestCase):
+    """The planner and the solver ask the same question in two places.
+
+    `ask_note_id` locates the open question by searching for
+    `lexical_guard.ASK_MARKER`, and both `release_hold` and
+    `ask_before_spawning` anchor on what it returns. An ask without the marker
+    is invisible to them — the anchor falls back to an OLDER ask that does
+    carry it, and any reply posted after THAT one is read as the answer to
+    THIS one.
+
+    ultimate-web-stack#90: the solver asked at 05:55:49, parked at 05:55:51,
+    and the planner un-parked at 06:00:39 on the strength of a reply from the
+    previous day. The question was never answered; the label just flapped.
+    """
+
+    def runner_source(self):
+        import pathlib as _pl
+        return (_pl.Path(__file__).resolve().parents[1]
+                / "fixer-runner.sh").read_text()
+
+    def test_the_solvers_ask_contains_the_marker(self):
+        import lexical_guard
+        body = self.runner_source().split("ASK_BODY=\"", 1)[1]
+        body = body.split("\"\n", 1)[0]
+        self.assertIn(lexical_guard.ASK_MARKER, body,
+                      "the solver's ask is invisible to ask_note_id")
+
+    def test_the_planners_ask_contains_the_marker(self):
+        import lexical_guard
+        note = lexical_guard.ask_note(
+            {"hit": "delete the tests", "rule": "x"}, "someone", "bot")
+        self.assertIn(lexical_guard.ASK_MARKER, note)
+
+    def test_ask_note_id_finds_an_ask_in_either_wording(self):
+        import lexical_guard
+        for body in (lexical_guard.ask_note({"hit": "h"}, "someone", "bot"),
+                     f"🛑 {lexical_guard.ASK_MARKER}\n\n@someone — I need "
+                     "clarification before writing any code."):
+            self.assertEqual(
+                lexical_guard.ask_note_id([note(body, "bot", 42)], "bot"), 42,
+                f"not recognised as an ask: {body[:60]!r}")

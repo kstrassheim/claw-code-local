@@ -86,7 +86,6 @@
     "issue_priority.py:priority_of",
     "issue_status.py:_key",
     "lexical_guard.py:_blank",
-    "lexical_guard.py:ask_note",
     "lexical_guard.py:strip_code",
     "llm-quota:_bucket",
     "llm-quota:kimi_plan",
