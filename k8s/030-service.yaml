@@ -13,4 +13,4 @@ spec:
       targetPort: 18790
       name: bridge
   selector:
-    app: openclaw
+    app: claw-code
