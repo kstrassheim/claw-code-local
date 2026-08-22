@@ -724,7 +724,7 @@ jobs:
           PROJECTS_ALLOWED_BOOTSTRAP:      ${{ secrets.PROJECTS_ALLOWED_BOOTSTRAP }}
         run: |
           kubectl create secret generic claw-code-secrets \
-            --namespace claw-code-local \
+            --namespace claw-code \
             --dry-run=client \
             --from-literal=MISTRAL_API_KEY="$MISTRAL_API_KEY" \
             --from-literal=MINIMAX_API_KEY="$MINIMAX_API_KEY" \

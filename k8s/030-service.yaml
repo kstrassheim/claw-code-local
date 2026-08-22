@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: claw-code
-  namespace: claw-code-local
+  namespace: claw-code
 spec:
   type: ClusterIP
   ports:

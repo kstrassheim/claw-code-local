@@ -13,7 +13,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: claw-code-skill-developer
-  namespace: claw-code-local
+  namespace: claw-code
 data:
   SKILL.md: |
     ---
@@ -24,7 +24,7 @@ data:
 
     # developer — control the autonomous developer (issue-fixer)
 
-    A CronJob `issue-watcher` (namespace `claw-code-local`) ticks every
+    A CronJob `issue-watcher` (namespace `claw-code`) ticks every
     5 minutes. On each tick it lists open GitHub issues assigned to
     this bot account, then **spawns an `openclaw agent --local`
     subprocess inside this very pod**, one per (repo, issue), against
@@ -50,7 +50,7 @@ data:
     ### status
 
     ```
-    kubectl -n claw-code-local get cronjob issue-watcher \
+    kubectl -n claw-code get cronjob issue-watcher \
       -o jsonpath='suspended={.spec.suspend}{"\n"}schedule={.spec.schedule}{"\n"}lastSchedule={.status.lastScheduleTime}{"\n"}lastSuccess={.status.lastSuccessfulTime}{"\n"}'
     ```
 
@@ -60,7 +60,7 @@ data:
     ### start
 
     ```
-    kubectl -n claw-code-local patch cronjob issue-watcher \
+    kubectl -n claw-code patch cronjob issue-watcher \
       -p '{"spec":{"suspend":false}}'
     ```
 
@@ -73,7 +73,7 @@ data:
     on "stop" is "stop coding work right now", not "block new ticks".
 
     ```
-    kubectl -n claw-code-local patch cronjob issue-watcher \
+    kubectl -n claw-code patch cronjob issue-watcher \
       -p '{"spec":{"suspend":true}}'
     pkill -f 'openclaw agent --local' || true
     rm -rf $HOME/.openclaw/.fixer-locks/* 2>/dev/null
@@ -514,16 +514,16 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: issue-watcher
-  namespace: claw-code-local
+  namespace: claw-code
 ---
-# RBAC for the watcher CronJob's SA. Scoped to claw-code-local; only
+# RBAC for the watcher CronJob's SA. Scoped to claw-code; only
 # pod/exec into the openclaw deployment's pods (the planner and the
 # spawner both `kubectl exec` there).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: issue-watcher
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -536,11 +536,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: issue-watcher
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: issue-watcher
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -554,7 +554,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: issue-watcher-control
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
@@ -565,11 +565,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: issue-watcher-control
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: claw-code
-    namespace: claw-code-local
+    namespace: claw-code
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -579,7 +579,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: issue-watcher
-  namespace: claw-code-local
+  namespace: claw-code
   labels:
     app: issue-watcher
 spec:

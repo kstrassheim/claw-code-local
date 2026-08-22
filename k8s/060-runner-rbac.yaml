@@ -7,7 +7,7 @@
 #
 # Why a separate file (and not inlined in 020-deployment.yaml): the
 # runner pod's ServiceAccount lives in the `arc-runners` namespace, but
-# the Role+Binding live here in `claw-code-local` (Role authority is
+# the Role+Binding live here in `claw-code` (Role authority is
 # always namespace-local — the RoleBinding just references a subject
 # from elsewhere).
 #
@@ -19,7 +19,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: arc-runner-secrets-writer
-  namespace: claw-code-local
+  namespace: claw-code
 rules:
   # `resourceNames` does not constrain `create` — names are decided
   # at request time, so K8s RBAC can't scope create-by-name. Split
@@ -40,7 +40,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: arc-runner-secrets-writer
-  namespace: claw-code-local
+  namespace: claw-code
 subjects:
   - kind: ServiceAccount
     name: arc-runner-scale-claw-code-local-gha-rs-no-permission
