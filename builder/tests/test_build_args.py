@@ -54,7 +54,14 @@ def passed_args(path: str) -> set[str]:
     # The array form's value is not always a bare ${NAME}: BASE_IMAGE carries a
     # literal prefix. Match the NAME and ignore whatever it is set to.
     array = set(re.findall(r'^\s+"([A-Z_][A-Z0-9_]*)=[^"]*"', text, re.M))
-    return inline | array
+    # And the third spelling: docker/build-push-action's `build-args:` block,
+    # one unquoted NAME=value per line. A workflow using it satisfies the same
+    # invariant, and a check that only recognised the other two would report a
+    # build passing every argument as passing none.
+    block = set()
+    for m in re.finditer(r'^(\s+)build-args: \|\n((?:\1  .*\n)+)', text, re.M):
+        block |= set(re.findall(r'^\s*([A-Z_][A-Z0-9_]*)=', m.group(2), re.M))
+    return inline | array | block
 
 
 def pinned() -> set[str]:
