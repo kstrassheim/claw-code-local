@@ -70,6 +70,7 @@ Env:
   GITHUB_TOKEN / GITHUB_API (or GITHUB_API_URL) — GitHub credentials & base
   GITLAB_API_TOKEN / GITLAB_URL                 — GitLab credentials & base
   GITEA_API_TOKEN / GITEA_URL                   — Gitea credentials & base
+  AZDO_API_TOKEN / AZDO_ORG (or AZDO_ORG_URL)   — Azure DevOps PAT & org
 """
 
 from __future__ import annotations
@@ -96,6 +97,7 @@ REVOKED = "revoked"
 GITHUB = "github"
 GITLAB = "gitlab"
 GITEA = "gitea"
+AZDO = "azdo"
 
 
 class ForgeError(RuntimeError):
@@ -627,6 +629,7 @@ class Forges:
 # Re-exported so `forge.GitHubForge` keeps working for every caller and every
 # test — the seam is the module name, not the file layout.
 
+from forge_azdo import AzureDevOpsForge  # noqa: E402,F401
 from forge_gitea import GiteaForge  # noqa: E402,F401
 from forge_github import GitHubForge, _repo_from_api_url  # noqa: E402,F401
 from forge_gitlab import GitLabForge, _project_from_web_url  # noqa: E402,F401
@@ -656,4 +659,15 @@ def configured(env=None) -> Forges:
     gitea_token = env.get("GITEA_API_TOKEN", "")
     if gitea_url and gitea_token:
         out.append(GiteaForge(gitea_url, gitea_token))
+    # Either spelling of the organisation. AZDO_ORG is the bare name, which
+    # is what the CLI and the MCP server take as an argument; AZDO_ORG_URL is
+    # the full base, kept for anything that needs to point elsewhere. Giving
+    # the name is enough for all three, so a deployment sets ONE value.
+    azdo_url = (env.get("AZDO_ORG_URL", "") or "").rstrip("/")
+    if not azdo_url:
+        org = (env.get("AZDO_ORG", "") or "").strip().strip("/")
+        azdo_url = f"https://dev.azure.com/{org}" if org else ""
+    azdo_token = env.get("AZDO_API_TOKEN", "")
+    if azdo_url and azdo_token:
+        out.append(AzureDevOpsForge(azdo_url, azdo_token))
     return Forges(out)

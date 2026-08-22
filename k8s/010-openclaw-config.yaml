@@ -118,6 +118,10 @@ data:
               "GITEA_ACCESS_TOKEN": "${GITEA_API_TOKEN}"
             }
           },
+          "azuredevops": {
+            "command": "mcp-server-azuredevops",
+            "args": ["${AZDO_ORG}", "--authentication", "azcli"]
+          },
           "k8s": {
             "command": "node",
             "args": ["/opt/k8s-mcp/k8s-mcp.mjs"]

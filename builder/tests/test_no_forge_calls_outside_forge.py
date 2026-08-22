@@ -54,7 +54,7 @@ PATHS = re.compile(
 # purpose — a new file that speaks REST should be a deliberate entry here,
 # which is the guarantee the single filename used to give.
 IMPLEMENTATIONS = {"forge.py", "forge_github.py", "forge_gitlab.py",
-                   "forge_gitea.py", "forge-cli"}
+                   "forge_gitea.py", "forge_azdo.py", "forge-cli"}
 
 # ---------------------------------------------------------------------------
 # NOT CONVERTED YET. Delete an entry when its file stops speaking REST — the

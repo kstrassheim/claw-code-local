@@ -42,6 +42,11 @@ GITLAB_MCP_VERSION=0.7.0
 # for each and installs them. Assets are published on gitea.com, arm64.
 TEA_VERSION=0.15.1
 GITEA_MCP_VERSION=1.6.0
+# Azure DevOps: the official MCP server (npm) and the `azure-devops`
+# extension for the Azure CLI already in this image. The extension has
+# no independent pin — `az extension add` resolves against the installed
+# az, which is why only the MCP is listed here.
+AZDO_MCP_VERSION=2.9.0
 TERRAFORM_VERSION=1.13.0
 TERRAFORM_MCP_VERSION=0.5.2
 # OpenTofu: the fork of Terraform under the Linux Foundation, and the registry

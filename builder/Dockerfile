@@ -146,6 +146,16 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && /usr/local/bin/tea --version
 
+# Azure DevOps: the `az devops` CLI extension and the official MCP server.
+# The extension rides on the azure-cli installed below rather than being its
+# own binary, so it has no version pin of its own. The MCP is npm and is
+# vendored at build time rather than resolved by npx at run time — a pod that
+# reaches the network on first use is a pod that fails when it cannot.
+ARG AZDO_MCP_VERSION
+USER root
+RUN npm install -g "@azure-devops/mcp@${AZDO_MCP_VERSION}" \
+ && npm cache clean --force
+
 # Baked-in .gitconfig: credential helper reads $GITHUB_TOKEN at git-runtime
 RUN install -d -o 1000 -g 1000 /home/node \
  && cat > /home/node/.gitconfig <<'GITCONFIG'
@@ -167,6 +177,7 @@ RUN apt-get update \
       > /etc/apt/sources.list.d/azure-cli.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends azure-cli python3-pyotp \
+ && az extension add --name azure-devops --only-show-errors \
  && apt-get purge -y --auto-remove apt-transport-https lsb-release gnupg \
  && rm -rf /var/lib/apt/lists/* \
  && /usr/bin/az --version | head -3
@@ -839,6 +850,7 @@ COPY --chmod=0644 forge.py              /usr/local/bin/forge.py
 COPY --chmod=0644 forge_github.py       /usr/local/bin/forge_github.py
 COPY --chmod=0644 forge_gitlab.py       /usr/local/bin/forge_gitlab.py
 COPY --chmod=0644 forge_gitea.py        /usr/local/bin/forge_gitea.py
+COPY --chmod=0644 forge_azdo.py         /usr/local/bin/forge_azdo.py
 COPY --chmod=0644 issue_status.py       /usr/local/bin/issue_status.py
 COPY --chmod=0644 issue_priority.py     /usr/local/bin/issue_priority.py
 COPY --chmod=0644 story_points.py       /usr/local/bin/story_points.py
