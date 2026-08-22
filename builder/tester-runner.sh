@@ -1300,7 +1300,40 @@ SUMMARY_FILE="$SUMMARIES_DIR/${REPO//\//__}-$HEAD_SHA.md"
   echo "Passes: SAST **$(_onoff "$SAST_ON")** · AI code review **$(_onoff "$CR_ON")** · $PENTEST_LINE"
   echo "Deploy checks: $DEPLOY_CHECKS"
   echo
-  if [ "${#CREATED_ISSUES[@]}" = "0" ]; then
+  # THE HEADLINE MUST NOT OUTRANK THE DEPLOY STATE.
+  #
+  # "no issues created" and "all tests passed" are not the same claim, and
+  # conflating them turned a broken environment into a green report. The pen
+  # test is SKIPPED when the deploy checks did not succeed — deliberately,
+  # since there is no verified deployment to scan — and the run then said
+  # "✅ all tests passed" and sent that to Telegram. Observed on
+  # ultimate-web-stack-dev: mongodb crash-looping and every web pod stuck on a
+  # missing secret for fourteen hours, while every tester run reported success.
+  #
+  # A failed deploy is the loudest fact the tester has. It says nothing about
+  # the code and everything about whether the code was ever RUN, so it leads.
+  if [ "$DEPLOY_CHECKS" = "failed" ]; then
+    echo "❌ **the deployment of this commit FAILED** — nothing was verified against a running system."
+    echo
+    echo "Whatever passed below was checked by reading the code, not by running it. The deployment itself is the finding: until it is fixed, a green line here means only that no NEW problem was found in the source."
+    if [ "${#CREATED_ISSUES[@]}" != "0" ]; then
+      echo
+      echo "🔍 ${#CREATED_ISSUES[@]} issue(s) created:"
+      printf '  - %s\n' "${CREATED_ISSUES[@]}"
+    fi
+  elif [ "$DEPLOY_CHECKS" != "green" ]; then
+    # pending / none / unknown. Not a failure, but not a pass either: the
+    # checks that need a running system did not run.
+    echo "⚠️ no verified deployment of this commit (deploy checks: $DEPLOY_CHECKS) — the checks that need a running system did not run."
+    if [ "${#CREATED_ISSUES[@]}" = "0" ]; then
+      echo
+      echo "No issues created from the passes that did run."
+    else
+      echo
+      echo "🔍 ${#CREATED_ISSUES[@]} issue(s) created:"
+      printf '  - %s\n' "${CREATED_ISSUES[@]}"
+    fi
+  elif [ "${#CREATED_ISSUES[@]}" = "0" ]; then
     echo "✅ all tests passed, no issues created"
   else
     echo "🔍 ${#CREATED_ISSUES[@]} issue(s) created:"

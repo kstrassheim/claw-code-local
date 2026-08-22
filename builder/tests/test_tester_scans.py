@@ -31,6 +31,7 @@ WHAT MUST NOT BE GOT WRONG
 
 import json
 import os
+import pathlib
 import shutil
 import unittest
 
@@ -206,6 +207,69 @@ class DeployChecksGate(_Blocks):
         state = self.state_for(None)
         self.assertNotEqual(state, "green")
         self.assertEqual(state, "pending")
+
+
+class TheHeadlineNeverOutranksTheDeploy(ShellTestCase):
+    """"No issues created" and "all tests passed" are different claims.
+
+    Conflating them turned a broken environment into a green report. The pen
+    test is SKIPPED when the deploy checks did not succeed — correctly, there
+    is nothing running to scan — and the summary then announced
+    "✅ all tests passed" and sent it to Telegram.
+
+    ultimate-web-stack-dev: mongodb crash-looping on a chown its init container
+    could not perform, and every web pod stuck on a missing `mongodb-credentials`
+    secret, for fourteen hours. Every tester run in that window reported
+    success, because no issue had been FILED.
+    """
+
+    def headline(self, deploy_checks, created=0):
+        """Run the summary's headline chain for one deploy state."""
+        import re as _re
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "tester-runner.sh").read_text()
+        start = src.index('  if [ "$DEPLOY_CHECKS" = "failed" ]; then')
+        end = src.index("} > \"$SUMMARY_FILE\"", start)
+        chain = src[start:end]
+        made = " ".join(f'"issue-{n}"' for n in range(created))
+        script = (f'DEPLOY_CHECKS={deploy_checks}\n'
+                  f'CREATED_ISSUES=({made})\n'
+                  "SKIPPED_DUPLICATES=0\n" + chain)
+        rc, out, err = self.sh(script)
+        self.assertEqual(rc, 0, out + err)
+        return out
+
+    def test_a_failed_deploy_is_never_reported_as_a_pass(self):
+        out = self.headline("failed")
+        self.assertNotIn("all tests passed", out)
+        self.assertIn("FAILED", out)
+
+    def test_a_failed_deploy_says_nothing_was_actually_run(self):
+        # The distinction that matters to a reader: the code was READ, not RUN.
+        out = self.headline("failed")
+        self.assertIn("not by running it", out)
+
+    def test_a_failed_deploy_still_lists_the_issues_it_did_file(self):
+        out = self.headline("failed", created=2)
+        self.assertIn("2 issue(s) created", out)
+
+    def test_pending_is_not_a_pass_either(self):
+        # Not a failure, but the checks that need a running system did not run,
+        # and a reader must not be told everything passed.
+        for state in ("pending", "none", "unknown"):
+            with self.subTest(state=state):
+                out = self.headline(state)
+                self.assertNotIn("all tests passed", out)
+                self.assertIn("no verified deployment", out)
+
+    def test_only_a_green_deploy_may_claim_a_pass(self):
+        out = self.headline("green")
+        self.assertIn("all tests passed", out)
+
+    def test_a_green_deploy_with_findings_lists_them(self):
+        out = self.headline("green", created=3)
+        self.assertNotIn("all tests passed", out)
+        self.assertIn("3 issue(s) created", out)
 
 
 class PentestTripleGate(_Blocks):
