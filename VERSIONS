@@ -54,7 +54,7 @@ TERRAFORM_MCP_VERSION=1.2.0
 # a project's state and lockfile are written by whichever binary made them,
 # and the bot works on repositories that have chosen either.
 OPENTOFU_VERSION=1.12.6
-OPENTOFU_MCP_VERSION=1.0.0
+OPENTOFU_MCP_VERSION=0.1.5
 CODE_SERVER_VERSION=4.133.0
 # mermaid-cli, the renderer behind `mermaid-render`. It drives a headless
 # browser, and puppeteer would fetch its OWN Chromium — the Dockerfile points
