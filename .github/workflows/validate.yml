@@ -171,7 +171,7 @@ jobs:
       - verify-skills-locked
     runs-on: arc-runner-scale-claw-code-local
     env:
-      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code
     steps:
       - name: Checkout
         uses: actions/checkout@v7

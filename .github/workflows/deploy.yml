@@ -102,7 +102,7 @@ jobs:
     needs: [publish-secrets, wait-for-verify]
     env:
       REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code
       OPENCLAW_REPO: https://github.com/openclaw/openclaw.git
     steps:
       - name: Checkout
@@ -314,7 +314,7 @@ jobs:
           import base64, json, os, ssl, urllib.error, urllib.request
 
           host = os.environ["REGISTRY"]
-          repo = "openclaw/claw-code-local"
+          repo = "openclaw/claw-code"
           keep_ref = os.environ["UPSTREAM_REF"]
           api = f"https://{host}/v2/{repo}"
           cred = base64.b64encode(
@@ -467,7 +467,7 @@ jobs:
     needs: [publish-secrets, wait-for-verify]
     env:
       REGISTRY: ${{ vars.OPENCLAW_REGISTRY_URL }}
-      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-local-cron
+      IMAGE_NAME: ${{ vars.OPENCLAW_REGISTRY_URL }}/openclaw/claw-code-cron
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -603,7 +603,7 @@ jobs:
             exit 0
           fi
 
-          CURRENT="$(yq -r '(.images[] | select(.name == "claw-code-local") | .newTag)' k8s/kustomization.yaml)"
+          CURRENT="$(yq -r '(.images[] | select(.name == "claw-code") | .newTag)' k8s/kustomization.yaml)"
           echo "pinned now: ${CURRENT}   this build: ${IMAGE_TAG}"
 
           if [ "$CURRENT" = "$IMAGE_TAG" ]; then
@@ -630,8 +630,8 @@ jobs:
           # into — the kind of skew that shows up as a puzzling ImportError at
           # 00:05 rather than as a failed deploy.
           yq -i \
-            "(.images[] | select(.name == \"claw-code-local\") | .newTag) = \"${IMAGE_TAG}\" |
-             (.images[] | select(.name == \"claw-code-local-cron\") | .newTag) = \"${IMAGE_TAG}\"" \
+            "(.images[] | select(.name == \"claw-code\") | .newTag) = \"${IMAGE_TAG}\" |
+             (.images[] | select(.name == \"claw-code-cron\") | .newTag) = \"${IMAGE_TAG}\"" \
             k8s/kustomization.yaml
 
           git add k8s/kustomization.yaml
@@ -639,7 +639,7 @@ jobs:
             echo "no kustomization tag change"
             exit 0
           fi
-          git commit -m "chore: pin claw-code-local images to ${IMAGE_TAG}"
+          git commit -m "chore: pin claw-code images to ${IMAGE_TAG}"
           # Another run may still have pushed between the rebase and here.
           if ! git push; then
             echo "::warning::push raced with another run — the next deploy reapplies the pin"

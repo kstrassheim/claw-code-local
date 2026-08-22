@@ -31,12 +31,12 @@ resources:
 # OPENCLAW_VERSION in /VERSIONS — the deploy workflow rewrites this entry
 # after a successful image push.
 images:
-  - name: claw-code-local
-    newName: mainpi.local:30500/openclaw/claw-code-local
+  - name: claw-code
+    newName: mainpi.local:30500/openclaw/claw-code
     newTag: v2026.7.1-2.22
   # The CronJobs run an orchestrator, not an agent: a stdlib-only planner and
   # some kubectl. Same tag as the image above and pinned in the same commit —
   # they share their scripts, so the pair must not drift.
-  - name: claw-code-local-cron
-    newName: mainpi.local:30500/openclaw/claw-code-local-cron
+  - name: claw-code-cron
+    newName: mainpi.local:30500/openclaw/claw-code-cron
     newTag: v2026.7.1-2.22
