@@ -237,6 +237,21 @@ class FakeForge(forge.Forge):
         self._maybe_raise("review_verdicts")
         return list(self.verdicts.get(number, []))
 
+    def close_change_request(self, repo: str, number: int) -> bool:
+        self._maybe_raise("close_change_request")
+        cr = self.change_requests.setdefault(number, {"number": number})
+        cr["state"] = "closed"
+        return self._record("close-change-request", repo, number, None)
+
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        self._maybe_raise("delete_branch")
+        # The real forges refuse the default branch themselves; the fake has
+        # to as well, or a test would pass against a guard that is not there.
+        if not branch or branch == self.default_branch_head(repo)[0]:
+            return False
+        self.branches.pop(branch, None)
+        return self._record("delete-branch", repo, 0, branch)
+
     def merge(self, repo: str, number: int, squash: bool = True,
               delete_branch: bool = True) -> bool:
         return self._record("merge", repo, number,

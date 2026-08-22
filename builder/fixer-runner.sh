@@ -674,6 +674,16 @@ head_sha_of_pr() {
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('headSha') or '')" 2>/dev/null
 }
 
+# The BRANCH a change request is built on, which is what has to be deleted
+# once the change request is abandoned. Read from the change request rather
+# than assumed from the issue number: a human may have opened it from a branch
+# named anything at all, and deleting a branch guessed from a convention is
+# how the wrong branch gets deleted.
+head_ref_of_pr() {
+  "${FORGE[@]}" change-request --number "$1" 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('headRef') or '')" 2>/dev/null
+}
+
 ci_fingerprint_for_pr() {
   local pr_num="$1"
   local head_sha
@@ -932,10 +942,57 @@ if want in issue_status.TERMINAL:
   if "${FORGE[@]}" close-issue --number "$ISSUE_NUM" "--$intent" >/dev/null 2>&1; then
     echo "[status] closed #$ISSUE_NUM as $1 ($intent)"
     ISSUE_STATE=closed
+    [ "$intent" = "revoked" ] && abandon_open_change_requests
     return 0
   fi
   echo "[status] WARNING: could not close #$ISSUE_NUM"
   return 1
+}
+
+# The issue was CALLED OFF, so the work opened for it is not going to land.
+#
+# Only on `revoked`, never on `delivered`: a delivered issue was closed BY its
+# merge, and its branch is already gone through `merge(delete_branch=True)`.
+# A revoked one leaves an open change request nobody will ever merge and a
+# branch nobody will ever touch — which is what happened on
+# k8s-ultimate-web-stack#93, where the issue was closed by hand and a person
+# had to be told to check for leftovers because the bot could not.
+#
+# Order matters and is not arbitrary: close the change request FIRST, then
+# delete the branch. Deleting first would close it as an unreachable diff and
+# lose the review history's context. If the close fails, the branch stays —
+# an open change request pointing at a deleted branch is worse than either.
+#
+# The default branch is refused inside the forge, on both hosts, rather than
+# being trusted to any caller here.
+abandon_open_change_requests() {
+  local prs pr ref
+  prs="$("${FORGE[@]}" change-requests-for-issue --number "$ISSUE_NUM" 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+print(' '.join(str(n) for n in rows if isinstance(n, int)))
+" 2>/dev/null)"
+  [ -n "${prs:-}" ] || return 0
+  for pr in $prs; do
+    ref="$(head_ref_of_pr "$pr" 2>/dev/null)"
+    post_issue_comment "🚮 Closing $CR_NOUN #$pr without merging — #$ISSUE_NUM was closed as not-doing, so this work is not going to land." >/dev/null 2>&1 || true
+    if "${FORGE[@]}" close-change-request --number "$pr" >/dev/null 2>&1; then
+      echo "[abandon] closed $CR_NOUN #$pr (issue revoked)"
+    else
+      echo "[abandon] WARNING: could not close $CR_NOUN #$pr — leaving its branch alone"
+      continue
+    fi
+    [ -n "${ref:-}" ] || { echo "[abandon] no branch recorded for #$pr"; continue; }
+    if "${FORGE[@]}" delete-branch --branch "$ref" >/dev/null 2>&1; then
+      echo "[abandon] deleted branch '$ref'"
+    else
+      echo "[abandon] left branch '$ref' in place (refused or already gone)"
+    fi
+  done
 }
 
 # -- pull-request facts ------------------------------------------------

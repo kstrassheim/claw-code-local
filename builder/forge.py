@@ -373,6 +373,35 @@ class Forge(abc.ABC):
         """Security findings the host itself raised against a change."""
 
     @abc.abstractmethod
+    def close_change_request(self, repo: str, number: int) -> bool:
+        """Close a change request WITHOUT merging it.
+
+        The counterpart to `merge`, and until now the missing half: a change
+        request could only ever end by landing. Asked to abandon one — a
+        superseded approach, work called off, an issue closed as won't-do —
+        the bot had no verb for it and quietly did something else instead.
+
+        Abandoning is not deleting. The branch survives this call; removing it
+        is `delete_branch`, deliberately separate so that closing a change
+        request cannot destroy the only copy of the work as a side effect.
+        """
+
+    @abc.abstractmethod
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete a branch. Refuses the default branch, on every host.
+
+        Standalone, because until now a branch could only be removed as a
+        side effect of merging — so a change request that was abandoned rather
+        than landed left its branch behind forever.
+
+        IRREVERSIBLE in a way the rest of this interface is not: a closed
+        issue reopens and a closed change request reopens, but commits reachable
+        only from a deleted branch are gone. Implementations must refuse the
+        default branch rather than trusting the caller, and callers should
+        treat False as "it is still there" rather than retrying.
+        """
+
+    @abc.abstractmethod
     def change_request_files(self, repo: str, number: int) -> list[dict]:
         """What a change touches: [{path, added, removed, status}].
 
@@ -1010,6 +1039,30 @@ class GitHubForge(Forge):
             if ref:
                 self._write("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
         return True
+
+    def close_change_request(self, repo: str, number: int) -> bool:
+        """A pull request has no close REASON — only a state."""
+        return self._write("PATCH", f"/repos/{repo}/pulls/{number}",
+                           {"state": "closed"})
+
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete a ref, refusing the default branch.
+
+        The guard is here rather than in the caller because this is the layer
+        that knows which branch is default, and because a caller that got it
+        wrong would not get a second chance.
+        """
+        branch = str(branch or "").strip().lstrip("/")
+        if not branch:
+            return False
+        try:
+            if branch == (self.default_branch_head(repo) or ("", ""))[0]:
+                return False
+        except Exception:  # noqa: BLE001
+            # Cannot tell what the default is, so cannot promise this is not
+            # it. Refusing costs a branch that stays; guessing costs main.
+            return False
+        return self._write("DELETE", f"/repos/{repo}/git/refs/heads/{branch}")
 
     def security_findings(self, repo: str, number: int) -> list[dict]:
         try:
@@ -1703,6 +1756,33 @@ class GitLabForge(Forge):
             f"/projects/{self._project(repo)}/merge_requests/{number}/merge",
             {"squash": "true" if squash else "false",
              "should_remove_source_branch": "true" if delete_branch else "false"})
+
+    def close_change_request(self, repo: str, number: int) -> bool:
+        """`state_event` closes a merge request, as it closes an issue."""
+        return self._write(
+            "PUT",
+            f"/projects/{self._project(repo)}/merge_requests/{number}",
+            {"state_event": "close"})
+
+    def delete_branch(self, repo: str, branch: str) -> bool:
+        """Delete a branch, refusing the default one — see the GitHub twin.
+
+        Protected branches are refused by the host as well, which is a second
+        line rather than the first: this must not depend on somebody having
+        remembered to protect the branch.
+        """
+        branch = str(branch or "").strip().lstrip("/")
+        if not branch:
+            return False
+        try:
+            if branch == (self.default_branch_head(repo) or ("", ""))[0]:
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        return self._write(
+            "DELETE",
+            f"/projects/{self._project(repo)}/repository/branches/"
+            f"{urllib.parse.quote(branch, safe='')}")
 
     def security_findings(self, repo: str, number: int) -> list[dict]:
         raise NotImplementedError(
