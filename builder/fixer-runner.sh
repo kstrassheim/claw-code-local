@@ -1146,6 +1146,23 @@ request_self_review() { # $1 = pr number, $2 = head sha
   # list_reviewable_prs in reviewer-tick). Nothing has to be requested at all;
   # what follows is only the human-visible note and the per-sha marker that
   # keeps it to one comment per commit rather than one per tick.
+  #
+  # WHY THE NOTE LANDS LATE, AND WHY THAT IS RIGHT.
+  # It is posted here — inside the merge attempt — not when the pull request
+  # is opened, so it appears minutes after the PR and sometimes after the
+  # reviewer has already started. That reads like latency and is not.
+  #
+  # Reaching this line means every gate the SOLVER controls has said yes: the
+  # checks are green, there is no conflict, the PR is not a draft. So the note
+  # does not mean "please review", it means "the solver has finished with this
+  # pull request, the pipelines passed, and it is now waiting". Its PRESENCE
+  # carries all of that — a reader who sees it knows CI is green without
+  # opening the checks tab, and a PR without it is not ready to look at yet. Moving it to PR creation would destroy
+  # exactly that: at creation the solver may still be pushing commits, and a
+  # reader could no longer tell a finished PR from one still being worked.
+  #
+  # The reviewer does not need it either way — it finds the work by
+  # authorship. The note is for the person reading the pull request.
   [ -f "$AWAITING_REVIEW_MARKER" ] && requested="$(cat "$AWAITING_REVIEW_MARKER" 2>/dev/null)"
   if [ "$requested" = "$sha" ] && ! review_wait_expired; then
     echo "[review-gate] review of ${sha:0:8} already requested — waiting for the verdict"
