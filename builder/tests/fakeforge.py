@@ -237,6 +237,13 @@ class FakeForge(forge.Forge):
         self._maybe_raise("review_verdicts")
         return list(self.verdicts.get(number, []))
 
+    def post_change_request_comment(self, repo: str, number: int,
+                                    body: str) -> bool:
+        self._maybe_raise("post_change_request_comment")
+        self.change_request_notes.setdefault(number, []).append(
+            {"body": body, "author": {"username": self.identity}})
+        return self._record("comment-on-change-request", repo, number, body)
+
     def close_change_request(self, repo: str, number: int) -> bool:
         self._maybe_raise("close_change_request")
         cr = self.change_requests.setdefault(number, {"number": number})

@@ -219,7 +219,13 @@ CR_NOUN="$("${FORGE[@]}" noun 2>/dev/null || echo "change request")"
 post_pr_comment() { # $1 = body
   _bodyf="$(mktemp)"
   printf '%s' "$1" > "$_bodyf"
-  "${FORGE[@]}" comment --number "$PR_NUMBER" --body-file "$_bodyf"
+  # `comment-on-change-request`, NOT `comment`: the verdict belongs on the
+  # change request. On GitHub the two coincide because a pull request is an
+  # issue; on GitLab `comment` writes to /issues/<n>/notes, so this verdict
+  # would have landed on whatever issue happened to carry the merge request's
+  # iid — somebody else's work, and the solver would have waited forever for a
+  # verdict it could not see.
+  "${FORGE[@]}" comment-on-change-request --number "$PR_NUMBER" --body-file "$_bodyf"
   _rc=$?
   rm -f "$_bodyf"
   return $_rc
@@ -783,7 +789,7 @@ one, write the text to a file and hand the file over:
     cat > /tmp/verdict.md <<'EOF'
     <text>
     EOF
-    forge-cli --repo $REPO comment --number $PR_NUMBER --body-file /tmp/verdict.md
+    forge-cli --repo $REPO comment-on-change-request --number $PR_NUMBER --body-file /tmp/verdict.md
 
 Use a FILE, not an argument: your verdict quotes code, and backticks and
 \$(...) in an argument are executed by the shell before they ever reach the

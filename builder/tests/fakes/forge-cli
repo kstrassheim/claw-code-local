@@ -77,7 +77,8 @@ fi
 # No fixture. A write is fine; a read is not.
 case "$verb" in
   comment|add-labels|remove-label|ensure-label|close-issue|submit-review\
-  |request-review|unrequest-review|merge|react|comment-on-commit)
+  |request-review|unrequest-review|merge|react|comment-on-commit\
+  |comment-on-change-request|close-change-request|delete-branch)
     exit 0 ;;
 esac
 exit 1

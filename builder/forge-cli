@@ -115,6 +115,11 @@ def main(argv=None) -> int:
     g.add_argument("--delivered", action="store_true")
     g.add_argument("--revoked", action="store_true")
 
+    p = sub.add_parser("comment-on-change-request",
+                       help="say something on a change request, not the issue")
+    p.add_argument("--number", required=True, type=int)
+    p.add_argument("--body-file", required=True)
+
     p = sub.add_parser("close-change-request",
                        help="close a change request WITHOUT merging it")
     p.add_argument("--number", required=True, type=int)
@@ -261,6 +266,15 @@ def main(argv=None) -> int:
             ok = f.close_issue(args.repo, args.number, bool(args.delivered))
             if not ok:
                 _say(f"could not close {args.repo}#{args.number}")
+            return 0 if ok else 1
+
+        if args.verb == "comment-on-change-request":
+            with open(args.body_file, encoding="utf-8") as fh:
+                body = fh.read()
+            ok = f.post_change_request_comment(args.repo, args.number, body)
+            if not ok:
+                _say(f"could not comment on {args.repo} change request "
+                     f"#{args.number}")
             return 0 if ok else 1
 
         if args.verb == "close-change-request":

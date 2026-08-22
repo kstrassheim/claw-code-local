@@ -117,6 +117,16 @@ class ReviewWaitTtl(WaitBlock):
                    + "if review_gate 7; then echo MAY_MERGE; else echo HELD; fi\n")
         return self.sh(script)
 
+    def review_requests_posted(self):
+        """Review requests, counted ON THE CHANGE REQUEST.
+
+        Deliberately not `comments_posted`, which counts issue comments: the
+        request is posted where its VERDICT lands, and the verdict lands on
+        the change request and nowhere else. Counting issue comments here
+        would pass again the day somebody moved it back.
+        """
+        return self.asked("comment-on-change-request")
+
     def age_the_marker(self, seconds):
         path = os.path.join(self.home, "awaiting-review")
         old = time.time() - seconds
@@ -126,10 +136,10 @@ class ReviewWaitTtl(WaitBlock):
         # The baseline the TTL must not break: one comment per head sha, not
         # one per tick.
         self.request()
-        self.assertEqual(len(self.comments_posted()), 1)
+        self.assertEqual(len(self.review_requests_posted()), 1)
         rc, out, err = self.request()
         self.assertIn("already requested", out, out + err)
-        self.assertEqual(len(self.comments_posted()), 1)
+        self.assertEqual(len(self.review_requests_posted()), 1)
 
     def test_a_wait_older_than_the_ttl_is_asked_again(self):
         # THE DEADLOCK. A reviewer that crashed, was suspended mid-run, or
@@ -141,7 +151,7 @@ class ReviewWaitTtl(WaitBlock):
         self.age_the_marker(7201)
         rc, out, err = self.request()
         self.assertIn("pending for over", out, out + err)
-        self.assertEqual(len(self.comments_posted()), 2)
+        self.assertEqual(len(self.review_requests_posted()), 2)
 
     def test_the_ttl_is_overridable(self):
         self.request(ttl=60)
@@ -154,7 +164,7 @@ class ReviewWaitTtl(WaitBlock):
         self.age_the_marker(90)
         rc, out, _ = self.request(ttl=600)
         self.assertIn("already requested", out)
-        self.assertEqual(len(self.comments_posted()), 1)
+        self.assertEqual(len(self.review_requests_posted()), 1)
 
     def test_the_re_request_records_the_same_head_again(self):
         # Re-asking must leave the marker pointing at the head it is waiting

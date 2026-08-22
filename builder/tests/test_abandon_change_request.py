@@ -203,3 +203,77 @@ class TheCliExposesThem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommentsGoWhereTheyBelong(unittest.TestCase):
+    """A change request is not an issue, except on one host by accident.
+
+    GitHub models a pull request AS an issue, so `/issues/<pr>/comments` lands
+    on the pull request and the two calls coincide. On GitLab the same number
+    addresses an issue with that iid — a different item, usually somebody
+    else's work.
+
+    That coincidence hid a live bug: the reviewer posted its verdict with the
+    ISSUE comment verb and a pull-request number. Correct on GitHub, and on
+    GitLab it would have put the verdict on an unrelated issue while the
+    solver waited forever for one it could never see.
+    """
+
+    def setUp(self):
+        self.f = fakeforge.FakeForge(identity="bot")
+
+    def test_every_forge_can_comment_on_a_change_request(self):
+        for impl in (forge.GitHubForge, forge.GitLabForge, fakeforge.FakeForge):
+            self.assertTrue(
+                callable(getattr(impl, "post_change_request_comment", None)),
+                f"{impl.__name__} cannot comment on a change request")
+
+    def test_it_is_abstract_on_the_base(self):
+        self.assertTrue(
+            forge.Forge.post_change_request_comment.__isabstractmethod__)
+
+    def test_gitlab_uses_the_merge_request_notes_endpoint(self):
+        import inspect
+        src = inspect.getsource(forge.GitLabForge.post_change_request_comment)
+        # The PATH only — the docstring names /issues/ to explain the trap.
+        path = [l for l in src.splitlines() if "f\"/projects/" in l]
+        self.assertTrue(path, "no request path found")
+        self.assertIn("merge_requests", path[0])
+        self.assertIn("/notes", path[0])
+        self.assertNotIn("/issues/", path[0],
+                         "this would put the note on an unrelated issue")
+
+    def test_github_uses_the_shared_issue_endpoint(self):
+        import inspect
+        src = inspect.getsource(forge.GitHubForge.post_change_request_comment)
+        self.assertIn("/issues/", src)
+        self.assertIn("/comments", src)
+
+    def test_the_note_lands_on_the_change_request(self):
+        self.f.post_change_request_comment("o/r", 7, "hello")
+        self.assertEqual(
+            [n["body"] for n in self.f.change_request_comments("o/r", 7)],
+            ["hello"])
+
+    def test_the_reviewer_posts_its_verdict_on_the_change_request(self):
+        import os
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "reviewer-runner.sh")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn('comment --number "$PR_NUMBER"', src,
+                         "the verdict uses the ISSUE verb with a PR number")
+        self.assertIn('comment-on-change-request --number "$PR_NUMBER"', src)
+
+    def test_the_review_request_is_posted_on_the_change_request(self):
+        import os
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "fixer-runner.sh")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        block = src.split("request_self_review() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("post_pr_comment", block,
+                      "the request must go where its verdict lands")
+        self.assertNotIn("post_issue_comment", block)

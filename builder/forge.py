@@ -373,6 +373,23 @@ class Forge(abc.ABC):
         """Security findings the host itself raised against a change."""
 
     @abc.abstractmethod
+    def post_change_request_comment(self, repo: str, number: int,
+                                    body: str) -> bool:
+        """Say something ON THE CHANGE REQUEST, not on the issue behind it.
+
+        NOT the same call as `post_comment`, however much it looks like it on
+        one host. GitHub models a pull request as an issue, so commenting on
+        `/issues/<pr>/comments` happens to land on the pull request — and that
+        coincidence hid the bug: on GitLab the same number addresses an
+        ISSUE with that iid, which is a different item entirely and usually
+        somebody else's work.
+
+        Anything a person reads next to the diff belongs here: a review
+        verdict, a note about what the bot is waiting for. Anything about the
+        WORK ITEM belongs on the issue.
+        """
+
+    @abc.abstractmethod
     def close_change_request(self, repo: str, number: int) -> bool:
         """Close a change request WITHOUT merging it.
 
@@ -1039,6 +1056,16 @@ class GitHubForge(Forge):
             if ref:
                 self._write("DELETE", f"/repos/{repo}/git/refs/heads/{ref}")
         return True
+
+    def post_change_request_comment(self, repo: str, number: int,
+                                    body: str) -> bool:
+        """A pull request IS an issue here, and shares its comment endpoint.
+
+        Written out rather than delegated to `post_comment` so the two stay
+        independently readable: they are the same call only on this host.
+        """
+        return self._write("POST", f"/repos/{repo}/issues/{number}/comments",
+                           {"body": body})
 
     def close_change_request(self, repo: str, number: int) -> bool:
         """A pull request has no close REASON — only a state."""
@@ -1756,6 +1783,19 @@ class GitLabForge(Forge):
             f"/projects/{self._project(repo)}/merge_requests/{number}/merge",
             {"squash": "true" if squash else "false",
              "should_remove_source_branch": "true" if delete_branch else "false"})
+
+    def post_change_request_comment(self, repo: str, number: int,
+                                    body: str) -> bool:
+        """Merge request notes are their OWN endpoint here.
+
+        `post_comment` writes to `/issues/<n>/notes`; handing it a merge
+        request number would put the note on whatever issue happens to carry
+        that iid.
+        """
+        return self._write(
+            "POST",
+            f"/projects/{self._project(repo)}/merge_requests/{number}/notes",
+            {"body": body})
 
     def close_change_request(self, repo: str, number: int) -> bool:
         """`state_event` closes a merge request, as it closes an issue."""

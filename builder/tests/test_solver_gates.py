@@ -493,18 +493,22 @@ class ReviewGate(RunnerBlock):
         # requested-reviewer: GitHub refuses to add a pull request's author as
         # its own reviewer (422), and this bot authors every pull request it
         # opens — so the reviewer finds the work by authorship instead. What
-        # must still happen is that the ask is visible on the issue and the
-        # sha it was made for is recorded.
+        # must still happen is that the ask is visible ON THE CHANGE REQUEST —
+        # where its verdict lands — and the sha it was made for is recorded.
         rc, out, err = self.gate()
         self.assertIn("HELD", out, out + err)
-        self.assertTrue(self.asked("comment"), self.requests())
+        self.assertTrue(self.asked("comment-on-change-request"),
+                        self.requests())
+        self.assertEqual(self.asked("comment"), [],
+                         "the request belongs on the change request, not the "
+                         "issue — its answer is posted nowhere else")
         self.assertEqual(self.state("awaiting-review"), self.HEAD)
 
     def test_the_request_is_posted_once_per_head_not_once_per_tick(self):
         self.gate()
-        first = len(self.asked("comment"))
+        first = len(self.asked("comment-on-change-request"))
         self.gate()
-        second = len(self.asked("comment"))
+        second = len(self.asked("comment-on-change-request"))
         self.assertEqual(first, 1)
         self.assertEqual(second, 1, "asked again for the same head")
 

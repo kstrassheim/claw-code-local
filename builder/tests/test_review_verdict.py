@@ -74,7 +74,9 @@ class VerdictBlock(ShellTestCase):
         method ever did.
         """
         return [r for r in self.requests()
-                if r.split()[0].split("_")[0] in ("comment", "submit-review")]
+                if r.split()[0].split("_")[0] in ("comment",
+                                                  "comment-on-change-request",
+                                                  "submit-review")]
 
     def run_verdict(self, summary=None):
         if summary is not None:
@@ -156,8 +158,9 @@ class VerdictBlock(ShellTestCase):
             "RESULT: changes required — 2 finding(s)\n\n1. a thing\n")
         self.assertEqual(rc, 0, out + err)
         self.assertIn("REACHED_END", out)
-        self.assertTrue(any(p.startswith("comment") for p in self.posts()),
-                        self.posts())
+        self.assertTrue(
+            any(p.startswith("comment-on-change-request") for p in self.posts()),
+            self.posts())
         self.assertTrue(any(p.startswith("submit-review") for p in self.posts()),
                         self.posts())
         self.assertIn("changes requested", out)
@@ -186,7 +189,10 @@ class VerdictBlock(ShellTestCase):
         # The write itself is refused, which is what "the verdict is not
         # visible" actually looks like: a read with no fixture would only
         # starve the lookup, not the posting.
-        self.env["FAKE_FORGE_FAIL"] = "comment"
+        # The verdict goes on the CHANGE REQUEST, so that is the write to
+        # refuse. `comment` is the issue verb and refusing it here would
+        # prove nothing.
+        self.env["FAKE_FORGE_FAIL"] = "comment-on-change-request"
         rc, out, err = self.run_verdict("RESULT: approved\n\nall good\n")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("INCOMPLETE", out)

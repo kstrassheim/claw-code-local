@@ -867,6 +867,22 @@ post_issue_comment() { # $1 = body
   return $_rc
 }
 
+# Say something ON THE PULL REQUEST. A different call from
+# `post_issue_comment`, not a variant of it: GitHub models a pull request as
+# an issue and the two happen to coincide there, while on GitLab the same
+# number addresses an unrelated issue. The forge keeps them apart; this must
+# too.
+post_pr_comment() { # $1 = pr number, $2 = body
+  local _bodyf _rc
+  _bodyf="$(mktemp)"
+  printf '%s' "$2" > "$_bodyf"
+  "${FORGE[@]}" comment-on-change-request --number "$1" --body-file "$_bodyf" \
+    >/dev/null 2>&1
+  _rc=$?
+  rm -f "$_bodyf"
+  return $_rc
+}
+
 # Move the issue to a NON-TERMINAL status. Refuses on a closed issue.
 #
 # That refusal is the important half. GitHub reopens a closed issue as a side
@@ -1140,8 +1156,15 @@ request_self_review() { # $1 = pr number, $2 = head sha
     # ask again rather than wait on a promise nobody is left to keep.
     echo "[review-gate] the review of ${sha:0:8} has been pending for over ${REVIEW_WAIT_TTL}s — asking again"
   fi
-  post_issue_comment "🔎 Requested an autonomous review of \`${sha:0:8}\` on PR #$pr — the reviewer runs the app locally, checks the acceptance criteria and scans the change. I merge only after its ✅." \
-    && echo "[review-gate] posted the review request for ${sha:0:8}" \
+  # ON THE PULL REQUEST, where its ANSWER lands. The verdict is posted to the
+  # pull request and nowhere else (reviewer-runner: "Verdict lands ON THE PULL
+  # REQUEST only"), so putting the request on the issue split a question from
+  # its answer: the pull request showed a verdict nobody had asked for, and
+  # the issue showed a request nothing ever answered. Asked twice where the
+  # request was, which is the clearest evidence there is about where people
+  # look for it.
+  post_pr_comment "$pr" "🔎 Requested an autonomous review of \`${sha:0:8}\` — the reviewer runs the app locally, checks the acceptance criteria and scans the change. I merge only after its ✅." \
+    && echo "[review-gate] posted the review request for ${sha:0:8} on PR #$pr" \
     || echo "[review-gate] WARNING: failed to post the review request"
   printf '%s' "$sha" > "$AWAITING_REVIEW_MARKER"
 }
