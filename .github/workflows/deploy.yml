@@ -128,6 +128,7 @@ jobs:
           echo "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}" >> "$GITHUB_ENV"
           echo "TEA_VERSION=${TEA_VERSION}" >> "$GITHUB_ENV"
           echo "GITEA_MCP_VERSION=${GITEA_MCP_VERSION}" >> "$GITHUB_ENV"
+          echo "AZDO_MCP_VERSION=${AZDO_MCP_VERSION}" >> "$GITHUB_ENV"
           echo "TERRAFORM_VERSION=${TERRAFORM_VERSION}" >> "$GITHUB_ENV"
           echo "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}" >> "$GITHUB_ENV"
           echo "OPENTOFU_VERSION=${OPENTOFU_VERSION}" >> "$GITHUB_ENV"
@@ -399,6 +400,7 @@ jobs:
             "GITLAB_MCP_VERSION=${GITLAB_MCP_VERSION}"
             "TEA_VERSION=${TEA_VERSION}"
             "GITEA_MCP_VERSION=${GITEA_MCP_VERSION}"
+            "AZDO_MCP_VERSION=${AZDO_MCP_VERSION}"
             "TERRAFORM_VERSION=${TERRAFORM_VERSION}"
             "TERRAFORM_MCP_VERSION=${TERRAFORM_MCP_VERSION}"
             "OPENTOFU_VERSION=${OPENTOFU_VERSION}"
@@ -703,6 +705,11 @@ jobs:
           # set neither and nothing changes. Half a set is not a host.
           GITEA_URL:                       ${{ secrets.GITEA_URL }}
           GITEA_API_TOKEN:                 ${{ secrets.GITEA_API_TOKEN }}
+          # Azure DevOps: the bare organisation NAME, because that is what
+          # the CLI and the MCP server take as an argument. The forge builds
+          # https://dev.azure.com/<org> from it, so one value serves all three.
+          AZDO_ORG:                        ${{ secrets.AZDO_ORG }}
+          AZDO_API_TOKEN:                  ${{ secrets.AZDO_API_TOKEN }}
           TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
           # Comma-separated LAN hostnames the tester's browser plugin may
           # reach (private-network deploy URLs). Not a credential, but kept
@@ -737,6 +744,8 @@ jobs:
             --from-literal=GITLAB_LOCAL_TOKEN="$GITLAB_LOCAL_TOKEN" \
             --from-literal=GITEA_URL="$GITEA_URL" \
             --from-literal=GITEA_API_TOKEN="$GITEA_API_TOKEN" \
+            --from-literal=AZDO_ORG="$AZDO_ORG" \
+            --from-literal=AZDO_API_TOKEN="$AZDO_API_TOKEN" \
             --from-literal=TESTER_ALLOWED_HOSTNAMES="$TESTER_ALLOWED_HOSTNAMES" \
             --from-literal=INTERNAL_CA_CERT="$INTERNAL_CA_CERT" \
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \

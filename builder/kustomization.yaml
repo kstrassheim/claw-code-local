@@ -49,6 +49,7 @@ configMapGenerator:
       - forge_github.py=forge_github.py
       - forge_gitlab.py=forge_gitlab.py
       - forge_gitea.py=forge_gitea.py
+      - forge_azdo.py=forge_azdo.py
       - issue_priority.py=issue_priority.py
       - issue_status.py=issue_status.py
       - lexical_guard.py=lexical_guard.py
@@ -100,6 +101,7 @@ configMapGenerator:
       - tools-md/ORDER
       - tools-md/TOOLS-alicloud.md
       - tools-md/TOOLS-argocd.md
+      - tools-md/TOOLS-azuredevops.md
       - tools-md/TOOLS-aws.md
       - tools-md/TOOLS-debug.md
       - tools-md/TOOLS-entra.md

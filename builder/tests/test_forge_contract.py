@@ -29,6 +29,7 @@ import unittest
 from harness import load  # noqa: F401 - puts builder/ on sys.path
 
 import forge  # noqa: E402
+import forge_azdo  # noqa: E402 - _short_ref is pinned directly
 from test_forge_github import FakeTransport  # noqa: E402
 
 GITEA_BASE = "https://gitea.example.invalid"
@@ -51,7 +52,21 @@ def gitlab(routes=None):
     return forge.GitLabForge(GITLAB_BASE, "token", transport=t), t
 
 
-ALL = (("gitea", gitea), ("github", github), ("gitlab", gitlab))
+AZDO_BASE = "https://dev.azure.com/acme"
+
+
+def azdo(routes=None):
+    t = FakeTransport(routes)
+    f = forge.AzureDevOpsForge(AZDO_BASE, "token", transport=t)
+    # Every Git call is addressed by repository GUID, so the index is primed
+    # rather than left to a live lookup in each test.
+    f._repos = {"proj/app": "11111111-1111-1111-1111-111111111111",
+                "11111111-1111-1111-1111-111111111111": "proj/app"}
+    return f, t
+
+
+ALL = (("gitea", gitea), ("github", github), ("gitlab", gitlab),
+       ("azdo", azdo))
 
 
 class EveryHostAnswersEveryQuestion(unittest.TestCase):
@@ -70,6 +85,18 @@ class EveryHostAnswersEveryQuestion(unittest.TestCase):
                     self.assertIsNot(
                         getattr(type(impl), name), getattr(forge.Forge, name),
                         f"{label} inherits {name} from the ABC")
+
+    def test_azure_devops_says_which_questions_it_cannot_answer(self):
+        impl, _ = azdo()
+        for call, needle in ((lambda: impl.security_findings("proj/app", 1),
+                              "code-scanning"),
+                             (lambda: impl.comment_on_commit("proj/app", "s", "x"),
+                              "commit-comment"),
+                             (lambda: impl.react("proj/app", 1, 2, "+1"),
+                              "reaction")):
+            with self.assertRaises(NotImplementedError) as caught:
+                call()
+            self.assertIn(needle, str(caught.exception))
 
     def test_a_host_that_cannot_answer_says_which_question(self):
         impl, _ = gitea()
@@ -509,6 +536,358 @@ class TheGiteaHelpersThatAddressingDependsOn(unittest.TestCase):
     def test_label_id_is_zero_rather_than_raising_when_labels_cannot_be_read(self):
         impl, _ = gitea({"/labels": forge.ForgeError("boom", code=500)})
         self.assertEqual(impl._label_id(REPO, "bug"), 0)
+
+
+class AzureDevOpsAsksTheDocumentedEndpoint(unittest.TestCase):
+    """Path, verb and body, against the published 7.1 REST specification.
+
+    Every expectation here was read out of the spec rather than remembered.
+    The traps below are each a silent failure: a wrong route 404s and a
+    missing api-version is rejected outright, and both reach a caller as
+    "there is nothing there".
+    """
+
+    def assert_called(self, transport, method, fragment):
+        for verb, url, _p, _j, _f in transport.calls:
+            if verb == method and fragment in url:
+                return
+        self.fail(f"no {method} to ...{fragment}; saw {transport.urls()}")
+
+    def test_every_request_carries_the_api_version(self):
+        # Not a default anyone may rely on — a call without it is rejected,
+        # and the message names the version rather than what was asked.
+        impl, t = azdo({"/pullrequests/7": {"pullRequestId": 7}})
+        impl.change_request("proj/app", 7)
+        impl.checks("proj/app", "abc")
+        impl.branch_head("proj/app", "main")
+        for _verb, _url, params, _j, _f in t.calls:
+            self.assertEqual(params.get("api-version"), "7.1")
+
+    def test_the_pat_is_basic_auth_with_an_empty_username(self):
+        # A bearer header 401s, which reads exactly like a bad token.
+        import base64
+        headers = forge.AzureDevOpsForge(AZDO_BASE, "secret")._headers()
+        self.assertEqual(headers["Authorization"],
+                         "Basic " + base64.b64encode(b":secret").decode())
+
+    def test_git_calls_address_the_repository_by_guid(self):
+        # A repository NAME is unique only inside its project; the GUID is
+        # the org-unique handle and the only thing these routes accept.
+        impl, t = azdo()
+        impl.change_request("proj/app", 7)
+        self.assert_called(
+            t, "GET",
+            "/proj/_apis/git/repositories/11111111-1111-1111-1111-111111111111"
+            "/pullrequests/7")
+
+    def test_an_unknown_repository_is_refused_rather_than_guessed(self):
+        impl, t = azdo()
+        self.assertEqual(impl.change_request("proj/missing", 7), {})
+        self.assertEqual(t.calls, [])
+
+    def test_reads(self):
+        R = "/proj/_apis/git/repositories/11111111-1111-1111-1111-111111111111"
+        for name, args, fragment in [
+                ("change_request", ("proj/app", 7), f"{R}/pullrequests/7"),
+                ("change_request_comments", ("proj/app", 7),
+                 f"{R}/pullRequests/7/threads"),
+                ("checks", ("proj/app", "abc"), f"{R}/commits/abc/statuses"),
+                ("review_verdicts", ("proj/app", 7), f"{R}/pullrequests/7"),
+                ("review_requests", ("proj/app", 7), f"{R}/pullrequests/7"),
+                ("branch_head", ("proj/app", "main"), f"{R}/refs"),
+                ("file_at_ref", ("proj/app", "a.txt", "abc"), f"{R}/items"),
+                ("recent_change_requests", ("proj/app",), f"{R}/pullrequests"),
+                ("issue", ("proj/app", 7), "/proj/_apis/wit/workitems/7"),
+                ("comments", ("proj/app", 7),
+                 "/proj/_apis/wit/workItems/7/comments")]:
+            impl, t = azdo()
+            with self.subTest(method=name):
+                getattr(impl, name)(*args)
+                self.assert_called(t, "GET", fragment)
+
+    def test_a_work_item_edit_is_a_json_patch(self):
+        # This endpoint rejects application/json outright, and the message
+        # names the media type rather than the field that was wrong.
+        impl, t = azdo()
+        impl.post_comment("proj/app", 7, "hello")
+        verb, url, _p, body, _f = t.calls[-1]
+        self.assertEqual(verb, "PATCH")
+        self.assertIn("/proj/_apis/wit/workitems/7", url)
+        self.assertEqual(body, [{"op": "add",
+                                 "path": "/fields/System.History",
+                                 "value": "hello"}])
+
+    def test_completing_a_pull_request_sends_the_head_it_read(self):
+        # lastMergeSourceCommit is required, and a stale one is refused
+        # rather than merging the wrong tree.
+        impl, t = azdo({"/pullrequests/7": {
+            "pullRequestId": 7, "status": "active",
+            "lastMergeSourceCommit": {"commitId": "deadbeef"}}})
+        self.assertTrue(impl.merge("proj/app", 7, squash=True))
+        body = t.calls[-1][3]
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["lastMergeSourceCommit"]["commitId"], "deadbeef")
+        self.assertEqual(body["completionOptions"]["mergeStrategy"], "squash")
+
+    def test_a_pull_request_with_no_head_is_not_merged(self):
+        impl, t = azdo({"/pullrequests/7": {"pullRequestId": 7}})
+        self.assertFalse(impl.merge("proj/app", 7))
+        self.assertEqual(t.urls("PATCH"), [])
+
+    def test_abandoning_is_not_completing(self):
+        impl, t = azdo()
+        impl.close_change_request("proj/app", 7)
+        self.assertEqual(t.calls[-1][3], {"status": "abandoned"})
+
+    def test_deleting_a_branch_is_an_update_to_an_all_zero_object(self):
+        guid = "11111111-1111-1111-1111-111111111111"
+        impl, t = azdo({f"/repositories/{guid}": {
+                            "defaultBranch": "refs/heads/main"},
+                        f"/repositories/{guid}/refs": {
+                            "value": [{"name": "refs/heads/topic",
+                                       "objectId": "cafe"}]}})
+        self.assertTrue(impl.delete_branch("proj/app", "topic"))
+        body = t.calls[-1][3]
+        self.assertEqual(body[0]["newObjectId"], "0" * 40)
+        self.assertEqual(body[0]["oldObjectId"], "cafe")
+
+    def test_the_default_branch_is_refused(self):
+        guid = "11111111-1111-1111-1111-111111111111"
+        impl, t = azdo({f"/repositories/{guid}": {
+                            "defaultBranch": "refs/heads/main"},
+                        f"/repositories/{guid}/refs": {
+                            "value": [{"name": "refs/heads/main",
+                                       "objectId": "cafe"}]}})
+        self.assertFalse(impl.delete_branch("proj/app", "main"))
+        self.assertEqual(t.urls("POST"), [])
+
+
+class AzureDevOpsSpeaksItsOwnVocabulary(unittest.TestCase):
+    """Work items are not issues, and a review is a number."""
+
+    def test_a_work_item_becomes_a_neutral_issue(self):
+        impl, _ = azdo({"/wit/workitems/7": {
+            "id": 7,
+            "fields": {"System.Title": "T",
+                       "System.Description": "B",
+                       "System.State": "Active",
+                       "System.Tags": "bug; ui",
+                       "System.CreatedBy": {"uniqueName": "ann"},
+                       "System.CreatedDate": "t0"}}})
+        got = impl.issue("proj/app", 7)
+        self.assertEqual(got["number"], 7)
+        self.assertEqual(got["title"], "T")
+        # System.Description is the body the destructive-wording guard reads.
+        self.assertEqual(got["body"], "B")
+        # Tags are ONE semicolon-joined string, not a list.
+        self.assertEqual(got["labels"], ["bug", "ui"])
+        self.assertEqual(got["state"], "open")
+        self.assertEqual(got["author"], "ann")
+        self.assertEqual(got["forge"], "azdo")
+        self.assertIs(got["isChangeRequest"], False)
+
+    def test_closed_is_decided_by_category_not_by_the_state_name(self):
+        # Agile closes to "Closed", Scrum to "Done", and a customised process
+        # can spell it anything. The category is the portable answer.
+        for category, state in (("Completed", "Shipped It"),
+                                ("Removed", "Nope")):
+            impl, _ = azdo({"/wit/workitems/7": {"id": 7, "fields": {
+                "System.State": state,
+                "System.StateCategory": category}}})
+            with self.subTest(category=category):
+                self.assertEqual(impl.issue("proj/app", 7)["state"], "closed")
+
+    def test_a_removed_work_item_reads_as_revoked_not_delivered(self):
+        impl, _ = azdo({"/wit/workitems/7": {"id": 7, "fields": {
+            "System.State": "Removed", "System.StateCategory": "Removed"}}})
+        self.assertEqual(impl.issue("proj/app", 7)["closedAs"], forge.REVOKED)
+        impl, _ = azdo({"/wit/workitems/7": {"id": 7, "fields": {
+            "System.State": "Closed", "System.StateCategory": "Completed"}}})
+        self.assertEqual(impl.issue("proj/app", 7)["closedAs"], forge.DELIVERED)
+
+    def test_completed_is_merged_and_abandoned_is_closed(self):
+        for status, expected in (("active", "open"),
+                                 ("completed", "merged"),
+                                 ("abandoned", "closed")):
+            impl, _ = azdo({"/pullrequests/7": {
+                "pullRequestId": 7, "status": status,
+                "sourceRefName": "refs/heads/topic",
+                "targetRefName": "refs/heads/main"}})
+            with self.subTest(status=status):
+                got = impl.change_request("proj/app", 7)
+                self.assertEqual(got["state"], expected)
+                # Refs are fully qualified here; callers want the short name.
+                self.assertEqual(got["headRef"], "topic")
+                self.assertEqual(got["baseRef"], "main")
+
+    def test_a_review_is_a_vote(self):
+        impl, _ = azdo({"/pullrequests/7": {"pullRequestId": 7, "reviewers": [
+            {"uniqueName": "a", "vote": 10},
+            {"uniqueName": "b", "vote": 5},
+            {"uniqueName": "c", "vote": -10},
+            {"uniqueName": "d", "vote": -5},
+            {"uniqueName": "e", "vote": 0}]}})
+        got = {v["author"]: v["verdict"] for v in
+               impl.review_verdicts("proj/app", 7)}
+        self.assertEqual(got["a"], "approved")
+        self.assertEqual(got["b"], "approved")
+        self.assertEqual(got["c"], "changes_requested")
+        self.assertEqual(got["d"], "changes_requested")
+        # 0 is "has not voted", which is not a verdict.
+        self.assertNotIn("e", got)
+
+    def test_the_status_reduction(self):
+        for state, expected in (("succeeded", forge.GREEN),
+                                ("failed", forge.FAILED),
+                                ("error", forge.FAILED),
+                                ("pending", forge.PENDING),
+                                ("notSet", forge.PENDING),
+                                ("invented", forge.PENDING)):
+            impl, _ = azdo({"/statuses": {"value": [
+                {"state": state, "context": {"genre": "ci", "name": "build"}}]}})
+            with self.subTest(state=state):
+                self.assertEqual(impl.checks_state("proj/app", "abc"), expected)
+
+    def test_not_applicable_is_dropped_rather_than_left_pending(self):
+        # It will never answer, so counting it as pending waits forever.
+        impl, _ = azdo({"/statuses": {"value": [
+            {"state": "notApplicable", "context": {"name": "skipped"}},
+            {"state": "succeeded", "context": {"name": "build"}}]}})
+        self.assertEqual(impl.checks(("proj/app"), "abc"),
+                         [{"name": "build", "state": forge.GREEN}])
+        self.assertEqual(impl.checks_state("proj/app", "abc"), forge.GREEN)
+
+    def test_no_statuses_at_all_is_none(self):
+        impl, _ = azdo({"/statuses": {"value": []}})
+        self.assertEqual(impl.checks_state("proj/app", "abc"), forge.NONE)
+
+
+class AWorkItemIsResolvedToARepository(unittest.TestCase):
+    """The mapping this host needs and no other one does.
+
+    A work item belongs to a PROJECT. Choosing the wrong repository would put
+    a solver to work on the wrong code, so a work item that cannot be placed
+    is skipped rather than guessed at.
+    """
+
+    def item(self, relations=None):
+        return {"id": 7, "fields": {"System.Title": "T"},
+                "relations": relations or []}
+
+    def test_a_git_artifact_link_names_the_repository(self):
+        impl, _ = azdo()
+        link = ("vstfs:///Git/PullRequestId/"
+                "22222222-2222-2222-2222-222222222222"
+                "%2F11111111-1111-1111-1111-111111111111%2F42")
+        self.assertEqual(
+            impl._repo_for_work_item(self.item([{"url": link}]), "proj"),
+            "proj/app")
+
+    def test_a_project_with_one_repository_is_unambiguous(self):
+        impl, _ = azdo()
+        self.assertEqual(impl._repo_for_work_item(self.item(), "proj"),
+                         "proj/app")
+
+    def test_a_project_with_several_repositories_is_skipped_not_guessed(self):
+        impl, _ = azdo()
+        impl._repos = {"proj/app": "a", "a": "proj/app",
+                       "proj/other": "b", "b": "proj/other"}
+        self.assertEqual(impl._repo_for_work_item(self.item(), "proj"), "")
+
+
+class TheAzureDevOpsHelpersAddressingDependsOn(unittest.TestCase):
+    """The small functions every other call on this host is built out of.
+
+    Pinned directly as well as through the public methods: an addressing bug
+    here does not raise, it builds a URL for somewhere else, and this host
+    answers 404 to a caller that reads 404 as "there is nothing there".
+    """
+
+    GUID = "11111111-1111-1111-1111-111111111111"
+
+    def test_split_keeps_the_organisation_out_of_the_repo_name(self):
+        # The org is configuration, so `repo` is two segments, not three.
+        self.assertEqual(forge.AzureDevOpsForge._split("proj/app"),
+                         ("proj", "app"))
+        self.assertEqual(forge.AzureDevOpsForge._split(""), ("", ""))
+
+    def test_repo_index_maps_both_directions(self):
+        impl, _ = azdo()
+        impl._repos = None
+        impl._transport = lambda *a, **k: {"value": [
+            {"id": self.GUID, "name": "app", "project": {"name": "proj"}}]}
+        index = impl._repo_index()
+        self.assertEqual(index["proj/app"], self.GUID)
+        self.assertEqual(index[self.GUID.lower()], "proj/app")
+
+    def test_repo_index_survives_a_listing_it_cannot_read(self):
+        impl, _ = azdo()
+        impl._repos = None
+        def boom(*a, **k):
+            raise forge.ForgeError("nope", code=500)
+        impl._transport = boom
+        self.assertEqual(impl._repo_index(), {})
+
+    def test_repo_id_and_git_path(self):
+        impl, _ = azdo()
+        self.assertEqual(impl._repo_id("proj/app"), self.GUID)
+        self.assertEqual(impl._repo_id("proj/nope"), "")
+        self.assertEqual(
+            impl._git("proj/app", "/pullrequests"),
+            f"/proj/_apis/git/repositories/{self.GUID}/pullrequests")
+        # An unknown repository yields no path at all, so no call is made.
+        self.assertEqual(impl._git("proj/nope"), "")
+
+    def test_projects_and_repos_in(self):
+        impl, _ = azdo()
+        impl._repos = {"proj/app": "a", "a": "proj/app",
+                       "proj/other": "b", "b": "proj/other",
+                       "two/x": "c", "c": "two/x"}
+        self.assertEqual(impl._projects(), ["proj", "two"])
+        self.assertEqual(impl._repos_in("proj"), ["proj/app", "proj/other"])
+
+    def test_tags_split_one_string_into_labels(self):
+        # Tags are a single semicolon-joined field, not a list.
+        self.assertEqual(
+            forge.AzureDevOpsForge._tags(
+                {"fields": {"System.Tags": "bug; ui ;; done"}}),
+            ["bug", "ui", "done"])
+        self.assertEqual(forge.AzureDevOpsForge._tags({}), [])
+
+    def test_short_ref_strips_the_qualification(self):
+        # Refs are fully qualified on this host; every caller wants the name.
+        short = forge_azdo._short_ref
+        self.assertEqual(short("refs/heads/topic"), "topic")
+        self.assertEqual(short("refs/tags/v1"), "v1")
+        self.assertEqual(short("topic"), "topic")
+        self.assertEqual(short(None), "")
+
+    def test_patch_fields_uses_the_json_patch_media_type(self):
+        impl, t = azdo()
+        self.assertTrue(impl._patch_fields("proj", 7, [{"op": "add"}]))
+        self.assertIn("/proj/_apis/wit/workitems/7", t.urls("PATCH")[0])
+
+    def test_work_items_asks_for_relations(self):
+        # Relations are not in the default projection, and they are what the
+        # work-item-to-repository mapping reads.
+        impl, t = azdo({"/wit/workitems": {"value": [{"id": 1}]}})
+        got = impl._work_items("proj", ["1"])
+        self.assertEqual(got, [{"id": 1}])
+        self.assertEqual(t.params_for("/wit/workitems")["$expand"], "relations")
+
+    def test_work_items_asks_for_nothing_when_there_are_no_ids(self):
+        impl, t = azdo()
+        self.assertEqual(impl._work_items("proj", []), [])
+        self.assertEqual(t.calls, [])
+
+    def test_reviewer_id_finds_an_identity_on_the_pull_request(self):
+        # Reviewers are addressed by identity GUID, and there is no lookup
+        # from an account name to one on this route.
+        impl, _ = azdo({"/pullrequests/7": {"reviewers": [
+            {"id": "abc", "uniqueName": "ann@example.com"}]}})
+        self.assertEqual(impl._reviewer_id("proj/app", 7, "ann@example.com"),
+                         "abc")
+        self.assertEqual(impl._reviewer_id("proj/app", 7, "nobody"), "")
 
 
 if __name__ == "__main__":
