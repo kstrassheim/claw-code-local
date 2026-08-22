@@ -474,6 +474,7 @@ The deploy workflow `kubectl apply`s every secret listed here as a
 | `TELEGRAM_BOT_TOKEN` | Telegram channel. Pair the bot with `openclaw pairing approve telegram <code>` after first start. |
 | `BOT_GITHUB_TOKEN` | Sealed as `GITHUB_TOKEN`; PAT the agent uses for git/gh operations. |
 | `GITLAB_TOKEN`, `GITLAB_LOCAL_TOKEN` | GitLab.com and self-hosted GitLab PATs. |
+| `GITEA_URL`, `GITEA_API_TOKEN` | Optional. Base URL and API token of a Gitea instance. Set **both** and Gitea joins the hosts the forge layer works, alongside GitHub and GitLab; set neither and nothing changes. Half a pair is not a host. |
 | `ENTRA_TENANT_ID`, `ENTRA_USERNAME`, `ENTRA_PASSWORD`, `ENTRA_TOTP_SEED` | Azure / Entra ID sign-in for the TOTP helper. |
 | `TESTER_ALLOWED_HOSTNAMES` | Optional. Comma-separated LAN hostnames the tester's browser plugin may navigate to (private-network deploy URLs). Injected into `browser.ssrfPolicy.allowedHostnames` at pod start; kept in the Secret so the internal DNS domain stays out of this public repo. |
 | `MOONSHOT_API_KEY` | Optional. Kimi Coding endpoint, the default model when present. |

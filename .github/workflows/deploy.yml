@@ -694,6 +694,11 @@ jobs:
           ENTRA_TOTP_SEED:                 ${{ secrets.ENTRA_TOTP_SEED }}
           GITLAB_TOKEN:                    ${{ secrets.GITLAB_TOKEN }}
           GITLAB_LOCAL_TOKEN:              ${{ secrets.GITLAB_LOCAL_TOKEN }}
+          # Optional, and optional in the sense the forge layer means it: set
+          # BOTH and Gitea becomes one of the hosts this deployment works;
+          # set neither and nothing changes. Half a set is not a host.
+          GITEA_URL:                       ${{ secrets.GITEA_URL }}
+          GITEA_API_TOKEN:                 ${{ secrets.GITEA_API_TOKEN }}
           TELEGRAM_BOT_TOKEN:              ${{ secrets.TELEGRAM_BOT_TOKEN }}
           # Comma-separated LAN hostnames the tester's browser plugin may
           # reach (private-network deploy URLs). Not a credential, but kept
@@ -726,6 +731,8 @@ jobs:
             --from-literal=ENTRA_TOTP_SEED="$ENTRA_TOTP_SEED" \
             --from-literal=GITLAB_TOKEN="$GITLAB_TOKEN" \
             --from-literal=GITLAB_LOCAL_TOKEN="$GITLAB_LOCAL_TOKEN" \
+            --from-literal=GITEA_URL="$GITEA_URL" \
+            --from-literal=GITEA_API_TOKEN="$GITEA_API_TOKEN" \
             --from-literal=TESTER_ALLOWED_HOSTNAMES="$TESTER_ALLOWED_HOSTNAMES" \
             --from-literal=INTERNAL_CA_CERT="$INTERNAL_CA_CERT" \
             --from-literal=OPENCLAW_UPSTREAM="$OPENCLAW_UPSTREAM" \
