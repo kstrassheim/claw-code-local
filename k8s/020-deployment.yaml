@@ -145,7 +145,7 @@ spec:
         # node still can't write to it after the regroup. Runs as root
         # in a busybox-style shell from the openclaw image; idempotent.
         - name: fix-perms
-          image: claw-code-local
+          image: claw-code
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -230,7 +230,7 @@ spec:
         # Runs as uid 1000 so the list it writes is owned by the account that
         # has to rewrite it later from chat.
         - name: seed-allowed-projects
-          image: claw-code-local
+          image: claw-code
           imagePullPolicy: Always
           securityContext:
             runAsUser: 1000
@@ -264,7 +264,7 @@ spec:
         # node if not, and writes the rendered result back into the live
         # claw-code-config ConfigMap.
         - name: render-config
-          image: claw-code-local
+          image: claw-code
           imagePullPolicy: Always
           command: ["/bin/sh", "/scripts/render-config.sh"]
           env:
@@ -319,7 +319,7 @@ spec:
               memory: 256Mi
       containers:
         - name: claw-code
-          image: claw-code-local
+          image: claw-code
           imagePullPolicy: Always
           ports:
             - containerPort: 18789

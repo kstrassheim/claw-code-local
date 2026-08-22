@@ -438,7 +438,7 @@ spec:
             - name: registry-pull-secret
           containers:
             - name: tester
-              image: claw-code-local-cron  # transformed by kustomize images: pin
+              image: claw-code-cron  # transformed by kustomize images: pin
               # NOT the agent image. This container finds the openclaw pod
               # and does the real work inside it with `kubectl exec`; what
               # runs here is one stdlib-only planner. See builder/cron/.
