@@ -384,6 +384,40 @@ data:
       echo "No existing openclaw.json on the PVC — writing rendered config as-is"
     fi
 
+    # Ensure the gateway has an auth token before the config is persisted.
+    #
+    # openclaw refuses to start without one and exits 78:
+    #
+    #     Refusing to bind gateway to lan without auth.
+    #
+    # gateway.auth is runtime state: the merge above carries it forward from an
+    # existing PVC, and openclaw generates it on first run. Neither happens on a
+    # FRESH PVC — there is nothing to carry forward, and openclaw exits before
+    # generating anything. So a replaced volume could never start a pod, which
+    # is exactly what the namespace move produced.
+    #
+    # Generated here rather than supplied from outside: this deployment has no
+    # OpenTofu state to hold one. Once written it is carried forward like any
+    # other runtime state, so it stays stable across restarts, and an existing
+    # token is never overwritten.
+    if command -v node >/dev/null 2>&1; then
+      node -e '
+        const fs = require("fs"), crypto = require("crypto");
+        const f = process.argv[1];
+        const c = JSON.parse(fs.readFileSync(f, "utf8"));
+        c.gateway = c.gateway || {};
+        if (c.gateway.auth && c.gateway.auth.token) {
+          console.log("gateway.auth.token already present — keeping it");
+        } else {
+          c.gateway.auth = {...(c.gateway.auth || {}), mode: "token", token: crypto.randomBytes(32).toString("hex")};
+          fs.writeFileSync(f, JSON.stringify(c, null, 2));
+          console.log("Generated a gateway.auth.token (none on the PVC yet)");
+        }
+      ' /tmp/openclaw.json
+    else
+      echo "WARN: node unavailable — cannot ensure gateway.auth.token; the gateway will refuse to bind"
+    fi
+
     cp /tmp/openclaw.json "$PERSISTENT_FILE"
     chmod 0600 "$PERSISTENT_FILE"
     echo "Wrote $PERSISTENT_FILE ($(wc -c < "$PERSISTENT_FILE") bytes)"
