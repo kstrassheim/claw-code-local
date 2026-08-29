@@ -597,54 +597,102 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if ! git pull --rebase origin main; then
-            git rebase --abort || true
-            echo "::warning::could not rebase onto main — leaving the pin alone; the next push reapplies it"
-            exit 0
-          fi
+          # A LOST RACE IS RETRIED. ANYTHING ELSE FAILS THE JOB.
+          #
+          # This used to treat EVERY failed push as a lost race, warn, and
+          # exit 0. It is not the same thing. A branch-protection rule
+          # rejecting the push —
+          #
+          #   remote: - Code scanning is waiting for results from CodeQL
+          #   ! [remote rejected] main -> main (push declined due to
+          #     repository rule violations)
+          #
+          # — is not a race, and no later run repairs it, because nothing
+          # else pushes to main. The pin sat two versions behind while every
+          # workflow reported success and the cluster ran an image older than
+          # the fix it was supposed to carry.
+          #
+          # So a genuine race is rebased and retried; a refusal fails loudly.
+          # Green has to mean the tag on main is the tag that was built.
+          attempt=0
+          attempts=3
+          while :; do
+            attempt=$(( attempt + 1 ))
 
-          CURRENT="$(yq -r '(.images[] | select(.name == "claw-code") | .newTag)' k8s/kustomization.yaml)"
-          echo "pinned now: ${CURRENT}   this build: ${IMAGE_TAG}"
-
-          if [ "$CURRENT" = "$IMAGE_TAG" ]; then
-            echo "already pinned to ${IMAGE_TAG} — nothing to do"
-            exit 0
-          fi
-
-          # Only compare when BOTH look like our scheme; otherwise a dispatch
-          # build of an arbitrary ref would be judged against a version string
-          # it has nothing to do with.
-          case "${CURRENT}::${IMAGE_TAG}" in
-            v*.*::v*.*)
-              NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$IMAGE_TAG" | sort -V | tail -1)"
-              if [ "$NEWEST" != "$IMAGE_TAG" ]; then
-                echo "::warning::main is pinned to ${CURRENT}, which is newer than this build (${IMAGE_TAG}) — refusing to move the pin backwards"
-                exit 0
+            if ! git pull --rebase origin main; then
+              git rebase --abort || true
+              if [ "$attempt" -lt "$attempts" ]; then
+                echo "could not rebase onto main (attempt ${attempt}/${attempts}) — retrying"
+                sleep 5
+                continue
               fi
-              ;;
-          esac
+                echo "::error::could not rebase onto main after ${attempts} attempts — the pin was NOT written, so the images this run built will not be deployed"
+                exit 1
+              fi
 
-          # BOTH images, one commit. They carry the same OPENCLAW_VERSION and
-          # share their scripts, so pinning one without the other would run a
-          # CronJob's planner from a different build than the agent it execs
-          # into — the kind of skew that shows up as a puzzling ImportError at
-          # 00:05 rather than as a failed deploy.
-          yq -i \
-            "(.images[] | select(.name == \"claw-code\") | .newTag) = \"${IMAGE_TAG}\" |
-             (.images[] | select(.name == \"claw-code-cron\") | .newTag) = \"${IMAGE_TAG}\"" \
-            k8s/kustomization.yaml
+            CURRENT="$(yq -r '(.images[] | select(.name == "claw-code") | .newTag)' k8s/kustomization.yaml)"
+            echo "pinned now: ${CURRENT}   this build: ${IMAGE_TAG}"
 
-          git add k8s/kustomization.yaml
-          if git diff --cached --quiet; then
-            echo "no kustomization tag change"
-            exit 0
-          fi
-          git commit -m "chore: pin claw-code images to ${IMAGE_TAG}"
-          # Another run may still have pushed between the rebase and here.
-          if ! git push; then
-            echo "::warning::push raced with another run — the next deploy reapplies the pin"
-            exit 0
-          fi
+            if [ "$CURRENT" = "$IMAGE_TAG" ]; then
+              echo "already pinned to ${IMAGE_TAG} — nothing to do"
+              exit 0
+            fi
+
+            # Only compare when BOTH look like our scheme; otherwise a dispatch
+            # build of an arbitrary ref would be judged against a version string
+            # it has nothing to do with.
+            case "${CURRENT}::${IMAGE_TAG}" in
+              v*.*::v*.*)
+                NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$IMAGE_TAG" | sort -V | tail -1)"
+                if [ "$NEWEST" != "$IMAGE_TAG" ]; then
+                  echo "::warning::main is pinned to ${CURRENT}, which is newer than this build (${IMAGE_TAG}) — refusing to move the pin backwards"
+                  exit 0
+                fi
+                ;;
+            esac
+
+            # BOTH images, one commit. They carry the same OPENCLAW_VERSION and
+            # share their scripts, so pinning one without the other would run a
+            # CronJob's planner from a different build than the agent it execs
+            # into — the kind of skew that shows up as a puzzling ImportError at
+            # 00:05 rather than as a failed deploy.
+            yq -i \
+              "(.images[] | select(.name == \"claw-code\") | .newTag) = \"${IMAGE_TAG}\" |
+               (.images[] | select(.name == \"claw-code-cron\") | .newTag) = \"${IMAGE_TAG}\"" \
+              k8s/kustomization.yaml
+
+            git add k8s/kustomization.yaml
+            if git diff --cached --quiet; then
+              echo "no kustomization tag change"
+              exit 0
+            fi
+            git commit -m "chore: pin claw-code images to ${IMAGE_TAG}"
+
+            if git push 2>"${RUNNER_TEMP}/push.err"; then
+              echo "pinned ${IMAGE_TAG} on main"
+              exit 0
+            fi
+            cat "${RUNNER_TEMP}/push.err"
+
+            # Another run pushed between the rebase and here: drop our commit,
+            # rebase onto what they wrote, and let the comparison above decide
+            # again — so a run that has become the older one steps aside
+            # instead of overwriting a newer pin.
+            if grep -qiE 'non-fast-forward|fetch first|tip of your current branch is behind' \
+                 "${RUNNER_TEMP}/push.err"; then
+              if [ "$attempt" -lt "$attempts" ]; then
+                echo "push raced with another run (attempt ${attempt}/${attempts}) — rebasing and retrying"
+                git reset --hard HEAD~1
+                sleep 5
+                continue
+              fi
+              echo "::error::push kept losing the race after ${attempts} attempts — the pin was NOT written"
+              exit 1
+            fi
+
+            echo "::error::push to main was REFUSED, and this is not a race — the pin was NOT written, so the images this run built will never be deployed. A branch-protection rule is the usual cause; see the git output above."
+            exit 1
+          done
 
   publish-secrets:
     name: Apply Secrets
