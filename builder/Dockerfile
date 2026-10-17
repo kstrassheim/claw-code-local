@@ -216,7 +216,7 @@ RUN apt-get update \
 # Invoked as `python3 -m pip`, not `pip`: Debian's packaging has moved which of
 # pip / pip3 / neither ends up on PATH more than once, and the module form is
 # the spelling that has always worked.
-ARG PYMONGO_VERSION=4.17.0
+ARG PYMONGO_VERSION=4.19.0
 USER root
 RUN set -eu; \
     apt-get update; \
