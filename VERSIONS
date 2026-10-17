@@ -15,7 +15,7 @@
 # Whatever this is set to must exist on GHCR with a linux/arm64 entry, since
 # the deploy mirrors it before building. A tag that exists on GitHub but not
 # on the registry fails the mirror step AFTER the version has been bumped.
-OPENCLAW_UPSTREAM=v2026.7.1-2
+OPENCLAW_UPSTREAM=v2026.10.4
 
 # Our build number on top of the upstream tag. The deploy skips the whole
 # build when this tag already exists in the registry, so it is effectively a
@@ -25,7 +25,7 @@ OPENCLAW_UPSTREAM=v2026.7.1-2
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.7.1-2.26
+OPENCLAW_VERSION=v2026.10.4.0
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
