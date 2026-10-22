@@ -15,6 +15,10 @@
 # Whatever this is set to must exist on GHCR with a linux/arm64 entry, since
 # the deploy mirrors it before building. A tag that exists on GitHub but not
 # on the registry fails the mirror step AFTER the version has been bumped.
+# Its layer count eats into the Dockerfile's layer budget: when this moves,
+# update BASE_LAYERS in builder/tests/test_dockerfile_layer_order.py, or a
+# daemon-loaded build fails late with `max depth exceeded` (v2026.10.4 went
+# from 26 to 41).
 OPENCLAW_UPSTREAM=v2026.10.4
 
 # Our build number on top of the upstream tag. The deploy skips the whole
@@ -25,7 +29,7 @@ OPENCLAW_UPSTREAM=v2026.10.4
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.10.4.2
+OPENCLAW_VERSION=v2026.10.4.3
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
