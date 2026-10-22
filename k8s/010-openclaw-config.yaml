@@ -171,8 +171,7 @@ data:
       "commands": {
         "native": "auto",
         "nativeSkills": "auto",
-        "restart": true,
-        "ownerDisplay": "raw"
+        "restart": true
       },
       "channels": {
         "telegram": {"enabled": true}
