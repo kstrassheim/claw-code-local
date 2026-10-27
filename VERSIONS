@@ -19,7 +19,7 @@
 # update BASE_LAYERS in builder/tests/test_dockerfile_layer_order.py, or a
 # daemon-loaded build fails late with `max depth exceeded` (v2026.10.4 went
 # from 26 to 41).
-OPENCLAW_UPSTREAM=v2026.10.4
+OPENCLAW_UPSTREAM=v2026.10.7
 
 # Our build number on top of the upstream tag. The deploy skips the whole
 # build when this tag already exists in the registry, so it is effectively a
@@ -29,7 +29,7 @@ OPENCLAW_UPSTREAM=v2026.10.4
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.10.4.4
+OPENCLAW_VERSION=v2026.10.7.0
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
@@ -37,29 +37,29 @@ OPENCLAW_VERSION=v2026.10.4.4
 # CDNs. Bump deliberately; verify the artifact URL exists for arm64
 # before pushing (the build pulls these from upstream CDNs at image
 # build time, so a wrong value 404s mid-build).
-GH_CLI_VERSION=2.102.0
-GITHUB_MCP_SERVER_VERSION=2.0.2
-GLAB_VERSION=1.123.0
+GH_CLI_VERSION=2.103.3
+GITHUB_MCP_SERVER_VERSION=2.0.3
+GLAB_VERSION=1.124.0
 GITLAB_MCP_VERSION=0.9.1
 # Gitea: the `tea` CLI and the official MCP server. Unlike the two lines
 # above, these are actually consumed — builder/Dockerfile declares an ARG
 # for each and installs them. Assets are published on gitea.com, arm64.
 TEA_VERSION=0.16.0
-GITEA_MCP_VERSION=1.9.0
+GITEA_MCP_VERSION=1.11.0
 # Azure DevOps: the official MCP server (npm) and the `azure-devops`
 # extension for the Azure CLI already in this image. The extension has
 # no independent pin — `az extension add` resolves against the installed
 # az, which is why only the MCP is listed here.
-AZDO_MCP_VERSION=2.10.0
-TERRAFORM_VERSION=1.16.6
-TERRAFORM_MCP_VERSION=1.3.0
+AZDO_MCP_VERSION=2.11.0
+TERRAFORM_VERSION=1.17.0
+TERRAFORM_MCP_VERSION=1.4.1
 # OpenTofu: the fork of Terraform under the Linux Foundation, and the registry
 # MCP that goes with it. Both are here rather than one replacing terraform:
 # a project's state and lockfile are written by whichever binary made them,
 # and the bot works on repositories that have chosen either.
-OPENTOFU_VERSION=1.13.1
+OPENTOFU_VERSION=1.13.2
 OPENTOFU_MCP_VERSION=0.1.5
-CODE_SERVER_VERSION=4.141.0
+CODE_SERVER_VERSION=4.143.1
 # mermaid-cli, the renderer behind `mermaid-render`. It drives a headless
 # browser, and puppeteer would fetch its OWN Chromium — the Dockerfile points
 # it at the system one instead (PUPPETEER_EXECUTABLE_PATH), so this pin must
@@ -70,9 +70,9 @@ CODE_SERVER_VERSION=4.141.0
 # and layouts mermaid-theme.json is measured against. Moving to 12 is a port
 # of mermaid-render, not a bump.
 MERMAID_CLI_VERSION=11.17.0
-AWS_CLI_VERSION=2.38.1
-GCLOUD_VERSION=589.0.0
-ALIYUN_CLI_VERSION=3.5.1
+AWS_CLI_VERSION=2.38.6
+GCLOUD_VERSION=590.0.1
+ALIYUN_CLI_VERSION=3.5.2
 
 # git-lfs. Target repositories keep large binary assets under LFS, and without
 # the client a clone hands the agent ~130-byte pointer files instead of the
@@ -83,7 +83,7 @@ ALIYUN_CLI_VERSION=3.5.1
 # Bump hazard: the release asset is named git-lfs-linux-<arch>-v<version>, and
 # the tarball unpacks into a git-lfs-<version>/ directory — both carry the
 # version, so a wrong value 404s and a renamed layout breaks the install path.
-GIT_LFS_VERSION=3.8.0
+GIT_LFS_VERSION=3.8.1
 
 # kubelogin — the Entra credential plugin kubectl execs when a kubeconfig comes
 # from `az aks get-credentials` against an Entra-integrated AKS cluster (see
@@ -91,7 +91,7 @@ GIT_LFS_VERSION=3.8.0
 # call dies with `exec: "kubelogin": executable file not found in $PATH`.
 # Bump hazard: the per-platform zip nests the binary under bin/linux_<arch>/,
 # so the unzip path has to keep matching that layout.
-KUBELOGIN_VERSION=0.2.21
+KUBELOGIN_VERSION=0.2.22
 
 # Code scanners behind mcp.servers.security + mcp.servers.semgrep — SAST,
 # dependency CVEs, secret detection and PowerShell lint for the reviewer.
@@ -101,7 +101,7 @@ KUBELOGIN_VERSION=0.2.21
 # wants mcp==1.12.2), so they can never resolve in one environment. They are
 # installed into two separate virtualenvs for that reason; bumping either one
 # alone is safe, merging the venvs is not.
-SEMGREP_VERSION=1.181.0
+SEMGREP_VERSION=1.182.1
 SEMGREP_MCP_VERSION=0.9.0
 BANDIT_VERSION=1.9.4
 PIP_AUDIT_VERSION=2.10.1
@@ -112,7 +112,7 @@ GITLEAKS_VERSION=8.30.1
 # PowerShell 7 + PSScriptAnalyzer. The pwsh tarball is
 # powershell-<version>-linux-arm64.tar.gz; the x86_64 asset is spelled
 # `linux-x64`, not `linux-amd64`, so an arch-substituted URL is not symmetric.
-PWSH_VERSION=7.6.7
+PWSH_VERSION=7.6.9
 PSSCRIPTANALYZER_VERSION=1.25.0
 
 # Azure data-platform tooling: PowerShell runbooks with Pester tests, and
@@ -143,7 +143,7 @@ NUCLEI_VERSION=3.11.1
 # performed. The build fails hard if the extracted tree holds no templates.
 # Bump hazard: this is the nuclei-templates repo's OWN version line (10.x),
 # unrelated to NUCLEI_VERSION above; they are bumped independently.
-NUCLEI_TEMPLATES_VERSION=10.5.0
+NUCLEI_TEMPLATES_VERSION=10.5.1
 # testssl.sh is a bash script, installed from the tag's source tarball.
 TESTSSL_VERSION=3.2.4
 
