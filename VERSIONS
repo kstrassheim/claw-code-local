@@ -29,7 +29,7 @@ OPENCLAW_UPSTREAM=v2026.10.7
 # workflow rewrites that pin AFTER the image is pushed and commits it, which
 # is the ordering that matters — a manifest naming an image that does not
 # exist yet leaves Argo CD pulling a missing tag for the length of the build.
-OPENCLAW_VERSION=v2026.10.7.0
+OPENCLAW_VERSION=v2026.10.7.1
 
 # Tools baked into the openclaw image.
 # All values mirror claw-code/VERSIONS (the Azure sibling) — known-working
@@ -39,6 +39,10 @@ OPENCLAW_VERSION=v2026.10.7.0
 # build time, so a wrong value 404s mid-build).
 GH_CLI_VERSION=2.103.3
 GITHUB_MCP_SERVER_VERSION=2.0.3
+# GitLab: the glab CLI and @yoda.digital/gitlab-mcp-server, the
+# `gitlab_local` MCP TOOLS-gitlab.md documents. Both talk to the GitLab in
+# GITLAB_URL with the bot's GITLAB_API_TOKEN (glab reads the same values as
+# GITLAB_HOST / GITLAB_TOKEN).
 GLAB_VERSION=1.124.0
 GITLAB_MCP_VERSION=0.9.1
 # Gitea: the `tea` CLI and the official MCP server. Unlike the two lines
@@ -120,12 +124,13 @@ PSSCRIPTANALYZER_VERSION=1.25.0
 # BEFORE it pushes. Only the four Az modules actually used are installed, not
 # the Az meta-module (several hundred MB of provider surface never touched).
 PESTER_VERSION=6.2.0
-# DOTNET_SDK_VERSION is a dotnet-install.sh CHANNEL, not an exact version — it
-# must match the major.minor a project's global.json pins (`rollForward:
-# latestFeature` on 8.0.x stays inside 8.0 and rejects a 10.0 SDK). Installed
-# by script rather than apt because packages.microsoft.com ships no
-# dotnet-sdk-8.0 for arm64 at all — an apt install fails outright.
-DOTNET_SDK_VERSION=8.0
+# DOTNET_SDK_VERSION is a dotnet-install.sh CHANNEL, not an exact version:
+# the script takes the newest patch of it. It must match the major.minor a
+# project's global.json pins (`rollForward: latestFeature` stays inside its
+# band), so 10.0 means a project the bot builds has to allow 10.0 there too.
+# 10.0 because .NET 8 leaves support on 2026-11-10. Installed by script rather
+# than apt because packages.microsoft.com ships no dotnet-sdk for arm64.
+DOTNET_SDK_VERSION=10.0
 # SqlPackage is a .NET global tool from nuget.org; the pin is the NuGet package
 # version of microsoft.sqlpackage and must be supported by the SDK channel
 # above.
