@@ -208,7 +208,7 @@ jobs:
           echo "PWSH_VERSION=${PWSH_VERSION}" >> "$GITHUB_ENV"
           echo "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}" >> "$GITHUB_ENV"
           echo "PESTER_VERSION=${PESTER_VERSION}" >> "$GITHUB_ENV"
-          echo "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}" >> "$GITHUB_ENV"
+          echo "DOTNET_SDK_CHANNELS=${DOTNET_SDK_CHANNELS}" >> "$GITHUB_ENV"
           echo "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}" >> "$GITHUB_ENV"
           echo "AZ_VERSION=${AZ_VERSION}" >> "$GITHUB_ENV"
           echo "NUCLEI_VERSION=${NUCLEI_VERSION}" >> "$GITHUB_ENV"
@@ -342,7 +342,7 @@ jobs:
             --build-arg "PWSH_VERSION=${PWSH_VERSION}" \
             --build-arg "PSSCRIPTANALYZER_VERSION=${PSSCRIPTANALYZER_VERSION}" \
             --build-arg "PESTER_VERSION=${PESTER_VERSION}" \
-            --build-arg "DOTNET_SDK_VERSION=${DOTNET_SDK_VERSION}" \
+            --build-arg "DOTNET_SDK_CHANNELS=${DOTNET_SDK_CHANNELS}" \
             --build-arg "SQLPACKAGE_VERSION=${SQLPACKAGE_VERSION}" \
             --build-arg "AZ_VERSION=${AZ_VERSION}" \
             --build-arg "NUCLEI_VERSION=${NUCLEI_VERSION}" \

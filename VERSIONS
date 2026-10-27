@@ -120,12 +120,16 @@ PSSCRIPTANALYZER_VERSION=1.25.0
 # BEFORE it pushes. Only the four Az modules actually used are installed, not
 # the Az meta-module (several hundred MB of provider surface never touched).
 PESTER_VERSION=6.2.0
-# DOTNET_SDK_VERSION is a dotnet-install.sh CHANNEL, not an exact version — it
-# must match the major.minor a project's global.json pins (`rollForward:
-# latestFeature` on 8.0.x stays inside 8.0 and rejects a 10.0 SDK). Installed
-# by script rather than apt because packages.microsoft.com ships no
-# dotnet-sdk-8.0 for arm64 at all — an apt install fails outright.
-DOTNET_SDK_VERSION=8.0
+# DOTNET_SDK_CHANNELS is a comma-separated list of dotnet-install.sh CHANNELS,
+# not exact versions, installed side by side. Each must match the major.minor a
+# project's global.json pins (`rollForward: latestFeature` on 8.0.x stays
+# inside 8.0 and rejects a 10.0 SDK), so the image carries every band the
+# projects it works on still use: 10.0 (current LTS) and 8.0 until it leaves
+# support on 2026-11-10. A project with no global.json gets the newest. Comma,
+# not space, so the value needs no quoting whichever way VERSIONS is read.
+# Installed by script rather than apt because packages.microsoft.com ships no
+# dotnet-sdk for arm64 at all — an apt install fails outright.
+DOTNET_SDK_CHANNELS=10.0,8.0
 # SqlPackage is a .NET global tool from nuget.org; the pin is the NuGet package
 # version of microsoft.sqlpackage and must be supported by the SDK channel
 # above.
