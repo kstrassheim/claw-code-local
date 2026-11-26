@@ -4,7 +4,7 @@
 
 GitOps deployment of [openclaw](https://github.com/openclaw/openclaw) as a
 single-tenant coding agent on a local Kubernetes cluster, talking to
-hosted LLM providers (Mistral primary, MiniMax optional) and driven
+hosted LLM providers (MiniMax M3.1 Flash primary, Kimi and Mistral optional) and driven
 over Telegram.
 
 The repository builds a custom openclaw image, ships the Kubernetes
@@ -188,8 +188,11 @@ GET /issues?filter=assigned     `kubectl exec openclaw-pod -- ls .fixer-locks/`
   (planner-checked on every tick) are ignored, so a crashed fixer
   doesn't permanently hold a repo.
 - **Coding agent**: same Node.js runtime as the chat bot, same
-  rendered `~/.openclaw/openclaw.json` (MiniMax M2.7 primary,
-  Mistral Large fallback), same MCP servers and skills.
+  rendered `~/.openclaw/openclaw.json` (MiniMax M3.1 Flash primary,
+  MiniMax M3 then Kimi K3 as chat fallbacks), same MCP servers and skills.
+  The primary is also the runners' baseline: render-config writes it to
+  `~/.openclaw/runner-model.default`, and every runner key nobody set with
+  `agent-models` runs on it, never on whatever the chat was switched to.
 
 The watcher CronJob, its service account, RBAC (the cron pod needs
 `pods/exec` on the openclaw deployment's pods), and the chat-skill
@@ -414,10 +417,21 @@ An unconfigured or unreachable store is a supported state: work continues and
 spools. Query it through the `planning` CLI or the `planning` chat skill —
 never directly.
 
-Story size lives in an `SP::<n>` label and nowhere else. Sizing runs on the
-cheap planning model one tick before implementation, so the solver can route
-small stories to a cheaper model; a story at the split ceiling is parked
-rather than started.
+Story size lives in an `SP::<n>` label and nowhere else. A repo's whole
+unsized backlog is estimated before it starts any NEW work: each tick the
+planner hands every unsized story (most urgent first, up to
+`HEARTBEAT_MAX_ESTIMATES_PER_TICK`, default 10) to one `estimate-batch` run,
+which sizes them one after another on the cheap planning model under a
+per-repo lock in `~/.openclaw/.estimate-locks/`. While a repo still has
+unsized stories, only work already in flight (in progress, or waiting on its
+reviewer) continues. The solver routes small stories to a cheaper model, and
+a story at the split ceiling is parked rather than started.
+
+A `model::<id>` label (or `ki::`, `llm::`, `ai::`) pins a story to one model,
+overriding every other choice; a bare `kimi`, `minimax` or `mistral` picks
+that provider's first configured model. **`minimax-flash`** always means
+MiniMax M3.1 Flash, and the bot creates it in a repo alongside its size
+labels so it can be applied. The bot never sets or clears a model pin.
 
 ## What a pull request must pass
 
@@ -475,8 +489,9 @@ The deploy workflow `kubectl apply`s every secret listed here as a
 
 | Name | Used for |
 |---|---|
-| `MISTRAL_API_KEY` | Required. Primary model + image-model provider. |
-| `MINIMAX_API_KEY` | Optional. Stripped at pod start if unset. |
+| `MINIMAX_API_KEY` | Primary model (MiniMax M3.1 Flash) + image-model provider. If unset, render-config demotes the primary to Kimi K3, then Mistral Large. |
+| `MOONSHOT_API_KEY` | Optional. Kimi K3, the chat fallback. Stripped at pod start if unset. |
+| `MISTRAL_API_KEY` | Optional. Stripped at pod start if unset. At least one of the three keys must be set. |
 | `TELEGRAM_BOT_TOKEN` | Telegram channel. Pair the bot with `openclaw pairing approve telegram <code>` after first start. |
 | `BOT_GITHUB_TOKEN` | Sealed as `GITHUB_TOKEN`; PAT the agent uses for git/gh operations. |
 | `GITLAB_TOKEN`, `GITLAB_LOCAL_TOKEN` | GitLab.com and self-hosted GitLab PATs. |

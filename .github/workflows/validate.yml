@@ -137,8 +137,8 @@ jobs:
             echo "::error::None of MOONSHOT_API_KEY, MINIMAX_API_KEY or MISTRAL_API_KEY is set. openclaw needs at least one."
             exit 1
           fi
-          if [ -z "$MOONSHOT_API_KEY" ]; then
-            echo "::warning::MOONSHOT_API_KEY is not set — the default model is unavailable and the render step will fall back."
+          if [ -z "$MINIMAX_API_KEY" ]; then
+            echo "::warning::MINIMAX_API_KEY is not set — the default model (MiniMax M3.1 Flash) is unavailable and the render step will fall back."
           fi
           echo "OK - at least one provider key is configured."
 
